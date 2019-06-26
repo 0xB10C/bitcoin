@@ -230,6 +230,7 @@ public:
     public:
         virtual ~Notifications() {}
         virtual void TransactionAddedToMempool(const CTransactionRef& tx) {}
+        virtual void TransactionAddedToMempoolWithSizeAndFee(const CTransactionRef& tx, const size_t nSize, const CAmount nFee) {}
         virtual void TransactionRemovedFromMempool(const CTransactionRef& ptx) {}
         virtual void BlockConnected(const CBlock& block, const std::vector<CTransactionRef>& tx_conflicted) {}
         virtual void BlockDisconnected(const CBlock& block) {}

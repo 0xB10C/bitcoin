@@ -20,3 +20,9 @@ bool CZMQAbstractNotifier::NotifyTransaction(const CTransaction &/*transaction*/
 {
     return true;
 }
+
+bool CZMQAbstractNotifier::NotifyTransactionWithSizeAndFee(const CTransaction &,  const size_t nSize, const CAmount nFee)
+{
+    return true;
+}
+

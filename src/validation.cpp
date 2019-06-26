@@ -502,7 +502,7 @@ static bool AcceptToMemoryPoolWorker(const CChainParams& chainparams, CTxMemPool
         }
     }
 
-    {
+    
         CCoinsView dummy;
         CCoinsViewCache view(&dummy);
 
@@ -816,8 +816,8 @@ static bool AcceptToMemoryPoolWorker(const CChainParams& chainparams, CTxMemPool
             if (!pool.exists(hash))
                 return state.Invalid(ValidationInvalidReason::TX_MEMPOOL_POLICY, false, REJECT_INSUFFICIENTFEE, "mempool full");
         }
-    }
 
+    GetMainSignals().TransactionAddedToMempoolWithSizeAndFee(ptx, entry.GetTxSize(), entry.GetFee());
     GetMainSignals().TransactionAddedToMempool(ptx);
 
     return true;

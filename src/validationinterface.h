@@ -92,6 +92,7 @@ protected:
      * Called on a background thread.
      */
     virtual void TransactionAddedToMempool(const CTransactionRef &ptxn) {}
+    virtual void TransactionAddedToMempoolWithSizeAndFee(const CTransactionRef &ptxn, const size_t nSize, const CAmount nFee) {}
     /**
      * Notifies listeners of a transaction leaving mempool.
      *
@@ -178,6 +179,7 @@ public:
 
     void UpdatedBlockTip(const CBlockIndex *, const CBlockIndex *, bool fInitialDownload);
     void TransactionAddedToMempool(const CTransactionRef &);
+    void TransactionAddedToMempoolWithSizeAndFee(const CTransactionRef &, const size_t nSize, const CAmount nFee);
     void BlockConnected(const std::shared_ptr<const CBlock> &, const CBlockIndex *pindex, const std::shared_ptr<const std::vector<CTransactionRef>> &);
     void BlockDisconnected(const std::shared_ptr<const CBlock> &);
     void ChainStateFlushed(const CBlockLocator &);

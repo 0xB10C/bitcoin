@@ -16,6 +16,7 @@ static const char *MSG_HASHBLOCK = "hashblock";
 static const char *MSG_HASHTX    = "hashtx";
 static const char *MSG_RAWBLOCK  = "rawblock";
 static const char *MSG_RAWTX     = "rawtx";
+static const char *MSG_RAWTX_2   = "rawtx2";
 
 // Internal function to send multipart message
 static int zmq_send_multipart(void *sock, const void* data, size_t size, ...)
@@ -205,4 +206,15 @@ bool CZMQPublishRawTransactionNotifier::NotifyTransaction(const CTransaction &tr
     CDataStream ss(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
     ss << transaction;
     return SendMessage(MSG_RAWTX, &(*ss.begin()), ss.size());
+}
+
+bool CZMQPublishRawTransactionNotifierWithSizeAndFee::NotifyTransactionWithSizeAndFee(const CTransaction &transaction, const size_t nSize, const CAmount nFee)
+{
+    uint256 hash = transaction.GetHash();
+    LogPrint(BCLog::ZMQ, "zmq: Publish rawtx 2 %s\n", hash.GetHex());
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
+    ss << transaction;
+    ss << nSize;
+    ss << nFee;
+    return SendMessage(MSG_RAWTX_2, &(*ss.begin()), ss.size());
 }

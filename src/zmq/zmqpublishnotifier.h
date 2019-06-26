@@ -52,4 +52,10 @@ public:
     bool NotifyTransaction(const CTransaction &transaction) override;
 };
 
+class CZMQPublishRawTransactionNotifierWithSizeAndFee : public CZMQAbstractPublishNotifier
+{
+public:
+    bool NotifyTransactionWithSizeAndFee(const CTransaction &transaction, const size_t nSize, const CAmount nFee) override;
+};
+
 #endif // BITCOIN_ZMQ_ZMQPUBLISHNOTIFIER_H
