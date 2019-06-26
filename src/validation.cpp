@@ -1039,7 +1039,10 @@ bool MemPoolAccept::AcceptSingleTransaction(const CTransactionRef& ptx, ATMPArgs
 
     if (!Finalize(args, workspace)) return false;
 
+    CAmount nFee = workspace.m_entry->GetFee();
+
     GetMainSignals().TransactionAddedToMempool(ptx);
+    GetMainSignals().TransactionAddedToMempoolWithFee(ptx, nFee);
 
     return true;
 }

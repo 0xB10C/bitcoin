@@ -46,6 +46,7 @@ CZMQNotificationInterface* CZMQNotificationInterface::Create()
     factories["pubhashtx"] = CZMQAbstractNotifier::Create<CZMQPublishHashTransactionNotifier>;
     factories["pubrawblock"] = CZMQAbstractNotifier::Create<CZMQPublishRawBlockNotifier>;
     factories["pubrawtx"] = CZMQAbstractNotifier::Create<CZMQPublishRawTransactionNotifier>;
+    factories["pubrawtxwithfee"] = CZMQAbstractNotifier::Create<CZMQPublishRawTransactionNotifierWithFee>;
 
     for (const auto& entry : factories)
     {
@@ -176,6 +177,28 @@ void CZMQNotificationInterface::TransactionAddedToMempool(const CTransactionRef&
         }
     }
 }
+
+void CZMQNotificationInterface::TransactionAddedToMempoolWithFee(const CTransactionRef& ptx, const CAmount nFee)
+{
+    // Used by BlockConnected and BlockDisconnected as well, because they're
+    // all the same external callback.
+    const CTransaction& tx = *ptx;
+
+    for (std::list<CZMQAbstractNotifier*>::iterator i = notifiers.begin(); i!=notifiers.end(); )
+    {
+        CZMQAbstractNotifier *notifier = *i;
+        if (notifier->NotifyTransactionWithFee(tx, nFee))
+        {
+            i++;
+        }
+        else
+        {
+            notifier->Shutdown();
+            i = notifiers.erase(i);
+        }
+    }
+}
+
 
 void CZMQNotificationInterface::BlockConnected(const std::shared_ptr<const CBlock>& pblock, const CBlockIndex* pindexConnected, const std::vector<CTransactionRef>& vtxConflicted)
 {
