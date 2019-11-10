@@ -211,7 +211,7 @@ bool CZMQPublishRawTransactionNotifier::NotifyTransaction(const CTransaction &tr
 bool CZMQPublishRawTransactionNotifierWithFee::NotifyTransactionWithFee(const CTransaction &transaction, const CAmount nFee)
 {
     uint256 hash = transaction.GetHash();
-    LogPrint(BCLog::ZMQ, "zmq: Publish rawtx 2 %s\n", hash.GetHex());
+    LogPrint(BCLog::ZMQ, "zmq: Publish rawtxwithfee %s\n", hash.GetHex());
     CDataStream ss(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
     ss << transaction;
     ss << nFee;
