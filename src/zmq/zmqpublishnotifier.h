@@ -52,4 +52,12 @@ public:
     bool NotifyTransaction(const CTransaction &transaction) override;
 };
 
+
+/* *** patched *** */
+class CZMQPublishRawBlockConnectedNotifier : public CZMQAbstractPublishNotifier
+{
+public:
+    bool NotifyBlockConnected(const CBlockIndex *pindex) override;
+};
+
 #endif // BITCOIN_ZMQ_ZMQPUBLISHNOTIFIER_H

@@ -43,6 +43,9 @@ public:
     virtual bool NotifyBlock(const CBlockIndex *pindex);
     virtual bool NotifyTransaction(const CTransaction &transaction);
 
+    /* *** patched *** */
+    virtual bool NotifyBlockConnected(const CBlockIndex *pindex);
+
 protected:
     void *psocket;
     std::string type;

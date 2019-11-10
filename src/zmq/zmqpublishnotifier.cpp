@@ -17,6 +17,9 @@ static const char *MSG_HASHTX    = "hashtx";
 static const char *MSG_RAWBLOCK  = "rawblock";
 static const char *MSG_RAWTX     = "rawtx";
 
+/* *** patched *** */
+static const char *MSG_RAWBLOCKCONNECTED = "rawblockconnected";
+
 // Internal function to send multipart message
 static int zmq_send_multipart(void *sock, const void* data, size_t size, ...)
 {
@@ -205,4 +208,28 @@ bool CZMQPublishRawTransactionNotifier::NotifyTransaction(const CTransaction &tr
     CDataStream ss(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
     ss << transaction;
     return SendMessage(MSG_RAWTX, &(*ss.begin()), ss.size());
+}
+
+
+/* *** patched *** */
+
+bool CZMQPublishRawBlockConnectedNotifier::NotifyBlockConnected(const CBlockIndex *pindex)
+{
+    LogPrint(BCLog::ZMQ, "zmq: Publish rawblockconnected %s\n", pindex->GetBlockHash().GetHex());
+
+    const Consensus::Params& consensusParams = Params().GetConsensus();
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION | RPCSerializationFlags());
+    {
+        LOCK(cs_main);
+        CBlock block;
+        if(!ReadBlockFromDisk(block, pindex, consensusParams))
+        {
+            zmqError("Can't read block from disk");
+            return false;
+        }
+
+        ss << block;
+    }
+
+    return SendMessage(MSG_RAWBLOCKCONNECTED, &(*ss.begin()), ss.size());
 }

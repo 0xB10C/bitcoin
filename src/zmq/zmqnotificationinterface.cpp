@@ -47,6 +47,9 @@ CZMQNotificationInterface* CZMQNotificationInterface::Create()
     factories["pubrawblock"] = CZMQAbstractNotifier::Create<CZMQPublishRawBlockNotifier>;
     factories["pubrawtx"] = CZMQAbstractNotifier::Create<CZMQPublishRawTransactionNotifier>;
 
+    /* *** patched *** */
+    factories["pubrawblockconnected"] = CZMQAbstractNotifier::Create<CZMQPublishRawBlockConnectedNotifier>;
+
     for (const auto& entry : factories)
     {
         std::string arg("-zmq" + entry.first);
@@ -179,9 +182,25 @@ void CZMQNotificationInterface::TransactionAddedToMempool(const CTransactionRef&
 
 void CZMQNotificationInterface::BlockConnected(const std::shared_ptr<const CBlock>& pblock, const CBlockIndex* pindexConnected, const std::vector<CTransactionRef>& vtxConflicted)
 {
+
     for (const CTransactionRef& ptx : pblock->vtx) {
         // Do a normal notify for each transaction added in the block
         TransactionAddedToMempool(ptx);
+    }
+
+    /* *** patched *** */
+    for (std::list<CZMQAbstractNotifier*>::iterator i = notifiers.begin(); i!=notifiers.end(); )
+    {
+        CZMQAbstractNotifier *notifier = *i;
+        if (notifier->NotifyBlockConnected(pindexConnected))
+        {
+            i++;
+        }
+        else
+        {
+            notifier->Shutdown();
+            i = notifiers.erase(i);
+        }
     }
 }
 

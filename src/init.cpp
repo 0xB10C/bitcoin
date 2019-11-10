@@ -460,6 +460,10 @@ void SetupServerArgs()
     gArgs.AddArg("-zmqpubhashtxhwm=<n>", strprintf("Set publish hash transaction outbound message high water mark (default: %d)", CZMQAbstractNotifier::DEFAULT_ZMQ_SNDHWM), ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
     gArgs.AddArg("-zmqpubrawblockhwm=<n>", strprintf("Set publish raw block outbound message high water mark (default: %d)", CZMQAbstractNotifier::DEFAULT_ZMQ_SNDHWM), ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
     gArgs.AddArg("-zmqpubrawtxhwm=<n>", strprintf("Set publish raw transaction outbound message high water mark (default: %d)", CZMQAbstractNotifier::DEFAULT_ZMQ_SNDHWM), ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
+
+    /* *** patched *** */
+    gArgs.AddArg("-zmqpubrawblockconnected=<address>", "Enable publish raw block connected in <address>", ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
+    gArgs.AddArg("-zmqpubrawblockconnectedhwm=<n>", strprintf("Set publish raw block connected outbound message high water mark (default: %d)", CZMQAbstractNotifier::DEFAULT_ZMQ_SNDHWM), ArgsManager::ALLOW_ANY, OptionsCategory::ZMQ);
 #else
     hidden_args.emplace_back("-zmqpubhashblock=<address>");
     hidden_args.emplace_back("-zmqpubhashtx=<address>");
@@ -469,6 +473,10 @@ void SetupServerArgs()
     hidden_args.emplace_back("-zmqpubhashtxhwm=<n>");
     hidden_args.emplace_back("-zmqpubrawblockhwm=<n>");
     hidden_args.emplace_back("-zmqpubrawtxhwm=<n>");
+
+    /* *** patched *** */
+    hidden_args.emplace_back("-zmqpubrawblockconnected=<address>");
+    hidden_args.emplace_back("-zmqpubrawblockconnectedhwm=<n>");
 #endif
 
     gArgs.AddArg("-checkblocks=<n>", strprintf("How many blocks to check at startup (default: %u, 0 = all)", DEFAULT_CHECKBLOCKS), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
