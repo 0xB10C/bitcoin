@@ -46,6 +46,8 @@
 #include <validationinterface.h>
 #include <warnings.h>
 
+#include <zmce/zmqmempoolchainevent.h>
+
 #include <future>
 #include <sstream>
 #include <string>
@@ -2360,6 +2362,8 @@ void static UpdateTip(const CBlockIndex* pindexNew, const CChainParams& chainPar
 {
     // New best block
     mempool.AddTransactionsUpdated(1);
+
+    CZMQMempoolChainEvent::NewBlockHash(pindexNew->GetBlockHash());
 
     {
         LOCK(g_best_block_mutex);
