@@ -7,6 +7,9 @@
 
 #include <zmq/zmqabstractnotifier.h>
 
+typedef std::vector<unsigned char> zmq_message_part;
+typedef std::vector<zmq_message_part> zmq_message;
+
 class CBlockIndex;
 
 class CZMQAbstractPublishNotifier : public CZMQAbstractNotifier
@@ -23,6 +26,13 @@ public:
           * message sequence number
     */
     bool SendMessage(const char *command, const void* data, size_t size);
+
+    /* sends a zmq multipart message with the following parts:
+        * command (aka ZMQ topic)
+        * payload (zero, one or multiple payload parts)
+        * message sequence number
+    */
+    bool SendMessage(const char *command, const std::vector<zmq_message_part>& payload);
 
     bool Initialize(void *pcontext) override;
     void Shutdown() override;

@@ -60,6 +60,35 @@ static int zmq_send_multipart(void *sock, const void* data, size_t size, ...)
     return 0;
 }
 
+static int zmq_send_multipart(void *sock, const zmq_message& message)
+{
+    for (size_t i = 0; i < message.size(); i++) {
+        auto const& part = message[i];
+        zmq_msg_t msg;
+
+        int rc = zmq_msg_init_size(&msg, part.size());
+        if (rc != 0) {
+            zmqError("Unable to initialize ZMQ msg");
+            return -1;
+        }
+
+        void* buf = zmq_msg_data(&msg);
+        std::memcpy(buf, part.data(), part.size());
+
+        rc = zmq_msg_send(&msg, sock, (i < (message.size() - 1)) ? ZMQ_SNDMORE : 0);
+        if (rc == -1) {
+            zmqError("Unable to send ZMQ msg");
+            zmq_msg_close(&msg);
+            return -1;
+        }
+
+        zmq_msg_close(&msg);
+    }
+
+    LogPrint(BCLog::ZMQ, "sent message with %d parts\n", message.size());
+    return 0;
+}
+
 bool CZMQAbstractPublishNotifier::Initialize(void *pcontext)
 {
     assert(!psocket);
@@ -153,6 +182,42 @@ bool CZMQAbstractPublishNotifier::SendMessage(const char *command, const void* d
         return false;
 
     /* increment memory only sequence number after sending */
+    nSequence++;
+
+    return true;
+}
+
+
+bool CZMQAbstractPublishNotifier::SendMessage(const char *command, const std::vector<zmq_message_part>& payload)
+{
+    assert(psocket);
+
+    /* 
+      create message from multiple parts:
+       - first part is the command (or topic)
+       - followed by one or multiple payload parts
+       - ended by a LE 4 byte sequence number 
+    */
+    std::vector<zmq_message_part> message = {};
+
+    // push topic
+    message.push_back(zmq_message_part(command, command + strlen(command)));
+
+    // push payload
+    for (size_t i = 0; i < payload.size(); i++)
+        message.push_back(payload[i]);
+    
+    // push little endian sequence number
+    unsigned char sequenceLE[sizeof(uint32_t)];
+    WriteLE32(&sequenceLE[0], nSequence);
+    message.push_back(zmq_message_part(sequenceLE, sequenceLE + sizeof(uint32_t)));
+
+
+    int rc = zmq_send_multipart(psocket, message);
+    if (rc == -1)
+        return false;
+
+    // increment memory only sequence number after sending
     nSequence++;
 
     return true;
