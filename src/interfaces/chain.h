@@ -18,12 +18,16 @@ class CBlock;
 class CFeeRate;
 class CRPCCommand;
 class CScheduler;
+class CValidationState;
+class CBlockIndex;
 class Coin;
 class uint256;
 enum class RBFTransactionState;
 struct CBlockLocator;
 struct FeeCalculation;
 struct NodeContext;
+
+enum class MemPoolRemovalReason;
 
 namespace interfaces {
 
@@ -226,6 +230,12 @@ public:
         virtual void blockDisconnected(const CBlock& block, int height) {}
         virtual void updatedBlockTip() {}
         virtual void chainStateFlushed(const CBlockLocator& locator) {}
+
+        // ZMCE patch:
+        virtual void transactionAddedToMempoolWithFee(const CTransactionRef& tx, const CAmount fee) {}
+        virtual void transactionRemovedFromMempoolWithReason(const CTransactionRef& ptx, const MemPoolRemovalReason reason) {}
+        virtual void transactionReplacedInMempool(const CTransactionRef& replaced, const CAmount replaced_tx_fee, const CTransactionRef& replacment, const CAmount replacment_tx_fee) {}
+        virtual void headerAddedToChain() {}
     };
 
     //! Register handler for notifications.

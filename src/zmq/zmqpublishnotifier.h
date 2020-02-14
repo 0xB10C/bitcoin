@@ -62,4 +62,46 @@ public:
     bool NotifyTransaction(const CTransaction &transaction) override;
 };
 
+class CZMQPublishMempolAddedNotifier : public CZMQAbstractPublishNotifier
+{
+public:
+    bool NotifyMempoolTransactionAdded(const CTransaction &transaction, const CAmount fee) override;
+};
+
+class CZMQPublishMempoolRemovedNotifier : public CZMQAbstractPublishNotifier
+{
+public:
+    bool NotifyMempoolTransactionRemoved(const CTransaction &transaction, const MemPoolRemovalReason reason) override;
+};
+
+class CZMQPublishChainConnectedNotifier : public CZMQAbstractPublishNotifier
+{
+public:
+    bool NotifyChainBlockConnected(const CBlockIndex *pindex) override;
+};
+
+class CZMQPublishMempolReplacedNotifier : public CZMQAbstractPublishNotifier
+{
+public:
+    bool NotifyMempoolTransactionReplaced(const CTransaction& replaced, const CAmount replaced_tx_fee, const CTransaction& replacement, const CAmount replacement_tx_fee) override;
+};
+
+class CZMQPublishMempoolConfirmedNotifier : public CZMQAbstractPublishNotifier
+{
+public:
+    bool NotifyMempoolTransactionConfirmed(const CTransaction &transaction, const CBlockIndex *pindex) override;
+};
+
+class CZMQPublishChainTipChangedNotifier : public CZMQAbstractPublishNotifier
+{
+public:
+    bool NotifyChainTipChanged(const CBlockIndex *pindex) override;
+};
+
+class CZMQPublishChainHeaderAddedNotifier : public CZMQAbstractPublishNotifier
+{
+public:
+    bool NotifyChainHeaderAdded(const CBlockIndex *pindexHeader) override;
+};
+
 #endif // BITCOIN_ZMQ_ZMQPUBLISHNOTIFIER_H
