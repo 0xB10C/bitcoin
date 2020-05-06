@@ -1032,7 +1032,8 @@ bool MemPoolAccept::AcceptSingleTransaction(const CTransactionRef& ptx, ATMPArgs
 
     GetMainSignals().TransactionAddedToMempool(ptx);
 
-    GetMainSignals().TransactionAddedToMempoolWithFee(ptx, workspace.m_entry->GetFee());
+    if (::mempool.IsLoaded()) 
+        GetMainSignals().TransactionAddedToMempoolWithFee(ptx, workspace.m_entry->GetFee());
     
     return true;
 }
