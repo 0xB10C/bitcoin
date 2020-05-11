@@ -201,3 +201,11 @@ ZMQ multipart message structure
 - `prev hash` is the previous block hash
 - `block` is a serialized Bitcoin block
 - `sequence` is an `uint32` in Little Endian
+
+### change: increase default ZMQ high water mark
+
+The previous default of 1.000 did (correctly) drop messages when, for
+example, broadcasting many mempoolconfirmed or mempoolremoved messages.
+
+The high water mark is increased to 100.000. No more messages should
+be dropped.

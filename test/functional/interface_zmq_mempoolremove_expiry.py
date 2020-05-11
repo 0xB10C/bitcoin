@@ -56,7 +56,7 @@ class ZMQTest (BitcoinTestFramework):
         self.log.info(
             "Testing the getzmqnotifications RPC for mempoolremoved")
         assert_equal(node.getzmqnotifications(), [
-                        {"type": "pubmempoolremoved", "address": address, "hwm": 1000}])
+                        {"type": "pubmempoolremoved", "address": address, "hwm": 100000}])
 
         self.log.info("Testing removal reason EXPIRY")
         DEFAULT_MEMPOOL_EXPIRY = 336

@@ -70,7 +70,7 @@ class ZMQTest (BitcoinTestFramework):
         assert_equal(int(node.getmempoolentry(txid)["fee"] * COIN), r_fee)
 
         self.log.info("Test the getzmqnotifications RPC for mempooladded")
-        assert_equal(node.getzmqnotifications(), [{"type": "pubmempooladded", "address": address, "hwm": 1000}])
+        assert_equal(node.getzmqnotifications(), [{"type": "pubmempooladded", "address": address, "hwm": 100000}])
 
 
 if __name__ == '__main__':
