@@ -45,6 +45,7 @@
 #include <util/rbf.h>
 #include <util/strencodings.h>
 #include <util/system.h>
+#include <util/trace.h>
 #include <util/translation.h>
 #include <validationinterface.h>
 #include <warnings.h>
@@ -2184,6 +2185,7 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     int64_t nTime6 = GetTimeMicros(); nTimeCallbacks += nTime6 - nTime5;
     LogPrint(BCLog::BENCH, "    - Callbacks: %.2fms [%.2fs (%.2fms/blk)]\n", MILLI * (nTime6 - nTime5), nTimeCallbacks * MICRO, nTimeCallbacks * MILLI / nBlocksTotal);
 
+    TRACE2(validation, connected_block, pindex->nHeight, block.GetHash().data());
     return true;
 }
 
