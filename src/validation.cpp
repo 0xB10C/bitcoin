@@ -2185,7 +2185,10 @@ bool CChainState::ConnectBlock(const CBlock& block, BlockValidationState& state,
     int64_t nTime6 = GetTimeMicros(); nTimeCallbacks += nTime6 - nTime5;
     LogPrint(BCLog::BENCH, "    - Callbacks: %.2fms [%.2fs (%.2fms/blk)]\n", MILLI * (nTime6 - nTime5), nTimeCallbacks * MICRO, nTimeCallbacks * MILLI / nBlocksTotal);
 
-    TRACE2(validation, connected_block, pindex->nHeight, block.GetHash().data());
+    CDataStream ss(SER_NETWORK, PROTOCOL_VERSION );
+    ss << block;
+    std::string blockStr = ss.str();
+    TRACE3(validation, connected_block, pindex->nHeight, blockStr.length(), blockStr.data());
     return true;
 }
 
