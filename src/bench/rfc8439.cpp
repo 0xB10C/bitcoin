@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <bench/bench.h>
 #include <crypto/rfc8439.h>
+#include <span.h>
 
 #include <array>
 #include <cstddef>
