@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <crypto/rfc8439.h>
+#include <span.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
 #include <test/fuzz/util.h>
@@ -39,7 +40,7 @@ FUZZ_TARGET(crypto_rfc8439)
     }
 
     std::vector<std::byte> decrypted_plaintext(plaintext.size(), std::byte{0x00});
-    auto authenticated = RFC8439Decrypt(aad, key, nonce, output, decrypted_plaintext);
+    auto authenticated = RFC8439Decrypt(MakeByteSpan(aad), key, nonce, output, decrypted_plaintext);
     if (bit_flip_attack) {
         assert(!authenticated);
     } else {
