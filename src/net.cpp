@@ -24,6 +24,7 @@
 #include <util/sock.h>
 #include <util/strencodings.h>
 #include <util/thread.h>
+#include <util/trace.h>
 #include <util/translation.h>
 
 #ifdef WIN32
@@ -2959,7 +2960,18 @@ bool CConnman::NodeFullyConnected(const CNode* pnode)
 void CConnman::PushMessage(CNode* pnode, CSerializedNetMsg&& msg)
 {
     size_t nMessageSize = msg.data.size();
-    LogPrint(BCLog::NET, "sending %s (%d bytes) peer=%d\n",  SanitizeString(msg.m_type), nMessageSize, pnode->GetId());
+    auto sanitizedType = SanitizeString(msg.m_type);
+
+    LogPrint(BCLog::NET, "sending %s (%d bytes) peer=%d\n",  sanitizedType, nMessageSize, pnode->GetId());
+    TRACE6(net, outbound_message,
+        pnode->GetId(),
+        pnode->GetAddrName().c_str(),
+        pnode->ConnectionTypeAsString().c_str(),
+        sanitizedType.c_str(),
+        msg.data.size(),
+        msg.data.data()
+    );
+
     if (gArgs.GetBoolArg("-capturemessages", false)) {
         CaptureMessage(pnode->addr, msg.m_type, msg.data, /* incoming */ false);
     }
