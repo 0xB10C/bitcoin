@@ -9,6 +9,7 @@
 #include <logging.h>
 #include <netaddress.h>
 #include <serialize.h>
+#include <util/trace.h>
 
 #include <cmath>
 #include <optional>
@@ -228,6 +229,16 @@ void CAddrMan::MakeTried(CAddrInfo& info, int nId)
     vvTried[nKBucket][nKBucketPos] = nId;
     nTried++;
     info.fInTried = true;
+
+    TRACE7(addrman, new_to_tried,
+        nId,
+        info.ToString().c_str(),
+        info.source.ToString().c_str(),
+        nKBucket,
+        nKBucketPos,
+        info.nTime,
+        info.source.GetGroup(m_asmap).data()
+    );
 }
 
 void CAddrMan::Good_(const CService& addr, bool test_before_evict, int64_t nTime)
@@ -370,6 +381,17 @@ bool CAddrMan::Add_(const CAddress& addr, const CNetAddr& source, int64_t nTimeP
             }
         }
     }
+
+    TRACE7(addrman, add_to_new,
+        nId,
+        addr.ToString().c_str(),
+        source.ToString().c_str(),
+        nUBucket,
+        nUBucketPos,
+        addr.nTime,
+        source.GetGroup(m_asmap).data()
+    );
+
     return fNew;
 }
 

@@ -18,6 +18,7 @@
 #include <timedata.h>
 #include <tinyformat.h>
 #include <util/system.h>
+#include <util/trace.h>
 
 #include <iostream>
 #include <optional>
@@ -381,6 +382,17 @@ public:
                 mapInfo[nIdCount] = info;
                 mapAddr[info] = nIdCount;
                 vvTried[nKBucket][nKBucketPos] = nIdCount;
+
+                TRACE7(addrman, restore_to_tried,
+                  nIdCount,
+                  info.ToString().c_str(),
+                  info.source.ToString().c_str(),
+                  nKBucket,
+                  nKBucketPos,
+                  info.nTime,
+                  info.source.GetGroup(m_asmap).data()
+                );
+
                 nIdCount++;
             } else {
                 nLost++;
@@ -441,6 +453,17 @@ public:
                 // Bucketing has not changed, using existing bucket positions for the new table
                 vvNew[bucket][bucket_position] = entry_index;
                 ++info.nRefCount;
+
+                TRACE7(addrman, restore_to_new,
+                    entry_index, // id
+                    info.ToString().c_str(),
+                    info.source.ToString().c_str(),
+                    bucket,
+                    bucket_position,
+                    info.nTime,
+                    info.source.GetGroup(m_asmap).data()
+                );
+
             } else {
                 // In case the new table data cannot be used (bucket count wrong or new asmap),
                 // try to give them a reference based on their primary source address.
