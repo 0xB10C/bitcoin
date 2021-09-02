@@ -549,6 +549,17 @@ void CAddrMan::MakeTried(CAddrInfo& info, int nId)
     vvTried[nKBucket][nKBucketPos] = nId;
     nTried++;
     info.fInTried = true;
+
+    TRACE8(addrman, new_to_tried,
+        (int)nId,
+        info.ToString().c_str(),
+        info.source.ToString().c_str(),
+        (int)nKBucket,
+        (int)nKBucketPos,
+        (uint32_t)info.nTime,
+        (uint64_t)info.nServices,
+        info.source.GetGroup(m_asmap).data()
+    );
 }
 
 void CAddrMan::Good_(const CService& addr, bool test_before_evict, int64_t nTime)
@@ -691,6 +702,18 @@ bool CAddrMan::Add_(const CAddress& addr, const CNetAddr& source, int64_t nTimeP
             }
         }
     }
+
+    TRACE8(addrman, add_to_new,
+        (int)nId,
+        addr.ToString().c_str(),
+        source.ToString().c_str(),
+        (int)nUBucket,
+        (int)nUBucketPos,
+        (uint32_t)addr.nTime,
+        (uint64_t)info.nServices,
+        source.GetGroup(m_asmap).data()
+    );
+
     return fNew;
 }
 
