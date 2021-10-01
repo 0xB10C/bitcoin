@@ -2,17 +2,24 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <compat/endian.h>
 #include <crypto/bip324_suite.h>
+#include <crypto/rfc8439.h>
 #include <key.h>
 #include <net.h>
 #include <netmessagemaker.h>
+#include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
 
 #include <cassert>
 
 FUZZ_TARGET(p2p_v2_transport_serialization)
 {
-    // use keys with all zeros
+    FuzzedDataProvider fdp{buffer.data(), buffer.size()};
+
+    // Picking constant keys seems to give us higher fuzz test coverage
+    // The BIP324 Cipher suite is separately fuzzed, so we don't have to
+    // pick fuzzed keys here.
     BIP324Key key_l, key_p, rekey_salt;
     memset(key_l.data(), 1, BIP324_KEY_LEN);
     memset(key_p.data(), 2, BIP324_KEY_LEN);
@@ -21,9 +28,21 @@ FUZZ_TARGET(p2p_v2_transport_serialization)
     // Construct deserializer, with a dummy NodeId
     V2TransportDeserializer deserializer{(NodeId)0, key_l, key_p, rekey_salt};
     V2TransportSerializer serializer{key_l, key_p, rekey_salt};
+    FSChaCha20 fsc20{key_l, rekey_salt, REKEY_INTERVAL};
 
-    while (buffer.size() > 0) {
-        const int handled = deserializer.Read(buffer);
+    bool length_assist = fdp.ConsumeBool();
+    auto payload_bytes = fdp.ConsumeRemainingBytes<uint8_t>();
+
+    if (length_assist && payload_bytes.size() >= V2_MIN_MESSAGE_LENGTH) {
+        uint32_t packet_len = payload_bytes.size() - BIP324_LENGTH_FIELD_LEN - RFC8439_TAGLEN;
+        packet_len = htole32(packet_len);
+        fsc20.Crypt({reinterpret_cast<std::byte*>(&packet_len), BIP324_LENGTH_FIELD_LEN},
+                    {reinterpret_cast<std::byte*>(payload_bytes.data()), BIP324_LENGTH_FIELD_LEN});
+    }
+
+    Span<const uint8_t> msg_bytes{payload_bytes};
+    while (msg_bytes.size() > 0) {
+        const int handled = deserializer.Read(msg_bytes);
         if (handled < 0) {
             break;
         }
