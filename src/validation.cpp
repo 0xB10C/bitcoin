@@ -3494,7 +3494,7 @@ bool ChainstateManager::AcceptBlockHeader(const CBlockHeader& block, BlockValida
 }
 
 // Exposed wrapper for AcceptBlockHeader
-bool ChainstateManager::ProcessNewBlockHeaders(const std::vector<CBlockHeader>& headers, BlockValidationState& state, const CChainParams& chainparams, const CBlockIndex** ppindex)
+bool ChainstateManager::ProcessNewBlockHeaders(const std::vector<CBlockHeader>& headers, BlockValidationState& state, const CChainParams& chainparams, const CBlockIndex** ppindex, const CBlockHeader** failheader)
 {
     AssertLockNotHeld(cs_main);
     {
@@ -3505,6 +3505,7 @@ bool ChainstateManager::ProcessNewBlockHeaders(const std::vector<CBlockHeader>& 
             ActiveChainstate().CheckBlockIndex();
 
             if (!accepted) {
+                if (failheader != nullptr) *failheader = &header;
                 return false;
             }
             if (ppindex) {
