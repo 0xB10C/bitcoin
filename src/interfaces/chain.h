@@ -268,7 +268,7 @@ public:
     {
     public:
         virtual ~Notifications() {}
-        virtual void transactionAddedToMempool(const CTransactionRef& tx) {}
+        virtual void transactionAddedToMempool(const CTransactionRef& tx, const CAmount fee) {}
         virtual void transactionRemovedFromMempool(const CTransactionRef& tx, MemPoolRemovalReason reason) {}
         virtual void blockConnected(const BlockInfo& block) {}
         virtual void blockDisconnected(const BlockInfo& block) {}

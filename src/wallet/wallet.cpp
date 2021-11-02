@@ -1380,7 +1380,7 @@ void CWallet::SyncTransaction(const CTransactionRef& ptx, const SyncTxState& sta
     MarkInputsDirty(ptx);
 }
 
-void CWallet::transactionAddedToMempool(const CTransactionRef& tx) {
+void CWallet::transactionAddedToMempool(const CTransactionRef& tx, const CAmount fee) {
     LOCK(cs_wallet);
     SyncTransaction(tx, TxStateInMempool{});
 

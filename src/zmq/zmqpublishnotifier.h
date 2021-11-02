@@ -56,6 +56,12 @@ public:
     bool NotifyTransaction(const CTransaction &transaction) override;
 };
 
+class CZMQPublishRawTransactionWithFeeNotifier : public CZMQAbstractPublishNotifier
+{
+public:
+    bool NotifyTransactionWithFee(const CTransaction &transaction, const CAmount fee) override;
+};
+
 class CZMQPublishSequenceNotifier : public CZMQAbstractPublishNotifier
 {
 public:
