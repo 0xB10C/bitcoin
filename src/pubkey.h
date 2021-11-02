@@ -12,6 +12,7 @@
 #include <span.h>
 #include <uint256.h>
 
+#include <array>
 #include <cstring>
 #include <optional>
 #include <vector>
@@ -28,6 +29,9 @@ public:
 };
 
 typedef uint256 ChainCode;
+
+constexpr size_t ELLSWIFT_ENCODED_SIZE = 64;
+using EllSwiftPubKey = std::array<uint8_t, ELLSWIFT_ENCODED_SIZE>;
 
 /** An encapsulated public key. */
 class CPubKey
