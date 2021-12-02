@@ -30,6 +30,7 @@
              (gnu packages shells)
              (gnu packages tls)
              (gnu packages version-control)
+             (guix build-system copy)
              (guix build-system font)
              (guix build-system gnu)
              (guix build-system python)
@@ -597,6 +598,24 @@ inspecting signatures in Mach-O binaries.")
   (package-with-extra-patches glibc-2.27
     (search-our-patches "glibc-2.27-riscv64-Use-__has_include__-to-include-asm-syscalls.h.patch")))
 
+(define-public sys-std-h
+  (package
+    (name "sys-sdt-h")
+    (version "4.6")
+    (source (origin
+              (method url-fetch)
+              (uri (string-append "https://sourceware.org/systemtap/ftp/releases/systemtap-" version
+                                  ".tar.gz"))
+              (sha256
+               (base32
+                "1bps2926x9m8mp2684wwwwjm4yb12mpylbnvnffk889b4c4p7yw0"))))
+    (build-system copy-build-system)
+    (arguments '(#:install-plan ("includes/sys/sdt.h" "includes/sys/sdt.h"))
+    (description "Systemtap sys/sdt.h header file for Userspace, Statically Defined Tracing support.")
+    (home-page "https://sourceware.org/systemtap/")
+    (license license:gpl2)))
+
+
 (packages->manifest
  (append
   (list ;; The Basics
@@ -638,6 +657,8 @@ inspecting signatures in Mach-O binaries.")
         ;; Native gcc 7 toolchain
         gcc-toolchain-7
         (list gcc-toolchain-7 "static"))
+        ;; Tracing
+        sys-std-h
   (let ((target (getenv "HOST")))
     (cond ((string-suffix? "-mingw32" target)
            ;; Windows
