@@ -610,7 +610,7 @@ inspecting signatures in Mach-O binaries.")
                (base32
                 "1bps2926x9m8mp2684wwwwjm4yb12mpylbnvnffk889b4c4p7yw0"))))
     (build-system copy-build-system)
-    (arguments '(#:install-plan ("includes/sys/sdt.h" "includes/sys/sdt.h"))
+    (arguments (#:install-plan ("includes/sys/sdt.h" "includes/sys/sdt.h"))
     (description "Systemtap sys/sdt.h header file for Userspace, Statically Defined Tracing support.")
     (home-page "https://sourceware.org/systemtap/")
     (license license:gpl2))))
