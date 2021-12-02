@@ -610,10 +610,13 @@ inspecting signatures in Mach-O binaries.")
                (base32
                 "1bps2926x9m8mp2684wwwwjm4yb12mpylbnvnffk889b4c4p7yw0"))))
     (build-system copy-build-system)
-    (arguments (#:install-plan ("includes/sys/sdt.h" "includes/sys/sdt.h"))
+    (arguments
+      '(#:install-plan
+        '(("includes/sys/sdt.h" "includes/sys/sdt.h"))))
+    (synopsis "Systemtap header files defining tracing probe marcos")
     (description "Systemtap sys/sdt.h header file for Userspace, Statically Defined Tracing support.")
     (home-page "https://sourceware.org/systemtap/")
-    (license license:gpl2))))
+    (license license:gpl2)))
 
 
 (packages->manifest
@@ -656,9 +659,9 @@ inspecting signatures in Mach-O binaries.")
         lief
         ;; Native gcc 7 toolchain
         gcc-toolchain-7
-        (list gcc-toolchain-7 "static"))
+        (list gcc-toolchain-7 "static")
         ;; Tracing
-        sys-std-h
+        sys-std-h)
   (let ((target (getenv "HOST")))
     (cond ((string-suffix? "-mingw32" target)
            ;; Windows
