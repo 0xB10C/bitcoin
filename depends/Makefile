@@ -40,6 +40,7 @@ NO_WALLET ?=
 NO_ZMQ ?=
 NO_UPNP ?=
 NO_NATPMP ?=
+NO_EBPF ?=
 MULTIPROCESS ?=
 FALLBACK_DOWNLOAD_PATH ?= https://bitcoincore.org/depends-sources
 
@@ -152,6 +153,7 @@ upnp_packages_$(NO_UPNP) = $(upnp_packages)
 natpmp_packages_$(NO_NATPMP) = $(natpmp_packages)
 
 zmq_packages_$(NO_ZMQ) = $(zmq_packages)
+systemtap_packages_$(NO_EBPF) = $(systemtap_packages)
 multiprocess_packages_$(MULTIPROCESS) = $(multiprocess_packages)
 
 packages += $($(host_arch)_$(host_os)_packages) $($(host_os)_packages) $(qt_packages_) $(wallet_packages_) $(upnp_packages_) $(natpmp_packages_)
@@ -228,6 +230,7 @@ $(host_prefix)/share/config.site : config.site.in $(host_prefix)/.stamp_$(final_
             -e 's|@no_qt@|$(NO_QT)|' \
             -e 's|@no_qr@|$(NO_QR)|' \
             -e 's|@no_zmq@|$(NO_ZMQ)|' \
+            -e 's|@no_ebpf@|$(NO_EBPF)|' \
             -e 's|@no_wallet@|$(NO_WALLET)|' \
             -e 's|@no_bdb@|$(NO_BDB)|' \
             -e 's|@no_sqlite@|$(NO_SQLITE)|' \

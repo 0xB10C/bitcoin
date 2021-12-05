@@ -1,4 +1,4 @@
-packages:=boost libevent
+packages:=systemtap boost libevent
 
 qrencode_packages = qrencode
 
@@ -12,6 +12,8 @@ bdb_packages=bdb
 sqlite_packages=sqlite
 
 zmq_packages=zeromq
+
+systemtap_package=systemtap
 
 upnp_packages=miniupnpc
 natpmp_packages=libnatpmp

@@ -70,6 +70,10 @@ if test -z "$enable_zmq" && test -n "@no_zmq@"; then
   enable_zmq=no
 fi
 
+if test -z "$enable_ebpf" && test -n "@no_ebpf@"; then
+  enable_ebpf=no
+fi
+
 if test "@host_os@" = darwin; then
   BREW=no
 fi
