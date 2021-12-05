@@ -13,6 +13,8 @@ sqlite_packages=sqlite
 
 zmq_packages=zeromq
 
+usdt_packages=systemtap
+
 upnp_packages=miniupnpc
 natpmp_packages=libnatpmp
 

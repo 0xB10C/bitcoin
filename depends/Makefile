@@ -40,6 +40,7 @@ NO_WALLET ?=
 NO_ZMQ ?=
 NO_UPNP ?=
 NO_NATPMP ?=
+NO_USDT ?=
 MULTIPROCESS ?=
 FALLBACK_DOWNLOAD_PATH ?= https://bitcoincore.org/depends-sources
 
@@ -152,6 +153,7 @@ upnp_packages_$(NO_UPNP) = $(upnp_packages)
 natpmp_packages_$(NO_NATPMP) = $(natpmp_packages)
 
 zmq_packages_$(NO_ZMQ) = $(zmq_packages)
+usdt_packages_$(NO_USDT) = $(usdt_packages)
 multiprocess_packages_$(MULTIPROCESS) = $(multiprocess_packages)
 
 packages += $($(host_arch)_$(host_os)_packages) $($(host_os)_packages) $(qt_packages_) $(wallet_packages_) $(upnp_packages_) $(natpmp_packages_)
@@ -161,9 +163,13 @@ ifneq ($(zmq_packages_),)
 packages += $(zmq_packages)
 endif
 
+ifneq ($(usdt_packages_),)
+packages += $(usdt_packages)
+endif
+
 ifeq ($(multiprocess_packages_),)
-packages += $(multiprocess_packages)
-native_packages += $(multiprocess_native_packages)
+	packages += $(multiprocess_packages)
+	native_packages += $(multiprocess_native_packages)
 endif
 
 all_packages = $(packages) $(native_packages)
@@ -212,23 +218,24 @@ $(host_prefix)/.stamp_$(final_build_id): $(native_packages) $(packages)
 $(host_prefix)/share/config.site : config.site.in $(host_prefix)/.stamp_$(final_build_id)
 	$(AT)@mkdir -p $(@D)
 	$(AT)sed -e 's|@HOST@|$(host)|' \
-            -e 's|@CC@|$(host_CC)|' \
-            -e 's|@CXX@|$(host_CXX)|' \
-            -e 's|@AR@|$(host_AR)|' \
-            -e 's|@RANLIB@|$(host_RANLIB)|' \
-            -e 's|@NM@|$(host_NM)|' \
-            -e 's|@STRIP@|$(host_STRIP)|' \
-            -e 's|@build_os@|$(build_os)|' \
-            -e 's|@host_os@|$(host_os)|' \
-            -e 's|@CFLAGS@|$(strip $(host_CFLAGS) $(host_$(release_type)_CFLAGS))|' \
-            -e 's|@CXXFLAGS@|$(strip $(host_CXXFLAGS) $(host_$(release_type)_CXXFLAGS))|' \
-            -e 's|@CPPFLAGS@|$(strip $(host_CPPFLAGS) $(host_$(release_type)_CPPFLAGS))|' \
-            -e 's|@LDFLAGS@|$(strip $(host_LDFLAGS) $(host_$(release_type)_LDFLAGS))|' \
-            -e 's|@allow_host_packages@|$(ALLOW_HOST_PACKAGES)|' \
-            -e 's|@no_qt@|$(NO_QT)|' \
-            -e 's|@no_qr@|$(NO_QR)|' \
-            -e 's|@no_zmq@|$(NO_ZMQ)|' \
-            -e 's|@no_wallet@|$(NO_WALLET)|' \
+		-e 's|@CC@|$(host_CC)|' \
+		-e 's|@CXX@|$(host_CXX)|' \
+		-e 's|@AR@|$(host_AR)|' \
+		-e 's|@RANLIB@|$(host_RANLIB)|' \
+		-e 's|@NM@|$(host_NM)|' \
+		-e 's|@STRIP@|$(host_STRIP)|' \
+		-e 's|@build_os@|$(build_os)|' \
+		-e 's|@host_os@|$(host_os)|' \
+		-e 's|@CFLAGS@|$(strip $(host_CFLAGS) $(host_$(release_type)_CFLAGS))|' \
+		-e 's|@CXXFLAGS@|$(strip $(host_CXXFLAGS) $(host_$(release_type)_CXXFLAGS))|' \
+		-e 's|@CPPFLAGS@|$(strip $(host_CPPFLAGS) $(host_$(release_type)_CPPFLAGS))|' \
+		-e 's|@LDFLAGS@|$(strip $(host_LDFLAGS) $(host_$(release_type)_LDFLAGS))|' \
+		-e 's|@allow_host_packages@|$(ALLOW_HOST_PACKAGES)|' \
+		-e 's|@no_qt@|$(NO_QT)|' \
+		-e 's|@no_qr@|$(NO_QR)|' \
+		-e 's|@no_zmq@|$(NO_ZMQ)|' \
+		-e 's|@no_usdtf@|$(NO_EBPF)|' \
+      		-e 's|@no_wallet@|$(NO_WALLET)|' \
             -e 's|@no_bdb@|$(NO_BDB)|' \
             -e 's|@no_sqlite@|$(NO_SQLITE)|' \
             -e 's|@no_upnp@|$(NO_UPNP)|' \
