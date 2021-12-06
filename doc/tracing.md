@@ -116,12 +116,12 @@ Is called *after* the caches are flushed depending on the mode
 `CChainState::FlushStateToDisk` is called with.
 
 Arguments passed:
-1. Duration in microseconds as `int64`
+1. Time it took to flush the cache microseconds as `int64`
 2. Flush state mode as `uint32`. It's an enumerator class with values `0`
    (`NONE`), `1` (`IF_NEEDED`), `2` (`PERIODIC`), `3` (`ALWAYS`)
-3. Number of coins flushed as `uint64`
-4. Memory usage in bytes as `uint64`
-5. If the flush was pruned as `bool`
+3. Cache size (number of coins) before the flush as `uint64`
+4. Cache memory usage in bytes as `uint64`
+5. If pruning caused the flush as `bool`
 
 #### Tracepoint `utxocache:add`
 
