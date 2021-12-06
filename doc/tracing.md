@@ -121,7 +121,7 @@ Arguments passed:
    (`NONE`), `1` (`IF_NEEDED`), `2` (`PERIODIC`), `3` (`ALWAYS`)
 3. Number of coins flushed as `uint64`
 4. Memory usage in bytes as `uint64`
-5. If the flush was pruned as `bool`
+5. If pruning caused the flush as `bool`
 
 #### Tracepoint `utxocache:add`
 
