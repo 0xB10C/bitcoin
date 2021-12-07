@@ -3,10 +3,10 @@ Author: 0xb10c <0xb10c@gmail.com>
 Date:   Tue Dec 7 10:07:27 2021 +0100
 
     Remove _SDT_ASM_SECTION_AUTOGROUP_SUPPORT check
-
+    
     We assume that the assembler supports "?" in .pushsection directives.
     This enables us to skip configure and make.
-
+    
     See https://github.com/bitcoin/bitcoin/issues/23297.
 
 diff --git a/includes/sys/sdt.h b/includes/sys/sdt.h
@@ -26,6 +26,6 @@ index 9ecb1cb6f..fa5a807a6 100644
 -#else
 -# define _SDT_ASM_AUTOGROUP ""
 -#endif
-
+ 
  #define _SDT_DEF_MACROS							     \
- 	_SDT_ASM_1(.altmacro)
+ 	_SDT_ASM_1(.altmacro)						     \
