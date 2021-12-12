@@ -112,7 +112,7 @@ Arguments passed:
 
 #### Tracepoint `utxocache:flush`
 
-Is called *after* the caches and indexes are flushed depending on the mode
+Is called *after* the caches are flushed depending on the mode
 `CChainState::FlushStateToDisk` is called with.
 
 Arguments passed:
