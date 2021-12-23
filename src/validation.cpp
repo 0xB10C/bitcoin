@@ -3853,6 +3853,7 @@ void BlockManager::FindFilesToPrune(std::set<int>& setFilesToPrune, uint64_t nPr
     int count = 0;
 
     if (nCurrentUsage + nBuffer >= nPruneTarget) {
+        LogPrint(BCLog::PRUNE, "Prune usage+buffer>=target: usage=%dMiB buffer=%dMiB target=%dMiB\n", nCurrentUsage/1024/1024, nBuffer/1024/1024, nPruneTarget/1024/1024);
         // On a prune event, the chainstate DB is flushed.
         // To avoid excessive prune events negating the benefit of high dbcache
         // values, we should not prune too rapidly.
@@ -3860,6 +3861,7 @@ void BlockManager::FindFilesToPrune(std::set<int>& setFilesToPrune, uint64_t nPr
         if (is_ibd) {
             // Since this is only relevant during IBD, we use a fixed 10%
             nBuffer += nPruneTarget / 10;
+            LogPrint(BCLog::PRUNE, "Prune during IDB: target=%dMiB buffer=%dMiB\n", nPruneTarget/1024/1024, nBuffer/1024/1024);
         }
 
         for (int fileNumber = 0; fileNumber < nLastBlockFile; fileNumber++) {
@@ -3869,14 +3871,19 @@ void BlockManager::FindFilesToPrune(std::set<int>& setFilesToPrune, uint64_t nPr
                 continue;
             }
 
+            LogPrint(BCLog::PRUNE, "Prune check: usage=%dMiB buffer=%dMiB target=%dMiB\n", nCurrentUsage/1024/1024, nBuffer/1024/1024, nPruneTarget/1024/1024);
+
             if (nCurrentUsage + nBuffer < nPruneTarget) { // are we below our target?
                 break;
             }
+
 
             // don't prune files that could have a block within MIN_BLOCKS_TO_KEEP of the main chain's tip but keep scanning
             if (vinfoBlockFile[fileNumber].nHeightLast > nLastBlockWeCanPrune) {
                 continue;
             }
+
+            LogPrint(BCLog::PRUNE, "Pruning: file=%d usage=%dMiB buffer=%dMiB target=%dMiB\n", fileNumber, nCurrentUsage/1024/1024, nBuffer/1024/1024, nPruneTarget/1024/1024);
 
             PruneOneBlockFile(fileNumber);
             // Queue up the files for removal
