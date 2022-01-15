@@ -190,6 +190,8 @@ void BlockManager::FindFilesToPrune(std::set<int>& setFilesToPrune, uint64_t nPr
            nPruneTarget/1024/1024, nCurrentUsage/1024/1024,
            ((int64_t)nPruneTarget - (int64_t)nCurrentUsage)/1024/1024,
            nLastBlockWeCanPrune, count);
+    LogPrint(BCLog::PRUNE, "### buffer=%dMiB target_sync_height=%d chain_tip_height=%d remaining_blocks=%d\n",
+           nBuffer/1024/1024, target_sync_height, chain_tip_height, target_sync_height - chain_tip_height);
 }
 
 CBlockIndex* BlockManager::InsertBlockIndex(const uint256& hash)
