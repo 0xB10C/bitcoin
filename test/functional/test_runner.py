@@ -92,6 +92,7 @@ BASE_SCRIPTS = [
     'wallet_backup.py --legacy-wallet',
     'wallet_backup.py --descriptors',
     # vv Tests less than 5m vv
+    'feature_usdt.py', #TODO:
     'mining_getblocktemplate_longpoll.py',
     'feature_maxuploadtarget.py',
     'feature_block.py',
