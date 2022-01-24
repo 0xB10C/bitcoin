@@ -72,21 +72,10 @@ task:
     << : *CIRRUS_EPHEMERAL_WORKER_TEMPLATE_ENV
 
 task:
-  name: '[TSan, depends, gui] [jammy]'
+  name: '[usdt tests]'
   << : *GLOBAL_TASK_TEMPLATE
   container:
     image: ubuntu:jammy
-    cpu: 6  # Increase CPU and Memory to avoid timeout
-    memory: 24G
   env:
     << : *CIRRUS_EPHEMERAL_WORKER_TEMPLATE_ENV
-    FILE_ENV: "./ci/test/00_setup_env_native_tsan.sh"
-
-task:
-  name: '[no wallet] [bionic]'
-  << : *GLOBAL_TASK_TEMPLATE
-  container:
-    image: ubuntu:bionic
-  env:
-    << : *CIRRUS_EPHEMERAL_WORKER_TEMPLATE_ENV
-    FILE_ENV: "./ci/test/00_setup_env_native_nowallet.sh"
+    FILE_ENV: "./ci/test/00_setup_env_native_usdt.sh"
