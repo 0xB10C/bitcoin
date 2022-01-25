@@ -103,6 +103,10 @@ class TracepointTest(BitcoinTestFramework):
         self.setup_clean_chain = False
         self.num_nodes = 2
 
+    def skip_test_if_missing_module(self):
+        self.skip_if_no_python_bcc()
+        self.skip_if_no_bitcoind_tracepoints()
+
     def run_test(self):
 
         check_inbound = False

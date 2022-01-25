@@ -831,7 +831,7 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
 
     def skip_if_no_bitcoind_tracepoints(self):
         """Skip the running test if bitcoind has not been compiled with USDT tracepoint support."""
-        if not self.are_tracepoints_compiled():
+        if not self.is_usdt_compiled():
             raise SkipTest("bitcoind has not been built with USDT tracepoints enabled.")
 
     def skip_if_no_bitcoind_zmq(self):
@@ -917,7 +917,7 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
 
     def is_usdt_compiled(self):
         """Checks whether the USDT tracepoints were compiled."""
-        return self.config["components"].getboolean("ENABLE_USDT")
+        return self.config["components"].getboolean("ENABLE_USDT_TRACEPOINTS")
 
     def is_sqlite_compiled(self):
         """Checks whether the wallet module was compiled with Sqlite support."""
