@@ -25,10 +25,9 @@ echo "BLA"
 apt update
 apt install wget
 kernel_version=v"$(uname -r | sed -E 's/\+*$//')"
-wget "https://chromium.googlesource.com/chromiumos/third_party/kernel/+archive/$kernel_version.tar.gz"
+wget -q "https://chromium.googlesource.com/chromiumos/third_party/kernel/+archive/$kernel_version.tar.gz"
 tar xzf "$kernel_version.tar.gz" -C ${KERNEL_HEADERS_DIR}
 echo "COS headers in $KERNEL_HEADERS_DIR/kernel"
-echo "BCC_KERNEL_SOURCE=$KERNEL_HEADERS_DIR/kernel" >> /tmp/env
 
 export ASAN_OPTIONS="detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1"
 export LSAN_OPTIONS="suppressions=${BASE_ROOT_DIR}/test/sanitizer_suppressions/lsan"
@@ -38,6 +37,9 @@ env | grep -E '^(BITCOIN_CONFIG|BASE_|QEMU_|CCACHE_|LC_ALL|BOOST_TEST_RANDOM|DEB
 if [[ $BITCOIN_CONFIG = *--with-sanitizers=*address* ]]; then # If ran with (ASan + LSan), Docker needs access to ptrace (https://github.com/google/sanitizers/issues/764)
   DOCKER_ADMIN="--cap-add SYS_PTRACE"
 fi
+
+# FIXME:
+echo "BCC_KERNEL_SOURCE=$KERNEL_HEADERS_DIR/kernel" >> /tmp/env
 
 export P_CI_DIR="$PWD"
 
