@@ -6,9 +6,6 @@
 
 export LC_ALL=C.UTF-8
 
-cat /opt/google/chrome/resources/about_os_credits.html
-exit 1
-
 if [[ $QEMU_USER_CMD == qemu-s390* ]]; then
   export LC_ALL=C
 fi
@@ -22,6 +19,16 @@ fi
 # Create folders that are mounted into the docker
 mkdir -p "${CCACHE_DIR}"
 mkdir -p "${PREVIOUS_RELEASES_DIR}"
+mkdir -p "${KERNEL_HEADERS_DIR}"
+
+echo "BLA"
+apt update
+apt install wget
+kernel_version=v"$(uname -r | sed -E 's/\+*$//')"
+wget "https://chromium.googlesource.com/chromiumos/third_party/kernel/+archive/$kernel_version.tar.gz"
+tar xzf "$kernel_version.tar.gz" -C ${KERNEL_HEADERS_DIR}
+echo "COS headers in $KERNEL_HEADERS_DIR/kernel"
+echo "BCC_KERNEL_SOURCE=$KERNEL_HEADERS_DIR/kernel" >> /tmp/env
 
 export ASAN_OPTIONS="detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1"
 export LSAN_OPTIONS="suppressions=${BASE_ROOT_DIR}/test/sanitizer_suppressions/lsan"
@@ -49,9 +56,7 @@ if [ -z "$DANGER_RUN_CI_ON_HOST" ]; then
                   --mount type=bind,src=$CCACHE_DIR,dst=$CCACHE_DIR \
                   --mount type=bind,src=$DEPENDS_DIR,dst=$DEPENDS_DIR \
                   --mount type=bind,src=$PREVIOUS_RELEASES_DIR,dst=$PREVIOUS_RELEASES_DIR \
-                  -v /lib/modules:/lib/modules:ro \
-                  -v /usr/src:/usr/src:ro \
-                  -v /etc/localtime:/etc/localtime:ro \
+                  --mount type=bind,src=$KERNEL_HEADERS_DIR,dst=$KERNEL_HEADERS_DIR \
                   -w $BASE_ROOT_DIR \
                   --env-file /tmp/env \
                   --name $CONTAINER_NAME \
