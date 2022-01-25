@@ -6,12 +6,8 @@
 
 export LC_ALL=C.UTF-8
 
-echo "running uname -a:"
-uname -a
-echo "Header for our kernel"
-apt search linux-headers-$(uname -r)
-echo "All headers:"
-apt search linux-headers-*
+cat /opt/google/chrome/resources/about_os_credits.html
+exit 1
 
 if [[ $QEMU_USER_CMD == qemu-s390* ]]; then
   export LC_ALL=C
