@@ -12,6 +12,8 @@
 from test_framework.test_framework import BitcoinTestFramework
 from bcc import BPF, USDT
 
+import os
+
 # BCC: The C program to be compiled to an eBPF program (by BCC) and loaded into
 # a sandboxed Linux kernel VM.
 program = """
@@ -112,11 +114,13 @@ class TracepointTest(BitcoinTestFramework):
         check_inbound = False
         check_outbound = False
 
-        self.log.info("Node crashed - now verifying restart fails")
+        self.log.info("environment:", os.environ)
+        os.environ["BCC_KERNEL_SOURCE"] = "/tmp/cirrus-ci-build/kernel_headers/x86_64-pc-linux-gnu/"
+
         ctx = USDT(path=str(self.options.bitcoind))
         ctx.enable_probe(probe="inbound_message", fn_name="trace_inbound_message")
         ctx.enable_probe(probe="outbound_message", fn_name="trace_outbound_message")
-        bpf = BPF(text=program, usdt_contexts=[ctx])
+        bpf = BPF(text=program, usdt_contexts=[ctx], debug=0xFF)
 
         def print_message(event, inbound):
             print(f"%s %s msg '%s' from peer %d (%s, %s) with %d bytes: %s" %
