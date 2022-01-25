@@ -96,28 +96,6 @@ int trace_outbound_message(struct pt_regs *ctx) {
 # - TODO: check if bcc is avaliable
 # - TODO: check if we have CAP_BPF
 
-def print_message(event, inbound):
-    print(f"%s %s msg '%s' from peer %d (%s, %s) with %d bytes: %s" %
-          (
-              f"Warning: incomplete message (only %d out of %d bytes)!" % (
-                  len(event.msg), event.msg_size) if len(event.msg) < event.msg_size else "",
-              "inbound" if inbound else "outbound",
-              event.msg_type.decode("utf-8"),
-              event.peer_id,
-              event.peer_conn_type.decode("utf-8"),
-              event.peer_addr.decode("utf-8"),
-              event.msg_size,
-              bytes(event.msg[:event.msg_size]).hex(),
-          )
-          )
-
-def handle_inbound(_, data, size):
-    event = bpf["inbound_messages"].event(data)
-    print_message(event, True)
-
-def handle_outbound(_, data, size):
-    event = bpf["outbound_messages"].event(data)
-    print_message(event, False)
 
 
 class TracepointTest(BitcoinTestFramework):
@@ -127,17 +105,43 @@ class TracepointTest(BitcoinTestFramework):
 
     def run_test(self):
 
-        p2p_test_complete = False
+        check_inbound = False
+        check_outbound = False
 
         self.log.info("Node crashed - now verifying restart fails")
         ctx = USDT(path=str(self.options.bitcoind))
         ctx.enable_probe(probe="inbound_message", fn_name="trace_inbound_message")
         ctx.enable_probe(probe="outbound_message", fn_name="trace_outbound_message")
         bpf = BPF(text=program, usdt_contexts=[ctx])
+
+        def print_message(event, inbound):
+            print(f"%s %s msg '%s' from peer %d (%s, %s) with %d bytes: %s" %
+                (
+                f"Warning: incomplete message (only %d out of %d bytes)!" % (len(event.msg), event.msg_size) if len(event.msg) < event.msg_size else "",
+                "inbound" if inbound else "outbound",
+                event.msg_type.decode("utf-8"),
+                event.peer_id,
+                event.peer_conn_type.decode("utf-8"),
+                event.peer_addr.decode("utf-8"),
+                event.msg_size,
+                bytes(event.msg[:event.msg_size]).hex(),
+                )
+            )
+
+        def handle_inbound(_, data, size):
+            event = bpf["inbound_messages"].event(data)
+            print_message(event, True)
+            check_inbound = True
+
+        def handle_outbound(_, data, size):
+            event = bpf["outbound_messages"].event(data)
+            print_message(event, False)
+            check_outbound = True
+
         bpf["inbound_messages"].open_perf_buffer(handle_inbound)
         bpf["outbound_messages"].open_perf_buffer(handle_outbound)
 
-        while not p2p_test_complete:
+        while not (check_inbound and check_outbound):
             bpf.perf_buffer_poll()
 
 if __name__ == '__main__':
