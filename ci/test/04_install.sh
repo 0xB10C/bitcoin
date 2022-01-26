@@ -21,14 +21,6 @@ mkdir -p "${CCACHE_DIR}"
 mkdir -p "${PREVIOUS_RELEASES_DIR}"
 mkdir -p "${KERNEL_HEADERS_DIR}"
 
-echo "BLA"
-apt update
-apt install wget
-kernel_version=v"$(uname -r | sed -E 's/\+*$//')"
-wget -q "https://chromium.googlesource.com/chromiumos/third_party/kernel/+archive/$kernel_version.tar.gz"
-tar xzf "$kernel_version.tar.gz" -C ${KERNEL_HEADERS_DIR}
-echo "COS headers in $KERNEL_HEADERS_DIR/kernel"
-
 export ASAN_OPTIONS="detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1"
 export LSAN_OPTIONS="suppressions=${BASE_ROOT_DIR}/test/sanitizer_suppressions/lsan"
 export TSAN_OPTIONS="suppressions=${BASE_ROOT_DIR}/test/sanitizer_suppressions/tsan:halt_on_error=1:log_path=${BASE_SCRATCH_DIR}/sanitizer-output/tsan"
@@ -37,9 +29,6 @@ env | grep -E '^(BITCOIN_CONFIG|BASE_|QEMU_|CCACHE_|LC_ALL|BOOST_TEST_RANDOM|DEB
 if [[ $BITCOIN_CONFIG = *--with-sanitizers=*address* ]]; then # If ran with (ASan + LSan), Docker needs access to ptrace (https://github.com/google/sanitizers/issues/764)
   DOCKER_ADMIN="--cap-add SYS_PTRACE"
 fi
-
-# FIXME:
-echo "BCC_KERNEL_SOURCE=$KERNEL_HEADERS_DIR/kernel" >> /tmp/env
 
 export P_CI_DIR="$PWD"
 
@@ -139,4 +128,26 @@ if [ "$USE_BUSY_BOX" = "true" ]; then
   DOCKER_EXEC for util in \$\(busybox --list \| grep -v "^ar$" \| grep -v "^tar$" \| grep -v "^find$"\)\; do ln -s \$\(command -v busybox\) "${BASE_SCRATCH_DIR}/bins/\$util"\; done
   # Print BusyBox version
   DOCKER_EXEC patch --help
+fi
+
+
+# TODO: only if we want to run tracepoint tests
+# TODO: check that we are on COS
+if [[ ${CIRRUS_CI} == "true" ]]; then
+  echo "Setting up kernel headers on 'Container Optimized System'"
+
+  apt install -y flex bison libssl-dev bc libelf-dev
+
+  kernel_version=v"$(uname -r | sed -E 's/\+*$//')"
+  echo "Fetching COS kernel sources for version $kernel_version."
+  time curl -s "https://chromium.googlesource.com/chromiumos/third_party/kernel/+archive/$kernel_version.tar.gz" \
+    | tar -xzf - -C "${KERNEL_HEADERS_DIR}"
+
+  echo "Generating kernel headers"
+
+  zcat /proc/config.gz > "${KERNEL_HEADERS_DIR}/.config"
+  time make -C "${KERNEL_HEADERS_DIR}" ARCH=x86 oldconfig > /dev/null
+  time make -C "${KERNEL_HEADERS_DIR}" ARCH=x86 prepare > /dev/null
+
+  echo "Kernel headers generated"
 fi
