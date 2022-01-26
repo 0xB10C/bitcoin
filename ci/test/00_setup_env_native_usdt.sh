@@ -13,3 +13,5 @@ export DEP_OPTS="NO_WALLET=1 CC=clang CXX='clang++ -stdlib=libc++'"
 export GOAL="install"
 export BITCOIN_CONFIG="--enable-reduce-exports CC=clang CXX='clang++ -stdlib=libc++'"
 export TEST_RUNNER_ENV="BCC_KERNEL_SOURCE=$KERNEL_HEADERS_DIR/kernel"
+
+export RUN_UNIT_TESTS="false"
