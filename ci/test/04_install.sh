@@ -150,4 +150,6 @@ if [[ ${CIRRUS_CI} == "true" ]]; then
   time make -C "${KERNEL_HEADERS_DIR}" ARCH=x86 prepare > /dev/null
 
   echo "Kernel headers generated"
+
+  DOCKER_ADMIN="--cap-add BPF" 
 fi
