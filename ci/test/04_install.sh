@@ -151,5 +151,5 @@ if [[ ${CIRRUS_CI} == "true" ]]; then
 
   echo "Kernel headers generated"
 
-  DOCKER_ADMIN="--cap-add BPF" 
+  DOCKER_ADMIN="--cap-add BPF --cap-add PERFMON --cap-add SYS_ADMIN --cap-add SYS_PTRACE"
 fi
