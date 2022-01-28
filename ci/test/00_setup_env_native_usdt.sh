@@ -14,4 +14,6 @@ export GOAL="install"
 export BITCOIN_CONFIG="--enable-reduce-exports CC=clang CXX='clang++ -stdlib=libc++'"
 export TEST_RUNNER_ENV="BCC_KERNEL_SOURCE=$KERNEL_HEADERS_DIR/kernel"
 
+export RUN_FUNCTIONAL_USDT_TESTS="true"
+export RUN_FUNCTIONAL_TESTS="false"
 export RUN_UNIT_TESTS="false"
