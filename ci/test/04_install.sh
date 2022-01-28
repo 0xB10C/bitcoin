@@ -30,6 +30,8 @@ if [[ $BITCOIN_CONFIG = *--with-sanitizers=*address* ]]; then # If ran with (ASa
   DOCKER_ADMIN="--cap-add SYS_PTRACE"
 fi
 
+DOCKER_ADMIN="--cap-add BPF --add-cap PERFMON --add-cap SYS_ADMIN"
+
 export P_CI_DIR="$PWD"
 
 if [ -z "$DANGER_RUN_CI_ON_HOST" ]; then
@@ -42,7 +44,7 @@ if [ -z "$DANGER_RUN_CI_ON_HOST" ]; then
   fi
 
   # shellcheck disable=SC2086
-  DOCKER_ID=$(docker run $DOCKER_ADMIN --rm --interactive --detach --tty \
+  DOCKER_ID=$(docker run $DOCKER_ADMIN --privileged --cap-add CAP_SYS_ADMIN --rm --interactive --detach --tty \
                   --mount type=bind,src=$BASE_ROOT_DIR,dst=/ro_base,readonly \
                   --mount type=bind,src=$CCACHE_DIR,dst=$CCACHE_DIR \
                   --mount type=bind,src=$DEPENDS_DIR,dst=$DEPENDS_DIR \
@@ -151,5 +153,5 @@ if [[ ${CIRRUS_CI} == "true" ]]; then
 
   echo "Kernel headers generated"
 
-  DOCKER_ADMIN="--cap-add=BPF --cap-add=PERFMON"
+  DOCKER_ADMIN="--cap-add=cap_sys_admin"
 fi
