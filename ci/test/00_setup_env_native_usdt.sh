@@ -15,3 +15,5 @@ export BITCOIN_CONFIG="--enable-reduce-exports CC=clang CXX='clang++ -stdlib=lib
 
 export RUN_FUNCTIONAL_TESTS="false"
 export RUN_UNIT_TESTS="false"
+
+export RUN_FUNCTIONAL_USDT_TESTS="true"
