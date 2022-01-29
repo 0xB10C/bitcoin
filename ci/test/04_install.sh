@@ -19,6 +19,7 @@ fi
 # Create folders that are mounted into the docker
 mkdir -p "${CCACHE_DIR}"
 mkdir -p "${PREVIOUS_RELEASES_DIR}"
+mkdir -p "${KERNEL_HEADERS_DIR}"
 
 export ASAN_OPTIONS="detect_stack_use_after_return=1:check_initialization_order=1:strict_init_order=1"
 export LSAN_OPTIONS="suppressions=${BASE_ROOT_DIR}/test/sanitizer_suppressions/lsan"
@@ -28,6 +29,8 @@ env | grep -E '^(BITCOIN_CONFIG|BASE_|QEMU_|CCACHE_|LC_ALL|BOOST_TEST_RANDOM|DEB
 if [[ $BITCOIN_CONFIG = *--with-sanitizers=*address* ]]; then # If ran with (ASan + LSan), Docker needs access to ptrace (https://github.com/google/sanitizers/issues/764)
   DOCKER_ADMIN="--cap-add SYS_PTRACE"
 fi
+
+DOCKER_ADMIN="--cap-add BPF --add-cap PERFMON --add-cap SYS_ADMIN"
 
 export P_CI_DIR="$PWD"
 
@@ -41,11 +44,12 @@ if [ -z "$DANGER_RUN_CI_ON_HOST" ]; then
   fi
 
   # shellcheck disable=SC2086
-  DOCKER_ID=$(docker run $DOCKER_ADMIN --rm --interactive --detach --tty \
+  DOCKER_ID=$(docker run $DOCKER_ADMIN --privileged --cap-add CAP_SYS_ADMIN --rm --interactive --detach --tty \
                   --mount type=bind,src=$BASE_ROOT_DIR,dst=/ro_base,readonly \
                   --mount type=bind,src=$CCACHE_DIR,dst=$CCACHE_DIR \
                   --mount type=bind,src=$DEPENDS_DIR,dst=$DEPENDS_DIR \
                   --mount type=bind,src=$PREVIOUS_RELEASES_DIR,dst=$PREVIOUS_RELEASES_DIR \
+                  --mount type=bind,src=$KERNEL_HEADERS_DIR,dst=$KERNEL_HEADERS_DIR \
                   -w $BASE_ROOT_DIR \
                   --env-file /tmp/env \
                   --name $CONTAINER_NAME \
@@ -126,4 +130,28 @@ if [ "$USE_BUSY_BOX" = "true" ]; then
   DOCKER_EXEC for util in \$\(busybox --list \| grep -v "^ar$" \| grep -v "^tar$" \| grep -v "^find$"\)\; do ln -s \$\(command -v busybox\) "${BASE_SCRATCH_DIR}/bins/\$util"\; done
   # Print BusyBox version
   DOCKER_EXEC patch --help
+fi
+
+
+# TODO: only if we want to run tracepoint tests
+# TODO: check that we are on COS
+if [[ ${CIRRUS_CI} == "true" ]]; then
+  echo "Setting up kernel headers on 'Container Optimized System'"
+
+  apt install -y flex bison libssl-dev bc libelf-dev
+
+  kernel_version=v"$(uname -r | sed -E 's/\+*$//')"
+  echo "Fetching COS kernel sources for version $kernel_version."
+  time curl -s "https://chromium.googlesource.com/chromiumos/third_party/kernel/+archive/$kernel_version.tar.gz" \
+    | tar -xzf - -C "${KERNEL_HEADERS_DIR}"
+
+  echo "Generating kernel headers"
+
+  zcat /proc/config.gz > "${KERNEL_HEADERS_DIR}/.config"
+  time make -C "${KERNEL_HEADERS_DIR}" ARCH=x86 oldconfig > /dev/null
+  time make -C "${KERNEL_HEADERS_DIR}" ARCH=x86 prepare > /dev/null
+
+  echo "Kernel headers generated"
+
+  DOCKER_ADMIN="--cap-add=cap_sys_admin"
 fi

@@ -5,7 +5,7 @@
 
 """ Proof of Concept for USDT functional tests """
 
-from socket import timeout
+import os
 from bcc import BPF, USDT
 
 from test_framework.test_framework import BitcoinTestFramework
@@ -99,6 +99,9 @@ class TracepointTest(BitcoinTestFramework):
         # TODO: check that we have the right privileges (is that possible? maybe load a bpf map..)
 
     def run_test(self):
+
+        # TODO: can and should be set via the TEST_RUNNER_ENV variable...
+        os.environ["BCC_KERNEL_SOURCE"] = "/tmp/cirrus-ci-build/kernel_headers/x86_64-pc-linux-gnu/"
 
         check_inbound = False
         check_outbound = False
