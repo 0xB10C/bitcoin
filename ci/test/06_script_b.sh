@@ -43,5 +43,11 @@ if [ "$RUN_FUZZ_TESTS" = "true" ]; then
 fi
 
 if [ "$RUN_FUNCTIONAL_USDT_TESTS" = "true" ]; then
+  # for testing only:
+  apt install libcap2-bin -y && capsh --print
+  capsh --caps=CAP_SYS_ADMIN+ep -- -c 'capsh --print'
+
+  # TODO: run the usdt interface tests with CAP_SYS_ADMIN
+  #capsh --caps=CAP_SYS_ADMIN+ep -- -c '..'
   DOCKER_EXEC LD_LIBRARY_PATH="${DEPENDS_DIR}/${HOST}/lib" "${TEST_RUNNER_ENV}" test/functional/test_runner.py --ci "$MAKEJOBS" --tmpdirprefix "${BASE_SCRATCH_DIR}/test_runner/" --ansi --combinedlogslen=4000 --timeout-factor="${TEST_RUNNER_TIMEOUT_FACTOR}" "${TEST_RUNNER_EXTRA}" interface_usdt.py
 fi
