@@ -79,3 +79,15 @@ task:
   env:
     << : *CIRRUS_EPHEMERAL_WORKER_TEMPLATE_ENV
     FILE_ENV: "./ci/test/00_setup_env_native_usdt.sh"
+
+task:
+  name: 'ARM [unit tests, no functional tests] [bullseye]'
+  << : *GLOBAL_TASK_TEMPLATE
+  arm_container:
+    image: debian:bullseye
+    cpu: 2
+    memory: 8G
+  env:
+    << : *CIRRUS_EPHEMERAL_WORKER_TEMPLATE_ENV
+    FILE_ENV: "./ci/test/00_setup_env_arm.sh"
+    QEMU_USER_CMD: ""  # Disable qemu and run the test natively
