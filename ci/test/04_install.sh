@@ -131,27 +131,3 @@ if [ "$USE_BUSY_BOX" = "true" ]; then
   # Print BusyBox version
   DOCKER_EXEC patch --help
 fi
-
-
-# TODO: only if we want to run tracepoint tests
-# TODO: check that we are on COS
-if [[ ${CIRRUS_CI} == "true" ]]; then
-  echo "Setting up kernel headers on 'Container Optimized System'"
-
-  apt install -y flex bison libssl-dev bc libelf-dev
-
-  kernel_version=v"$(uname -r | sed -E 's/\+*$//')"
-  echo "Fetching COS kernel sources for version $kernel_version."
-  time curl -s "https://chromium.googlesource.com/chromiumos/third_party/kernel/+archive/$kernel_version.tar.gz" \
-    | tar -xzf - -C "${KERNEL_HEADERS_DIR}"
-
-  echo "Generating kernel headers"
-
-  zcat /proc/config.gz > "${KERNEL_HEADERS_DIR}/.config"
-  time make -C "${KERNEL_HEADERS_DIR}" ARCH=x86 oldconfig > /dev/null
-  time make -C "${KERNEL_HEADERS_DIR}" ARCH=x86 prepare > /dev/null
-
-  echo "Kernel headers generated"
-
-  DOCKER_ADMIN="--cap-add=cap_sys_admin"
-fi
