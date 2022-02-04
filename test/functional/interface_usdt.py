@@ -14,8 +14,12 @@ refactoring.
 
 """
 
+import ctypes
+
 from bcc import BPF, USDT
 from io import BytesIO
+from test_framework.address import ADDRESS_BCRT1_UNSPENDABLE
+from test_framework.blocktools import get_legacy_sigopcount_tx
 from test_framework.messages import msg_version, msg_ping, msg_pong
 from test_framework.p2p import P2PInterface
 from test_framework.test_framework import BitcoinTestFramework
@@ -72,6 +76,35 @@ int trace_outbound_message(struct pt_regs *ctx) {
 
 """
 
+
+validation_blockconnected_program = """
+#include <uapi/linux/ptrace.h>
+
+struct connected_block
+{
+    char        hash[32];
+    int         height;
+    long    transactions;
+    int         inputs;
+    long    sigops;
+    u64         duration;
+};
+
+BPF_PERF_OUTPUT(block_connected);
+int trace_block_connected(struct pt_regs *ctx) {
+    struct connected_block block = {};
+    bpf_usdt_readarg_p(1, ctx, &block.hash, 32);
+    bpf_usdt_readarg(2, ctx, &block.height);
+    bpf_usdt_readarg(3, ctx, &block.transactions);
+    bpf_usdt_readarg(4, ctx, &block.inputs);
+    bpf_usdt_readarg(5, ctx, &block.sigops);
+    bpf_usdt_readarg(6, ctx, &block.duration);
+    block_connected.perf_submit(ctx, &block, sizeof(block));
+    return 0;
+}
+"""
+
+
 class TracepointTest(BitcoinTestFramework):
     def set_test_params(self):
         self.setup_clean_chain = True
@@ -85,6 +118,7 @@ class TracepointTest(BitcoinTestFramework):
 
     def run_test(self):
         self.net_message_tracepoint_tests()
+        self.validation_blockconnected_tracepoint_tests()
 
     def net_message_tracepoint_tests(self):
         """ tests the net:inbound_message and net:outbound_message tracepoints
@@ -133,6 +167,55 @@ class TracepointTest(BitcoinTestFramework):
         assert(checked_outbound_version_msg)
 
         bpf.cleanup()
+
+    def validation_blockconnected_tracepoint_tests(self):
+        """ Tests the validation:block_connected tracepoint by generating blocks
+            and comparing the values passed in the tracepoint arguments with the
+            blocks.
+
+            See https://github.com/bitcoin/bitcoin/blob/master/doc/tracing.md#tracepoint-validationblock_connected
+        """
+
+        class Block(ctypes.Structure):
+            _fields_ = [
+                ("hash", ctypes.c_char * 32),
+                ("height", ctypes.c_int),
+                ("transactions", ctypes.c_int64),
+                ("inputs", ctypes.c_int),
+                ("sigops", ctypes.c_int64),
+                ("duration", ctypes.c_uint64),
+            ]
+
+        blocks = list()
+        blocks_checked = 0
+
+        ctx = USDT(path=str(self.options.bitcoind))
+        ctx.enable_probe(probe="block_connected", fn_name="trace_block_connected")
+        bpf = BPF(text=validation_blockconnected_program, usdt_contexts=[ctx], debug=0)
+
+        def handle_blockconnected(_, data, __):
+            nonlocal blocks, blocks_checked
+            event = ctypes.cast(data, ctypes.POINTER(Block)).contents
+            block = blocks.pop(0)
+            assert_equal(block["hash"], event.hash[::-1].hex())
+            assert_equal(block["height"], event.height)
+            assert_equal(len(block["tx"]), event.transactions)
+            assert_equal(len([tx["vin"] for tx in block["tx"]]), event.inputs)
+            # TODO: properly count sigops ?
+            assert_equal(0, event.sigops)
+            # only plausibility checks
+            assert(event.duration > 0)
+            blocks_checked += 1
+
+        bpf["block_connected"].open_perf_buffer(handle_blockconnected)
+
+        block_hashes = self.generatetoaddress(self.nodes[0], 2, ADDRESS_BCRT1_UNSPENDABLE)
+        for block_hash in block_hashes:
+            blocks.append(self.nodes[0].getblock(block_hash, 2))
+
+        bpf.perf_buffer_poll(timeout=200)
+        bpf.cleanup()
+        assert_equal(blocks_checked, 2)
 
 if __name__ == '__main__':
     TracepointTest().main()
