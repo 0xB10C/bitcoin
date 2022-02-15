@@ -3,24 +3,21 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-""" Userspace, Statically Defined Tracing interface tests
-
-The goal of these tests is to test the tracepoint interface. That means, the
-we test that the tracepoints are reached and that the expected arguments are
-passed. This should ensure a semi-stable API. The API can change between
-releases as implementation details and tracepoint argument avaliablility
-changes. However, it shouldn't change through, for example, unrelated
-refactoring.
-
+""" Tests the validation:* tracepoint API interface.
+    See https://github.com/bitcoin/bitcoin/blob/master/doc/tracing.md#context-validation
 """
 
 import ctypes
-
-from bcc import BPF, USDT
 from io import BytesIO
+
+# Test will be skipped if we don't have bcc installed
+try:
+    from bcc import BPF, USDT
+except ImportError:
+    pass
+
 from test_framework.address import ADDRESS_BCRT1_UNSPENDABLE
-from test_framework.blocktools import get_legacy_sigopcount_tx
-from test_framework.messages import COIN, CTransaction
+from test_framework.messages import COIN
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal
 from test_framework.wallet import MiniWallet
@@ -82,6 +79,15 @@ class ValidationTracepointTest(BitcoinTestFramework):
                 ("duration", ctypes.c_uint64),
             ]
 
+            def __repr__(self):
+                return "ConnectedBlock(hash=%s height=%d, transactions=%d, inputs=%d, sigops=%d, duration=%d)" % (
+                    bytes(self.hash[::-1]).hex(),
+                    self.height,
+                    self.transactions,
+                    self.inputs,
+                    self.sigops,
+                    self.duration)
+
         # The handle_* function is a ctypes callback function called from C. When
         # we assert in the handle_* function, the AssertError doesn't propagate
         # back to Python. The exception is ignored. We manually count and assert
@@ -90,7 +96,7 @@ class ValidationTracepointTest(BitcoinTestFramework):
         blocks_checked = 0
         expected_blocks = list()
 
-        self.log.info("Hooking into the validation:block_connected tracepoint")
+        self.log.info("hook into the validation:block_connected tracepoint")
         ctx = USDT(path=str(self.options.bitcoind))
         ctx.enable_probe(probe="validation:block_connected",
                          fn_name="trace_block_connected")
@@ -100,6 +106,7 @@ class ValidationTracepointTest(BitcoinTestFramework):
         def handle_blockconnected(_, data, __):
             nonlocal expected_blocks, blocks_checked
             event = ctypes.cast(data, ctypes.POINTER(Block)).contents
+            self.log.info(f"handle_blockconnected(): {event}")
             block = expected_blocks.pop(0)
             assert_equal(block["hash"], bytes(event.hash[::-1]).hex())
             assert_equal(block["height"], event.height)
@@ -114,7 +121,7 @@ class ValidationTracepointTest(BitcoinTestFramework):
         bpf["block_connected"].open_perf_buffer(
             handle_blockconnected)
 
-        self.log.info(f"Mining {BLOCKS_EXPECTED} blocks")
+        self.log.info(f"mine {BLOCKS_EXPECTED} blocks")
         block_hashes = self.generatetoaddress(
             self.nodes[0], BLOCKS_EXPECTED, ADDRESS_BCRT1_UNSPENDABLE)
         for block_hash in block_hashes:
@@ -123,7 +130,7 @@ class ValidationTracepointTest(BitcoinTestFramework):
         bpf.perf_buffer_poll(timeout=200)
         bpf.cleanup()
 
-        self.log.info(f"Checking that we traced {BLOCKS_EXPECTED} blocks")
+        self.log.info(f"check that we traced {BLOCKS_EXPECTED} blocks")
         assert_equal(BLOCKS_EXPECTED, blocks_checked)
         assert_equal(0, len(expected_blocks))
 

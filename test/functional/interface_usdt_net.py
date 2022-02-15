@@ -3,21 +3,17 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-""" Userspace, Statically Defined Tracing interface tests
-
-The goal of these tests is to test the tracepoint interface. That means, the
-we test that the tracepoints are reached and that the expected arguments are
-passed. This should ensure a semi-stable API. The API can change between
-releases as implementation details and tracepoint argument avaliablility
-changes. However, it shouldn't change through, for example, unrelated
-refactoring.
-
+"""  Tests the net:* tracepoint API interface.
+     See https://github.com/bitcoin/bitcoin/blob/master/doc/tracing.md#context-net
 """
 
 import ctypes
-
-from bcc import BPF, USDT
 from io import BytesIO
+# Test will be skipped if we don't have bcc installed
+try:
+    from bcc import BPF, USDT
+except ImportError:
+    pass
 from test_framework.messages import msg_version
 from test_framework.p2p import P2PInterface
 from test_framework.test_framework import BitcoinTestFramework
@@ -81,7 +77,6 @@ int trace_outbound_message(struct pt_regs *ctx) {
     outbound_messages.perf_submit(ctx, &msg, sizeof(msg));
     return 0;
 };
-
 """
 
 
@@ -109,8 +104,11 @@ class NetTracepointTest(BitcoinTestFramework):
                 ("msg", ctypes.c_ubyte * MAX_MSG_DATA_LENGTH),
             ]
 
+            def __repr__(self):
+                return f"P2PMessage(peer={self.peer_id}, addr={self.peer_addr.decode('utf-8')}, conn_type={self.peer_conn_type.decode('utf-8')}, msg_type={self.msg_type.decode('utf-8')}, msg_size={self.msg_size})"
+
         self.log.info(
-            "Hooking into the net:inbound_message and net:outbound_message tracepoints")
+            "hook into the net:inbound_message and net:outbound_message tracepoints")
         ctx = USDT(path=str(self.options.bitcoind))
         ctx.enable_probe(probe="net:inbound_message",
                          fn_name="trace_inbound_message")
@@ -129,13 +127,15 @@ class NetTracepointTest(BitcoinTestFramework):
         def check_p2p_message(event, inbound):
             nonlocal checked_inbound_version_msg, checked_outbound_version_msg
             if event.msg_type.decode("utf-8") == "version":
+                self.log.info(
+                    f"check_p2p_message(): {'inbound' if inbound else 'outbound'} {event}")
                 peer = self.nodes[0].getpeerinfo()[0]
                 msg = msg_version()
                 msg.deserialize(BytesIO(bytes(event.msg[:event.msg_size])))
-                assert_equal(event.peer_addr.decode("utf-8"), peer["addr"])
-                assert_equal(event.peer_id, peer["id"])
-                assert_equal(event.peer_conn_type.decode(
-                    "utf-8"), peer["connection_type"])
+                assert_equal(peer["id"], event.peer_id, peer["id"])
+                assert_equal(peer["addr"], event.peer_addr.decode("utf-8"))
+                assert_equal(peer["connection_type"],
+                             event.peer_conn_type.decode("utf-8"))
                 if inbound:
                     checked_inbound_version_msg += 1
                 else:
@@ -152,13 +152,13 @@ class NetTracepointTest(BitcoinTestFramework):
         bpf["inbound_messages"].open_perf_buffer(handle_inbound)
         bpf["outbound_messages"].open_perf_buffer(handle_outbound)
 
-        self.log.info("Connecting a P2P test node to our bitcoind node")
+        self.log.info("connect a P2P test node to our bitcoind node")
         test_node = P2PInterface()
         self.nodes[0].add_p2p_connection(test_node)
         bpf.perf_buffer_poll(timeout=200)
 
         self.log.info(
-            "Checking that we got both an inbound and outbound version message")
+            "check that we got both an inbound and outbound version message")
         assert_equal(EXPECTED_INOUTBOUND_VERSION_MSG,
                      checked_inbound_version_msg)
         assert_equal(EXPECTED_INOUTBOUND_VERSION_MSG,
