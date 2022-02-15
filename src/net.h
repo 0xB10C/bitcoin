@@ -346,12 +346,13 @@ class V2TransportDeserializer final : public TransportDeserializer
 {
 private:
     std::unique_ptr<BIP324CipherSuite> m_cipher_suite;
-    const NodeId m_node_id;    // Only for logging
-    bool m_in_data = false;    // parsing header (false) or data (true)
-    size_t m_message_size = 0; // expected message size
-    CDataStream vRecv;         // received message data (encrypted length, payload ciphertext, MAC tag)
-    size_t m_hdr_pos = 0;      // read pos in header
-    size_t m_data_pos = 0;     // read pos in data
+    const NodeId m_node_id;                       // Only for logging
+    bool m_in_data = false;                       // parsing header (false) or data (true)
+    size_t m_message_size = 0;                    // expected message size
+    CDataStream vRecv;                            // received message data (encrypted length, payload ciphertext, MAC tag)
+    size_t m_hdr_pos = 0;                         // read pos in header
+    size_t m_data_pos = 0;                        // read pos in data
+    bool m_processed_version_placeholder = false; // BIP324 transport version message has been received
 
 public:
     V2TransportDeserializer(const NodeId node_id, const BIP324Key& key_l, const BIP324Key& key_p, const BIP324Key& rekey_salt) : m_cipher_suite(new BIP324CipherSuite(key_l, key_p, rekey_salt)), m_node_id(node_id), vRecv(SER_NETWORK, INIT_PROTO_VERSION)
