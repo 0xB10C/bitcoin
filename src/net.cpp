@@ -412,7 +412,10 @@ CNode* CConnman::FindNode(const CService& addr)
 
 bool CConnman::AlreadyConnectedToAddress(const CAddress& addr)
 {
-    return FindNode(static_cast<CNetAddr>(addr)) || FindNode(addr.ToStringIPPort());
+    CNode* found_by_addr = FindNode(static_cast<CNetAddr>(addr));
+    CNode* found_by_ip_port = FindNode(addr.ToStringIPPort());
+    return (found_by_addr && !found_by_addr->fDisconnect) ||
+           (found_by_ip_port && !found_by_ip_port->fDisconnect);
 }
 
 bool CConnman::CheckIncomingNonce(uint64_t nonce)
@@ -474,8 +477,7 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char *pszDest, bool fCo
 
         // Look for an existing connection
         CNode* pnode = FindNode(static_cast<CService>(addrConnect));
-        if (pnode)
-        {
+        if (pnode && !pnode->fDisconnect) {
             LogPrintf("Failed to open new connection, already connected\n");
             return nullptr;
         }
@@ -501,7 +503,7 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char *pszDest, bool fCo
             // In that case, drop the connection that was just created.
             LOCK(m_nodes_mutex);
             CNode* pnode = FindNode(static_cast<CService>(addrConnect));
-            if (pnode) {
+            if (pnode && !pnode->fDisconnect) {
                 LogPrintf("Failed to open new connection, already connected\n");
                 return nullptr;
             }
@@ -1617,6 +1619,14 @@ void CConnman::SocketHandlerConnected(const std::vector<CNode*>& nodes,
                     LogPrint(BCLog::NET, "socket closed for peer=%d\n", pnode->GetId());
                 }
                 pnode->CloseSocketDisconnect();
+
+                if (pnode->PreferV2Conn() && !pnode->tried_v2_handshake) {
+                    CAddress addr = pnode->addr;
+                    addr.nServices = ServiceFlags(addr.nServices & ~NODE_P2P_V2);
+                    CSemaphoreGrant grant(*semOutbound);
+                    OpenNetworkConnection(addr, false, &grant, addr.ToStringIPPort().c_str(), pnode->m_conn_type);
+                    pnode->tried_v2_handshake = true;
+                }
             } else if (nBytes < 0) {
                 // error
                 int nErr = WSAGetLastError();
@@ -2257,8 +2267,10 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
         if (IsLocal(addrConnect) || banned_or_discouraged || AlreadyConnectedToAddress(addrConnect)) {
             return;
         }
-    } else if (FindNode(std::string(pszDest)))
-        return;
+    } else {
+        auto existing_node = FindNode(std::string(pszDest));
+        if (existing_node && !existing_node->fDisconnect) return;
+    }
 
     CNode* pnode = ConnectNode(addrConnect, pszDest, fCountFailure, conn_type);
 
