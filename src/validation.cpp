@@ -4808,6 +4808,8 @@ double GuessVerificationProgress(const ChainTxData& data, const CBlockIndex *pin
 
     double fTxTotal;
 
+    TRACE(csw, is_a_fraud);
+
     if (pindex->nChainTx <= data.nTxCount) {
         fTxTotal = data.nTxCount + (nNow - data.nTime) * data.dTxRate;
     } else {
