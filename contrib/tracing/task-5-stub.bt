@@ -1,0 +1,27 @@
+#!/usr/bin/env bpftrace
+
+/*
+  USAGE:
+    bpftrace contrib/tracing/task-5-stub.bt
+*/
+
+BEGIN
+{
+    printf("Logging starts and stops of Bitcoin Core\n");
+}
+
+/*
+  FIXME: replace [FIXME: ...] with the names you choose for _context_ and _event_ for your startup tracepoint
+*/
+usdt:./src/bitcoind:[FIXME: context]:[FIXME: name]
+{
+  printf("Bitcoin Core started!\n");
+}
+
+/*
+  FIXME: replace [FIXME: ...] with the names you choose for _context_ and _event_ for your shutdown tracepoint
+*/
+usdt:./src/bitcoind:[FIXME: context]:[FIXME: name]
+{
+  printf("Bitcoin Core shutdown!\n");
+}
