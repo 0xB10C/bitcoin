@@ -1,0 +1,41 @@
+#!/usr/bin/env bpftrace
+
+/*
+  USAGE:
+  $ bpftrace contrib/tracing/task-3-stub.bt
+*/
+
+BEGIN
+{
+    printf("Tracing ./src/test/test_bitcoin ...\n");
+    printf("Now run the unit test.\n");
+    printf("Stop this script with Ctrl+C once the test finishes to print stats.\n");
+}
+
+/*
+  Attaches to the 'utxocache:add' tracepoint.
+  See documentation at https://github.com/bitcoin/bitcoin/blob/master/doc/tracing.md#tracepoint-utxocacheadd
+*/
+usdt:./src/test/test_bitcoin:utxocache:add
+{
+  $value = (int64)arg3;
+  /*
+    FIXME implement:
+    - counting utxocache adds
+    - historgram of value added
+  */
+}
+
+/*
+  Attaches to the 'utxocache:spent' tracepoint.
+  See documentation at https://github.com/bitcoin/bitcoin/blob/master/doc/tracing.md#tracepoint-utxocachespent
+*/
+usdt:./src/test/test_bitcoin:utxocache:spent
+{
+  $value = (int64)arg3;
+  /*
+    FIXME implement:
+    - counting utxocache spents
+    - historgram of value spent
+  */
+}
