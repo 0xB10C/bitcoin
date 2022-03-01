@@ -4158,6 +4158,7 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
         if (!peer->m_orphan_work_set.empty()) return true;
     }
 
+
     // Don't bother if send buffer is too full to respond anyway
     if (pfrom->fPauseSend) return false;
 
@@ -4172,6 +4173,12 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
         fMoreWork = !pfrom->vProcessMsg.empty();
     }
     CNetMessage& msg(msgs.front());
+
+    TRACE3(net, rbuffersize,
+        pfrom->GetId(),
+        pfrom->nProcessQueueSize,
+        m_connman.GetReceiveFloodSize()
+    );
 
     TRACE6(net, inbound_message,
         pfrom->GetId(),
