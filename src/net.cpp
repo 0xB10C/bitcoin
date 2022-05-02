@@ -1992,6 +1992,14 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
     if (grantOutbound)
         grantOutbound->MoveTo(pnode->grantOutbound);
 
+    TRACE6(net, outbound_connection,
+        pnode->GetId(),
+        pnode->m_addr_name.c_str(),
+        pnode->ConnectionTypeAsString().c_str(),
+        pnode->ConnectedThroughNetwork(),
+        pnode->nKeyedNetGroup,
+        GetNodeCount(ConnectionDirection::Out));
+
     m_msgproc->InitializeNode(*pnode, nLocalServices);
     {
         LOCK(m_nodes_mutex);

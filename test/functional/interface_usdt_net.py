@@ -106,6 +106,19 @@ int trace_inbound_connection(struct pt_regs *ctx) {
     return 0;
 };
 
+BPF_PERF_OUTPUT(outbound_connections);
+int trace_outbound_connection(struct pt_regs *ctx) {
+    struct NewConnection outbound = {};
+    bpf_usdt_readarg(1, ctx, &outbound.conn.id);
+    bpf_usdt_readarg_p(2, ctx, &outbound.conn.addr, MAX_PEER_ADDR_LENGTH);
+    bpf_usdt_readarg_p(3, ctx, &outbound.conn.type, MAX_PEER_CONN_TYPE_LENGTH);
+    bpf_usdt_readarg(4, ctx, &outbound.conn.network);
+    bpf_usdt_readarg(5, ctx, &outbound.conn.net_group);
+    bpf_usdt_readarg(6, ctx, &outbound.existing);
+    outbound_connections.perf_submit(ctx, &outbound, sizeof(outbound));
+    return 0;
+};
+
 """
 
 
@@ -144,6 +157,7 @@ class NetTracepointTest(BitcoinTestFramework):
     def run_test(self):
         self.p2p_message_tracepoint_test()
         self.inbound_conn_tracepoint_test()
+        self.outbound_conn_tracepoint_test()
 
     def p2p_message_tracepoint_test(self):
         # Tests the net:inbound_message and net:outbound_message tracepoints
@@ -258,6 +272,51 @@ class NetTracepointTest(BitcoinTestFramework):
         bpf.cleanup()
 
         assert_equal(EXPECTED_INBOUND_CONNECTIONS, checked_inbound_connections)
+        for node in testnodes:
+            node.peer_disconnect()
+
+    def outbound_conn_tracepoint_test(self):
+        self.log.info("hook into the net:outbound_connection tracepoint")
+        ctx = USDT(pid=self.nodes[0].process.pid)
+        ctx.enable_probe(probe="net:outbound_connection",
+                         fn_name="trace_outbound_connection")
+        bpf = BPF(text=net_tracepoints_program, usdt_contexts=[ctx], debug=0)
+
+        # The handle_* function is a ctypes callback function called from C. When
+        # we assert in the handle_* function, the AssertError doesn't propagate
+        # back to Python. The exception is ignored. We manually count and assert
+        # that the handle_* function succeeds.
+        EXPECTED_OUTBOUND_CONNECTIONS = 2
+        EXPECTED_CONNECTION_TYPE = "feeler"
+        checked_outbound_connections = 0
+
+        def handle_outbound_connection(_, data, __):
+            nonlocal checked_outbound_connections
+            event = ctypes.cast(data, ctypes.POINTER(NewConnection)).contents
+            self.log.info(f"handle_outbound_connection(): {event}")
+            assert(event.conn.id > 0)
+            assert(event.conn.net_group > 0)
+            assert_equal(EXPECTED_CONNECTION_TYPE,
+                         event.conn.conn_type.decode('utf-8'))
+            assert_equal(0, event.conn.network)
+            checked_outbound_connections += 1
+
+        bpf["outbound_connections"].open_perf_buffer(
+            handle_outbound_connection)
+
+        self.log.info(
+            f"connect {EXPECTED_OUTBOUND_CONNECTIONS} P2P test nodes to our bitcoind node")
+        testnodes = list()
+        for p2p_idx in range(EXPECTED_OUTBOUND_CONNECTIONS):
+            testnode = P2PInterface()
+            self.nodes[0].add_outbound_p2p_connection(
+                testnode, p2p_idx=p2p_idx, connection_type=EXPECTED_CONNECTION_TYPE)
+            testnodes.append(testnode)
+        bpf.perf_buffer_poll(timeout=200)
+        bpf.cleanup()
+
+        assert_equal(EXPECTED_OUTBOUND_CONNECTIONS,
+                     checked_outbound_connections)
         for node in testnodes:
             node.peer_disconnect()
 
