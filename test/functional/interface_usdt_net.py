@@ -29,6 +29,9 @@ MAX_MSG_DATA_LENGTH = 150
 
 # from net_address.h
 NETWORK_TYPE_UNROUTABLE = 0
+# Use in -maxconnections. Results in a maximum of 21 inbound connections
+MAX_CONNECTIONS = 32
+MAX_INBOUND_CONNECTIONS = MAX_CONNECTIONS - 10 - 1  # 10 outbound and 1 feeler
 
 net_tracepoints_program = """
 #include <uapi/linux/ptrace.h>
@@ -67,6 +70,12 @@ struct NewConnection
 {
     struct Connection   conn;
     u64                 existing;
+};
+
+struct ClosedConnection
+{
+    struct Connection   conn;
+    u64                 time_established;
 };
 
 BPF_PERF_OUTPUT(inbound_messages);
@@ -119,6 +128,18 @@ int trace_outbound_connection(struct pt_regs *ctx) {
     return 0;
 };
 
+BPF_PERF_OUTPUT(evicted_inbound_connections);
+int trace_evicted_inbound_connection(struct pt_regs *ctx) {
+    struct ClosedConnection evicted = {};
+    bpf_usdt_readarg(1, ctx, &evicted.conn.id);
+    bpf_usdt_readarg_p(2, ctx, &evicted.conn.addr, MAX_PEER_ADDR_LENGTH);
+    bpf_usdt_readarg_p(3, ctx, &evicted.conn.type, MAX_PEER_CONN_TYPE_LENGTH);
+    bpf_usdt_readarg(4, ctx, &evicted.conn.network);
+    bpf_usdt_readarg(5, ctx, &evicted.time_established);
+    evicted_inbound_connections.perf_submit(ctx, &evicted, sizeof(evicted));
+    return 0;
+};
+
 """
 
 
@@ -143,9 +164,19 @@ class NewConnection(ctypes.Structure):
     def __repr__(self):
         return f"NewConnection(conn={self.conn}, existing={self.existing})"
 
+class ClosedConnection(ctypes.Structure):
+    _fields_ = [
+        ("conn", Connection),
+        ("time_established", ctypes.c_uint64),
+    ]
+
+    def __repr__(self):
+        return f"ClosedConnection(conn={self.conn}, time_established={self.time_established})"
+
 class NetTracepointTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
+        self.extra_args = [[f'-maxconnections={MAX_CONNECTIONS}']]
 
     def skip_test_if_missing_module(self):
         self.skip_if_platform_not_linux()
@@ -157,6 +188,7 @@ class NetTracepointTest(BitcoinTestFramework):
         self.p2p_message_tracepoint_test()
         self.inbound_conn_tracepoint_test()
         self.outbound_conn_tracepoint_test()
+        self.evicted_inbound_conn_tracepoint_test()
 
     def p2p_message_tracepoint_test(self):
         # Tests the net:inbound_message and net:outbound_message tracepoints
@@ -308,6 +340,43 @@ class NetTracepointTest(BitcoinTestFramework):
             assert outbound_connection.existing >= 0
             assert_equal(EXPECTED_CONNECTION_TYPE, outbound_connection.conn.conn_type.decode('utf-8'))
             assert_equal(NETWORK_TYPE_UNROUTABLE, outbound_connection.conn.network)
+
+        bpf.cleanup()
+        for node in testnodes:
+            node.peer_disconnect()
+
+    def evicted_inbound_conn_tracepoint_test(self):
+        self.log.info("hook into the net:evicted_inbound_connection tracepoint")
+        ctx = USDT(pid=self.nodes[0].process.pid)
+        ctx.enable_probe(probe="net:evicted_inbound_connection",
+                         fn_name="trace_evicted_inbound_connection")
+        bpf = BPF(text=net_tracepoints_program, usdt_contexts=[ctx], debug=0, cflags=["-Wno-error=implicit-function-declaration"])
+
+        EXPECTED_EVICTED_CONNECTIONS = 2
+        evicted_connections = []
+
+        def handle_evicted_inbound_connection(_, data, __):
+            event = ctypes.cast(data, ctypes.POINTER(ClosedConnection)).contents
+            self.log.info(f"handle_evicted_inbound_connection(): {event}")
+            evicted_connections.append(event)
+
+        bpf["evicted_inbound_connections"].open_perf_buffer(handle_evicted_inbound_connection)
+
+        self.log.info(
+            f"connect {MAX_INBOUND_CONNECTIONS + EXPECTED_EVICTED_CONNECTIONS} P2P test nodes to our bitcoind node and expect {EXPECTED_EVICTED_CONNECTIONS} evictions")
+        testnodes = list()
+        for p2p_idx in range(MAX_INBOUND_CONNECTIONS + EXPECTED_EVICTED_CONNECTIONS):
+            testnode = P2PInterface()
+            self.nodes[0].add_p2p_connection(testnode)
+            testnodes.append(testnode)
+        bpf.perf_buffer_poll(timeout=200)
+
+        assert_equal(EXPECTED_EVICTED_CONNECTIONS, len(evicted_connections))
+        for evicted_connection in evicted_connections:
+            assert evicted_connection.conn.id > 0
+            assert evicted_connection.time_established > 0
+            assert_equal("inbound", evicted_connection.conn.conn_type.decode('utf-8'))
+            assert_equal(NETWORK_TYPE_UNROUTABLE, evicted_connection.conn.network)
 
         bpf.cleanup()
         for node in testnodes:
