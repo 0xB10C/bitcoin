@@ -132,6 +132,18 @@ Arguments passed:
 5. NetGroup as `uint64`. A Bitcoin Core internal group identifier for network addresses. It should be costly for an attacker to obtain addresses with many different group identifiers.
 6. Connection established UNIX epoch timestamp as `uint64`.
 
+#### Tracepoint `net:misbehaving_connection`
+
+Is called when a connection is misbehaving. Passes the peer id, old misbehaving score,
+score increase and why the peer is misbehaving.
+
+Arguments passed:
+1. Peer ID as `int64`.
+2. Misbehaving score before being punished as `int32`. New peers start with a score of 0.
+3. Misbehaving score increase for this misbehavior as `int32`.
+4. Reason why the peer is misbehaving as `pointer to C-style String` (max. length 128 characters).
+5. If the discuragement threshold is exceeded as `bool`.
+
 ### Context `validation`
 
 #### Tracepoint `validation:block_connected`
