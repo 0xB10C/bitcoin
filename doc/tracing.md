@@ -128,6 +128,18 @@ Arguments passed:
 4. Network the peer connects from as `uint32` (1 = IPv4, 2 = IPv6, 3 = Onion, 4 = I2P, 5 = CJDNS). See `Network` enum in `netaddress.h`.
 5. Connection established UNIX epoch timestamp as `uint64`.
 
+#### Tracepoint `net:misbehaving_connection`
+
+Is called when a connection is misbehaving. Passes the peer id, old misbehaving score,
+score increase and why the peer is misbehaving.
+
+Arguments passed:
+1. Peer ID as `int64`.
+2. Misbehaving score before being punished as `int32`. New peers start with a score of 0.
+3. Misbehaving score increase for this misbehavior as `int32`.
+4. Reason why the peer is misbehaving as `pointer to C-style String` (max. length 128 characters).
+5. If the discuragement threshold is exceeded as `bool`.
+
 ### Context `validation`
 
 #### Tracepoint `validation:block_connected`
