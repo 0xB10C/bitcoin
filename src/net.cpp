@@ -2891,6 +2891,13 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
         return;
     pnode->grantOutbound = std::move(grant_outbound);
 
+    TRACE5(net, outbound_connection,
+        pnode->GetId(),
+        pnode->m_addr_name.c_str(),
+        pnode->ConnectionTypeAsString().c_str(),
+        pnode->ConnectedThroughNetwork(),
+        GetNodeCount(ConnectionDirection::Out));
+
     m_msgproc->InitializeNode(*pnode, nLocalServices);
     {
         LOCK(m_nodes_mutex);
