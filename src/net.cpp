@@ -1037,6 +1037,14 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
 
     LogPrint(BCLog::NET, "connection from %s accepted\n", addr.ToString());
 
+    TRACE6(net, inbound_connection,
+        pnode->GetId(),
+        pnode->m_addr_name.c_str(),
+        pnode->ConnectionTypeAsString().c_str(),
+        pnode->ConnectedThroughNetwork(),
+        pnode->nKeyedNetGroup,
+        GetNodeCount(ConnectionDirection::In));
+
     {
         LOCK(m_nodes_mutex);
         m_nodes.push_back(pnode);
