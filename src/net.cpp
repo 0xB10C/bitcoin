@@ -1193,6 +1193,15 @@ bool CConnman::AttemptToEvictConnection()
     for (CNode* pnode : m_nodes) {
         if (pnode->GetId() == *node_id_to_evict) {
             LogPrint(BCLog::NET, "selected %s connection for eviction peer=%d; disconnecting\n", pnode->ConnectionTypeAsString(), pnode->GetId());
+
+            TRACE6(net, evicted_connection,
+                pnode->GetId(),
+                pnode->m_addr_name.c_str(),
+                pnode->ConnectionTypeAsString().c_str(),
+                pnode->ConnectedThroughNetwork(),
+                pnode->nKeyedNetGroup,
+                std::chrono::duration<uint64_t>(pnode->m_connected).count());
+
             pnode->fDisconnect = true;
             return true;
         }
