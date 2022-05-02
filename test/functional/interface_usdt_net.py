@@ -11,7 +11,7 @@ import ctypes
 from io import BytesIO
 # Test will be skipped if we don't have bcc installed
 try:
-    from bcc import BPF, USDT # type: ignore[import]
+    from bcc import BPF, USDT  # type: ignore[import]
 except ImportError:
     pass
 from test_framework.messages import msg_version
@@ -52,6 +52,21 @@ struct p2p_message
     u8      msg[MAX_MSG_DATA_LENGTH];
 };
 
+struct Connection
+{
+    u64     id;
+    char    addr[MAX_PEER_ADDR_LENGTH];
+    char    type[MAX_PEER_CONN_TYPE_LENGTH];
+    u32     network;
+    u64     net_group;
+};
+
+struct NewConnection
+{
+    struct Connection   conn;
+    u64                 existing;
+};
+
 BPF_PERF_OUTPUT(inbound_messages);
 int trace_inbound_message(struct pt_regs *ctx) {
     struct p2p_message msg = {};
@@ -77,8 +92,44 @@ int trace_outbound_message(struct pt_regs *ctx) {
     outbound_messages.perf_submit(ctx, &msg, sizeof(msg));
     return 0;
 };
+
+BPF_PERF_OUTPUT(inbound_connections);
+int trace_inbound_connection(struct pt_regs *ctx) {
+    struct NewConnection inbound = {};
+    bpf_usdt_readarg(1, ctx, &inbound.conn.id);
+    bpf_usdt_readarg_p(2, ctx, &inbound.conn.addr, MAX_PEER_ADDR_LENGTH);
+    bpf_usdt_readarg_p(3, ctx, &inbound.conn.type, MAX_PEER_CONN_TYPE_LENGTH);
+    bpf_usdt_readarg(4, ctx, &inbound.conn.network);
+    bpf_usdt_readarg(5, ctx, &inbound.conn.net_group);
+    bpf_usdt_readarg(6, ctx, &inbound.existing);
+    inbound_connections.perf_submit(ctx, &inbound, sizeof(inbound));
+    return 0;
+};
+
 """
 
+
+class Connection(ctypes.Structure):
+    _fields_ = [
+        ("id", ctypes.c_uint64),
+        ("addr", ctypes.c_char * MAX_PEER_ADDR_LENGTH),
+        ("conn_type", ctypes.c_char * MAX_PEER_CONN_TYPE_LENGTH),
+        ("network", ctypes.c_uint32),
+        ("net_group", ctypes.c_uint64),
+    ]
+
+    def __repr__(self):
+        return f"Connection(peer={self.id}, addr={self.addr.decode('utf-8')}, conn_type={self.conn_type.decode('utf-8')}, network={self.network}, net_group={self.net_group})"
+
+
+class NewConnection(ctypes.Structure):
+    _fields_ = [
+        ("conn", Connection),
+        ("existing", ctypes.c_uint64),
+    ]
+
+    def __repr__(self):
+        return f"NewConnection(conn={self.conn}, existing={self.existing})"
 
 class NetTracepointTest(BitcoinTestFramework):
     def set_test_params(self):
@@ -91,6 +142,10 @@ class NetTracepointTest(BitcoinTestFramework):
         self.skip_if_no_bpf_permissions()
 
     def run_test(self):
+        self.p2p_message_tracepoint_test()
+        self.inbound_conn_tracepoint_test()
+
+    def p2p_message_tracepoint_test(self):
         # Tests the net:inbound_message and net:outbound_message tracepoints
         # See https://github.com/bitcoin/bitcoin/blob/master/doc/tracing.md#context-net
 
@@ -165,7 +220,46 @@ class NetTracepointTest(BitcoinTestFramework):
                      checked_outbound_version_msg)
 
         bpf.cleanup()
+        test_node.peer_disconnect()
 
+    def inbound_conn_tracepoint_test(self):
+        self.log.info("hook into the net:inbound_connection tracepoint")
+        ctx = USDT(pid=self.nodes[0].process.pid)
+        ctx.enable_probe(probe="net:inbound_connection",
+                         fn_name="trace_inbound_connection")
+        bpf = BPF(text=net_tracepoints_program, usdt_contexts=[ctx], debug=0)
+
+        # The handle_* function is a ctypes callback function called from C. When
+        # we assert in the handle_* function, the AssertError doesn't propagate
+        # back to Python. The exception is ignored. We manually count and assert
+        # that the handle_* function succeeds.
+        EXPECTED_INBOUND_CONNECTIONS = 2
+        checked_inbound_connections = 0
+
+        def handle_inbound_connection(_, data, __):
+            nonlocal checked_inbound_connections
+            event = ctypes.cast(data, ctypes.POINTER(NewConnection)).contents
+            self.log.info(f"handle_inbound_connection(): {event}")
+            assert(event.conn.id > 0)
+            assert(event.conn.net_group > 0)
+            assert_equal(b'inbound', event.conn.conn_type)
+            assert_equal(0, event.conn.network)
+            checked_inbound_connections += 1
+
+        bpf["inbound_connections"].open_perf_buffer(handle_inbound_connection)
+
+        self.log.info("connect two P2P test nodes to our bitcoind node")
+        testnodes = list()
+        for _ in range(EXPECTED_INBOUND_CONNECTIONS):
+            testnode = P2PInterface()
+            self.nodes[0].add_p2p_connection(testnode)
+            testnodes.append(testnode)
+        bpf.perf_buffer_poll(timeout=200)
+        bpf.cleanup()
+
+        assert_equal(EXPECTED_INBOUND_CONNECTIONS, checked_inbound_connections)
+        for node in testnodes:
+            node.peer_disconnect()
 
 if __name__ == '__main__':
     NetTracepointTest().main()
