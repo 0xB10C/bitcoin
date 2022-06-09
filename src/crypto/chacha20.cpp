@@ -5,8 +5,11 @@
 // Based on the public domain implementation 'merged' by D. J. Bernstein
 // See https://cr.yp.to/chacha.html.
 
-#include <crypto/common.h>
 #include <crypto/chacha20.h>
+#include <crypto/common.h>
+#include <crypto/sha256.h>
+#include <hash.h>
+#include <span.h>
 
 #include <string.h>
 
@@ -421,4 +424,29 @@ void ChaCha20::Crypt(const unsigned char* m, unsigned char* c, size_t bytes)
         m += 64;
         prev_block_start_pos = 0;
     }
+}
+
+void FSChaCha20::Crypt(Span<const std::byte> input, Span<std::byte> output)
+{
+    assert(input.size() == output.size());
+    c20.Crypt(reinterpret_cast<const unsigned char*>(input.data()),
+              reinterpret_cast<unsigned char*>(output.data()), input.size());
+    messages_with_key++;
+
+    if (messages_with_key % rekey_interval == 0) {
+        CommitToKey({(std::byte*)nullptr, 0});
+    }
+}
+
+void FSChaCha20::CommitToKey(const Span<const std::byte> data)
+{
+    assert(CSHA256::OUTPUT_SIZE == FSCHACHA20_KEYLEN);
+    HashWriter hasher;
+    hasher << MakeUCharSpan(rekey_salt) << MakeUCharSpan(data) << MakeUCharSpan(key);
+    auto new_key = hasher.GetSHA256();
+    memory_cleanse(key.data(), key.size());
+    memcpy(key.data(), new_key.data(), FSCHACHA20_KEYLEN);
+    c20.SetKey(reinterpret_cast<unsigned char*>(key.data()), key.size());
+    rekey_counter++;
+    set_nonce();
 }
