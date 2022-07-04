@@ -11,9 +11,11 @@ export CONTAINER_NAME=ci_native_usdt
 # We install an up-to-date 'bpfcc-tools' package from an untrusted PPA.
 # This can be dropped with the next Ubuntu or Debian release that includes up-to-date packages.
 # See the if-then in ci/test/04_install.sh too.
-export TRACING_PACKAGES="systemtap-sdt-dev bpfcc-tools"
-export PACKAGES="clang llvm libevent-dev bsdmainutils libboost-dev $TRACING_PACKAGES"
+export TRACING_PACKAGES="bpfcc-tools"
+export PACKAGES="libevent-dev bsdmainutils libboost-dev $TRACING_PACKAGES"
 export RUN_UNIT_TESTS=false
-export NO_DEPENDS=1
+export RUN_FUNCTIONAL_TESTS=false
+export DEP_OPTS="NO_QT=1 NO_UPNP=1 NO_NATPMP=1"
+#export NO_DEPENDS=1
 export GOAL="install"
-export BITCOIN_CONFIG="--enable-c++20 --enable-zmq --enable-usdt --disable-bench --disable-fuzz --with-incompatible-bdb --without-gui CPPFLAGS='-DARENA_DEBUG -DDEBUG_LOCKORDER' CC=clang CXX=clang++"
+export BITCOIN_CONFIG="--enable-usdt --disable-bench --disable-fuzz"

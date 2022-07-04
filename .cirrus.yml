@@ -158,6 +158,8 @@ task:
   compute_engine_instance:
     image_project: ubuntu-os-cloud
     image: family/ubuntu-2204-lts # when upgrading, check if we can drop "ADD_UNTRUSTED_BPFCC_PPA"
+    cpu: 2
+    memory: 8G
   env:
     HOME: /root/
     FILE_ENV: "./ci/test/00_setup_env_native_usdt.sh"
