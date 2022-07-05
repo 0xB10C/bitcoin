@@ -6,6 +6,7 @@
 
 export LC_ALL=C.UTF-8
 
+export BCC_KERNEL_SOURCE="/lib/modules/5.15.0-1010-gcp/build"
 export DOCKER_NAME_TAG="debian:bookworm"
 export CONTAINER_NAME=ci_native_usdt
 # We install an up-to-date 'bpfcc-tools' package from an untrusted PPA.
@@ -14,7 +15,7 @@ export CONTAINER_NAME=ci_native_usdt
 export TRACING_PACKAGES="bpfcc-tools"
 export PACKAGES="libevent-dev bsdmainutils libboost-dev $TRACING_PACKAGES"
 export RUN_UNIT_TESTS=false
-export RUN_FUNCTIONAL_TESTS=false
+#export RUN_FUNCTIONAL_TESTS=false
 export DEP_OPTS="NO_QT=1 NO_UPNP=1 NO_NATPMP=1"
 #export NO_DEPENDS=1
 export GOAL="install"

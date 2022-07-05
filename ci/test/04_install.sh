@@ -24,7 +24,7 @@ export ASAN_OPTIONS="detect_stack_use_after_return=1:check_initialization_order=
 export LSAN_OPTIONS="suppressions=${BASE_ROOT_DIR}/test/sanitizer_suppressions/lsan"
 export TSAN_OPTIONS="suppressions=${BASE_ROOT_DIR}/test/sanitizer_suppressions/tsan:halt_on_error=1:log_path=${BASE_SCRATCH_DIR}/sanitizer-output/tsan"
 export UBSAN_OPTIONS="suppressions=${BASE_ROOT_DIR}/test/sanitizer_suppressions/ubsan:print_stacktrace=1:halt_on_error=1:report_error_type=1"
-env | grep -E '^(BITCOIN_CONFIG|BASE_|QEMU_|CCACHE_|LC_ALL|BOOST_TEST_RANDOM|DEBIAN_FRONTEND|CONFIG_SHELL|(ASAN|LSAN|TSAN|UBSAN)_OPTIONS|PREVIOUS_RELEASES_DIR)' | tee /tmp/env
+env | grep -E '^(BITCOIN_CONFIG|BASE_|QEMU_|CCACHE_|LC_ALL|BOOST_TEST_RANDOM|DEBIAN_FRONTEND|CONFIG_SHELL|(ASAN|LSAN|TSAN|UBSAN)_OPTIONS|PREVIOUS_RELEASES_DIR|BCC_)' | tee /tmp/env
 if [[ $BITCOIN_CONFIG = *--with-sanitizers=*address* ]]; then # If ran with (ASan + LSan), Docker needs access to ptrace (https://github.com/google/sanitizers/issues/764)
   DOCKER_ADMIN="--cap-add SYS_PTRACE"
 fi
@@ -45,6 +45,9 @@ if [ -z "$DANGER_RUN_CI_ON_HOST" ]; then
                   --mount type=bind,src=$BASE_ROOT_DIR,dst=/ro_base,readonly \
                   --mount type=bind,src=$CCACHE_DIR,dst=$CCACHE_DIR \
                   --mount type=bind,src=$DEPENDS_DIR,dst=$DEPENDS_DIR \
+                  --mount type=bind,src=/lib/modules/5.15.0-1010-gcp/build,dst=/lib/modules/5.15.0-1010-gcp/build,readonly \
+                  --mount type=bind,src=/usr/src/linux-gcp-headers-5.15.0-1010/,dst=/usr/src/linux-gcp-headers-5.15.0-1010/,readonly \
+                  --mount type=bind,src=/usr/src/linux-headers-5.15.0-1010-gcp/,dst=/usr/src/linux-headers-5.15.0-1010-gcp/,readonly \
                   --mount type=bind,src=$PREVIOUS_RELEASES_DIR,dst=$PREVIOUS_RELEASES_DIR \
                   -w $BASE_ROOT_DIR \
                   --env-file /tmp/env \
