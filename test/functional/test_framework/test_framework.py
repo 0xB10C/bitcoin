@@ -600,8 +600,9 @@ class BitcoinTestFramework(metaclass=BitcoinTestMetaClass):
         else:
             # when connection is to a peer that advertises BIP324 v2 protocol support:
             to_peer = list(filter(lambda x: x["addr"] == ip_port, from_connection.getpeerinfo()))[0]
-            # initiator sends (ellswift=64; garbage_terminator=8; v2_enc_msg(transport_version)=20; v2_enc_msg(VERSION)=105)
-            self.wait_until(lambda: to_peer['bytesrecv'] >= 64 + 8 + 20 + 105)
+            # initiator sends (ellswift=64; garbage_terminator=8; v2_enc_msg(garbage_authentication)=20;
+            #                  v2_enc_msg(transport_version)=20; v2_enc_msg(VERSION)=105)
+            self.wait_until(lambda: to_peer['bytesrecv'] >= 64 + 8 + 20 + 20 + 105)
             # responder sends (ellswift=64; v2_enc-msg(transport_version)=20; v2_enc_msg(VERACK)=21)
             from_peer = list(filter(lambda x: x["addrbind"] == ip_port, to_connection.getpeerinfo()))[0]
             self.wait_until(lambda: from_peer['bytesrecv'] >= 64 + 20 + 21)

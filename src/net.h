@@ -520,6 +520,7 @@ public:
     std::atomic_bool fPauseRecv{false};
     std::atomic_bool fPauseSend{false};
     std::atomic_bool tried_v2_handshake{false};
+    std::atomic_bool m_authenticated_v2_garbage{false};
 
     bool IsOutboundOrBlockRelayConn() const {
         switch (m_conn_type) {
@@ -719,6 +720,10 @@ private:
 
     std::list<CNetMessage> vRecvMsg; // Used only by SocketHandler thread
     CKey v2_priv_key;
+    std::vector<std::byte, secure_allocator<std::byte>> v2_garbage_terminator;
+    std::vector<std::byte> v2_garbage_bytes_recd;
+    bool v2_keys_derived{false};
+    bool v2_garbage_terminated{false};
 
     // Our address, as reported by the peer
     CService addrLocal GUARDED_BY(m_addr_local_mutex);
@@ -876,6 +881,7 @@ public:
 
     void PushMessage(CNode* pnode, CSerializedNetMsg&& msg) EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex);
     void PushV2EllSwiftPubkey(CNode* pnode) EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex);
+    void PushV2GarbageTerminator(CNode* pnode);
 
     using NodeFn = std::function<void(CNode*)>;
     void ForEachNode(const NodeFn& func)
