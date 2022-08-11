@@ -54,7 +54,9 @@ void BIP324CipherSuite::CommitToKeys(const Span<const std::byte> data, bool comm
     set_nonce();
 }
 
-bool BIP324CipherSuite::Crypt(const Span<const std::byte> input, Span<std::byte> output,
+bool BIP324CipherSuite::Crypt(const Span<const std::byte> aad,
+                              const Span<const std::byte> input,
+                              Span<std::byte> output,
                               BIP324HeaderFlags& flags, bool encrypt)
 {
     // check buffer boundaries
@@ -84,13 +86,14 @@ bool BIP324CipherSuite::Crypt(const Span<const std::byte> input, Span<std::byte>
         fsc20.Crypt({reinterpret_cast<std::byte*>(&ciphertext_len), BIP324_LENGTH_FIELD_LEN},
                     {write_pos, BIP324_LENGTH_FIELD_LEN});
         write_pos += BIP324_LENGTH_FIELD_LEN;
-        RFC8439Encrypt({}, payload_key, nonce, input_vec, {write_pos, BIP324_HEADER_LEN + input.size() + RFC8439_TAGLEN});
+        RFC8439Encrypt(aad, payload_key, nonce, input_vec, {write_pos, BIP324_HEADER_LEN + input.size() + RFC8439_TAGLEN});
+
     } else {
         // we must use BIP324CipherSuite::DecryptLength before calling BIP324CipherSuite::Crypt
         // input is encrypted (header + payload) and the mac tag
         // decrypted header will be put in flags and output will be payload.
         std::vector<std::byte> decrypted_plaintext(input.size() - RFC8439_TAGLEN);
-        auto authenticated = RFC8439Decrypt({}, payload_key, nonce, input, decrypted_plaintext);
+        auto authenticated = RFC8439Decrypt(aad, payload_key, nonce, input, decrypted_plaintext);
         if (!authenticated) {
             return false;
         }
