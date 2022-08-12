@@ -166,6 +166,18 @@ int trace_misbehaving_connection(struct pt_regs *ctx) {
     misbehaving_connections.perf_submit(ctx, &misbehaving, sizeof(misbehaving));
     return 0;
 };
+
+BPF_PERF_OUTPUT(closed_connections);
+int trace_closed_connection(struct pt_regs *ctx) {
+    struct ClosedConnection closed = {};
+    bpf_usdt_readarg(1, ctx, &closed.conn.id);
+    bpf_usdt_readarg_p(2, ctx, &closed.conn.addr, MAX_PEER_ADDR_LENGTH);
+    bpf_usdt_readarg_p(3, ctx, &closed.conn.type, MAX_PEER_CONN_TYPE_LENGTH);
+    bpf_usdt_readarg(4, ctx, &closed.conn.network);
+    bpf_usdt_readarg(5, ctx, &closed.time_established);
+    closed_connections.perf_submit(ctx, &closed, sizeof(closed));
+    return 0;
+};
 """
 
 
@@ -189,6 +201,7 @@ class NewConnection(ctypes.Structure):
 
     def __repr__(self):
         return f"NewConnection(conn={self.conn}, existing={self.existing})"
+
 
 class ClosedConnection(ctypes.Structure):
     _fields_ = [
@@ -230,6 +243,7 @@ class NetTracepointTest(BitcoinTestFramework):
         self.outbound_conn_tracepoint_test()
         self.evicted_inbound_conn_tracepoint_test()
         self.misbehaving_conn_tracepoint_test()
+        self.closed_conn_tracepoint_test()
 
     def p2p_message_tracepoint_test(self):
         # Tests the net:inbound_message and net:outbound_message tracepoints
@@ -461,6 +475,43 @@ class NetTracepointTest(BitcoinTestFramework):
 
         bpf.cleanup()
         testnode.peer_disconnect()
+
+    def closed_conn_tracepoint_test(self):
+        self.log.info("hook into the net:closed_connection tracepoint")
+        ctx = USDT(pid=self.nodes[0].process.pid)
+        ctx.enable_probe(probe="net:closed_connection",
+                         fn_name="trace_closed_connection")
+        bpf = BPF(text=net_tracepoints_program, usdt_contexts=[ctx], debug=0, cflags=["-Wno-error=implicit-function-declaration"])
+
+        EXPECTED_CLOSED_CONNECTIONS = 2
+        closed_connections = []
+
+        def handle_closed_connection(_, data, __):
+            event = ctypes.cast(data, ctypes.POINTER(ClosedConnection)).contents
+            self.log.info(f"handle_closed_connection(): {event}")
+            closed_connections.append(event)
+
+        bpf["closed_connections"].open_perf_buffer(handle_closed_connection)
+
+        self.log.info(
+            f"connect {EXPECTED_CLOSED_CONNECTIONS} P2P test nodes to our bitcoind node")
+        testnodes = list()
+        for p2p_idx in range(EXPECTED_CLOSED_CONNECTIONS):
+            testnode = P2PInterface()
+            self.nodes[0].add_p2p_connection(testnode)
+            testnodes.append(testnode)
+        for node in testnodes:
+            node.peer_disconnect()
+        bpf.perf_buffer_poll(timeout=400)
+
+        assert_equal(EXPECTED_CLOSED_CONNECTIONS, len(closed_connections))
+        for closed_connection in closed_connections:
+            assert closed_connection.conn.id > 0
+            assert_equal("inbound", closed_connection.conn.conn_type.decode('utf-8'))
+            assert_equal(0, closed_connection.conn.network)
+            assert closed_connection.time_established > 0
+
+        bpf.cleanup()
 
 if __name__ == '__main__':
     NetTracepointTest().main()
