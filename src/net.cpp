@@ -608,6 +608,14 @@ void CNode::CloseSocketDisconnect()
     if (m_sock) {
         LogPrint(BCLog::NET, "disconnecting peer=%d\n", id);
         m_sock.reset();
+
+        TRACE6(net, closed_connection,
+            GetId(),
+            m_addr_name.c_str(),
+            ConnectionTypeAsString().c_str(),
+            ConnectedThroughNetwork(),
+            nKeyedNetGroup,
+            std::chrono::duration<uint64_t>(m_connected).count());
     }
     m_i2p_sam_session.reset();
 }
