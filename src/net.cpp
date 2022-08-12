@@ -53,6 +53,7 @@
 #include <optional>
 #include <unordered_map>
 
+TRACEPOINT_SEMAPHORE(net, closed_connection);
 TRACEPOINT_SEMAPHORE(net, evicted_inbound_connection);
 TRACEPOINT_SEMAPHORE(net, inbound_connection);
 TRACEPOINT_SEMAPHORE(net, outbound_connection);
@@ -562,6 +563,13 @@ void CNode::CloseSocketDisconnect()
     LOCK(m_sock_mutex);
     if (m_sock) {
         m_sock.reset();
+
+        TRACEPOINT(net, closed_connection,
+            GetId(),
+            m_addr_name.c_str(),
+            ConnectionTypeAsString().c_str(),
+            ConnectedThroughNetwork(),
+            Ticks<std::chrono::seconds>(m_connected));
     }
     m_i2p_sam_session.reset();
 }
