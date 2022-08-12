@@ -286,3 +286,25 @@ Spent   a05880b8c77971ed0b9f73062c7c4cdb0ff3856ab14cbf8bc481ed571cd34b83:1      
 Added   eb689865f7d957938978d6207918748f74e6aa074f47874724327089445b0960:0            5589696005 2094513 No
 Added   eb689865f7d957938978d6207918748f74e6aa074f47874724327089445b0960:1               1565556 2094513 No
 ```
+
+### log_p2p_connections.bt
+
+A `bpftrace` script to log information about opened, closed, misbehaving, and
+evicted P2P connections. Uses the `net:*_connection` tracepoints.
+
+```bash
+$ bpftrace contrib/tracing/log_p2p_connections.bt
+```
+
+This should produce an output similar to the following.
+
+```bash
+Attaching 6 probes...
+Logging opened, closed, misbehaving, and evicted P2P connections
+OUTBOUND conn to 127.0.0.1:15287: id=0, type=block-relay-only, network=0, net_group=245974404224840066, total_out=1
+INBOUND conn from 127.0.0.1:45324: id=1, type=inbound, network=0, net_group=90061749176390714, total_in=1
+MISBEHAVING conn id=1, score_before=0, score_increase=20, message='getdata message size = 50001', threshold_exceeded=false
+CLOSED conn to 127.0.0.1:15287: id=0, type=block-relay-only, network=0, net_group=245974404224840066, established=1231006505
+EVICTED conn to 127.0.0.1:45324: id=1, type=inbound, network=0, net_group=90061749176390714, established=1612312312
+...
+```
