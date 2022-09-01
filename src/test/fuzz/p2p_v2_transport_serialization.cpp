@@ -41,6 +41,7 @@ FUZZ_TARGET(p2p_v2_transport_serialization)
 
     // There is no sense in providing a mac assist if the length is incorrect.
     bool mac_assist = length_assist && fdp.ConsumeBool();
+    auto aad = fdp.ConsumeBytes<std::byte>(fdp.ConsumeIntegralInRange(0, 1024));
     auto payload_bytes = fdp.ConsumeRemainingBytes<uint8_t>();
     bool request_ignore_message{false};
 
@@ -54,16 +55,17 @@ FUZZ_TARGET(p2p_v2_transport_serialization)
 
         if (mac_assist) {
             std::array<std::byte, RFC8439_TAGLEN> tag;
-            ComputeRFC8439Tag(GetPoly1305Key(c20), {},
+            ComputeRFC8439Tag(GetPoly1305Key(c20), aad,
                               {reinterpret_cast<std::byte*>(payload_bytes.data()) + BIP324_LENGTH_FIELD_LEN,
-                              payload_bytes.size() - BIP324_LENGTH_FIELD_LEN - RFC8439_TAGLEN}, tag);
+                               payload_bytes.size() - BIP324_LENGTH_FIELD_LEN - RFC8439_TAGLEN},
+                              tag);
             memcpy(payload_bytes.data() + payload_bytes.size() - RFC8439_TAGLEN, tag.data(), RFC8439_TAGLEN);
 
             std::vector<std::byte> decrypted(payload_bytes.size() - BIP324_LENGTH_FIELD_LEN - RFC8439_TAGLEN);
-            RFC8439Decrypt({}, key_p, nonce,
+            RFC8439Decrypt(aad, key_p, nonce,
                            {reinterpret_cast<std::byte*>(payload_bytes.data() + BIP324_LENGTH_FIELD_LEN),
                             payload_bytes.size() - BIP324_LENGTH_FIELD_LEN},
-                            decrypted);
+                           decrypted);
             if (BIP324HeaderFlags((uint8_t)decrypted.at(0) & BIP324_IGNORE) != BIP324_NONE) {
                 request_ignore_message = true;
             }
@@ -80,7 +82,7 @@ FUZZ_TARGET(p2p_v2_transport_serialization)
             const std::chrono::microseconds m_time{std::numeric_limits<int64_t>::max()};
             bool reject_message{true};
             bool disconnect{true};
-            CNetMessage result{deserializer.GetMessage(m_time, reject_message, disconnect)};
+            CNetMessage result{deserializer.GetMessage(m_time, reject_message, disconnect, aad)};
 
             if (mac_assist) {
                 assert(!disconnect);
@@ -101,6 +103,7 @@ FUZZ_TARGET(p2p_v2_transport_serialization)
 
                 std::vector<unsigned char> header;
                 auto msg = CNetMsgMaker{result.m_recv.GetVersion()}.Make(result.m_type, MakeUCharSpan(result.m_recv));
+                msg.aad = aad;
                 // if decryption succeeds, encryption must succeed
                 assert(serializer.prepareForTransport(msg, header));
             }
