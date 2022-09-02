@@ -11,9 +11,12 @@
 #include <compat/compat.h>
 #include <node/connection_types.h>
 #include <consensus/amount.h>
+#include <crypto/bip324_suite.h>
+#include <crypto/rfc8439.h>
 #include <crypto/siphash.h>
 #include <hash.h>
 #include <i2p.h>
+#include <key.h>
 #include <net_permissions.h>
 #include <netaddress.h>
 #include <netbase.h>
@@ -31,6 +34,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -89,6 +93,8 @@ static constexpr bool DEFAULT_FIXEDSEEDS{true};
 static const size_t DEFAULT_MAXRECEIVEBUFFER = 5 * 1000;
 static const size_t DEFAULT_MAXSENDBUFFER    = 1 * 1000;
 
+static constexpr size_t V2_MIN_MESSAGE_LENGTH = BIP324_LENGTH_FIELD_LEN + BIP324_HEADER_LEN + RFC8439_TAGLEN;
+
 typedef int64_t NodeId;
 
 struct AddedNodeInfo
@@ -119,6 +125,7 @@ struct CSerializedNetMsg {
     }
 
     std::vector<unsigned char> data;
+    std::vector<std::byte> aad; // associated authenticated data for encrypted BIP324 (v2) transport
     std::string m_type;
 };
 
@@ -253,7 +260,10 @@ public:
     /** read and deserialize data, advances msg_bytes data pointer */
     virtual int Read(Span<const uint8_t>& msg_bytes) = 0;
     // decomposes a message from the context
-    virtual CNetMessage GetMessage(std::chrono::microseconds time, bool& reject_message) = 0;
+    virtual CNetMessage GetMessage(std::chrono::microseconds time,
+                                   bool& reject_message,
+                                   bool& disconnect,
+                                   Span<const std::byte> aad) = 0;
     virtual ~TransportDeserializer() {}
 };
 
@@ -317,7 +327,66 @@ public:
         }
         return ret;
     }
-    CNetMessage GetMessage(std::chrono::microseconds time, bool& reject_message) override;
+    CNetMessage GetMessage(std::chrono::microseconds time,
+                           bool& reject_message,
+                           bool& disconnect,
+                           Span<const std::byte> aad) override;
+};
+
+/** V2TransportDeserializer is a transport deserializer after BIP324 */
+class V2TransportDeserializer final : public TransportDeserializer
+{
+private:
+    std::unique_ptr<BIP324CipherSuite> m_cipher_suite;
+    const NodeId m_node_id;    // Only for logging
+    bool m_in_data = false;    // parsing header (false) or data (true)
+    size_t m_message_size = 0; // expected message size
+    CDataStream vRecv;         // received message data (encrypted length, payload ciphertext, MAC tag)
+    size_t m_hdr_pos = 0;      // read pos in header
+    size_t m_data_pos = 0;     // read pos in data
+
+public:
+    V2TransportDeserializer(const NodeId node_id, const BIP324Key& key_l, const BIP324Key& key_p, const BIP324Key& rekey_salt) : m_cipher_suite(new BIP324CipherSuite(key_l, key_p, rekey_salt)), m_node_id(node_id), vRecv(SER_NETWORK, INIT_PROTO_VERSION)
+    {
+        Reset();
+    }
+
+    void Reset()
+    {
+        vRecv.clear();
+        vRecv.resize(BIP324_LENGTH_FIELD_LEN);
+        m_in_data = false;
+        m_hdr_pos = 0;
+        m_message_size = 0;
+        m_data_pos = 0;
+    }
+    bool Complete() const override
+    {
+        if (!m_in_data) {
+            return false;
+        }
+        return (BIP324_HEADER_LEN + m_message_size + RFC8439_TAGLEN == m_data_pos);
+    }
+    void SetVersion(int nVersionIn) override
+    {
+        vRecv.SetVersion(nVersionIn);
+    }
+    int readHeader(Span<const uint8_t> msg_bytes);
+    int readData(Span<const uint8_t> msg_bytes);
+    int Read(Span<const uint8_t>& msg_bytes) override
+    {
+        int ret = m_in_data ? readData(msg_bytes) : readHeader(msg_bytes);
+        if (ret < 0) {
+            Reset();
+        } else {
+            msg_bytes = msg_bytes.subspan(ret);
+        }
+        return ret;
+    }
+    CNetMessage GetMessage(const std::chrono::microseconds time,
+                           bool& reject_message,
+                           bool& disconnect,
+                           Span<const std::byte> aad) override;
 };
 
 /** The TransportSerializer prepares messages for the network transport
@@ -325,13 +394,25 @@ public:
 class TransportSerializer {
 public:
     // prepare message for transport (header construction, error-correction computation, payload encryption, etc.)
-    virtual void prepareForTransport(CSerializedNetMsg& msg, std::vector<unsigned char>& header) const = 0;
+    virtual bool prepareForTransport(CSerializedNetMsg& msg, std::vector<unsigned char>& header) const = 0;
     virtual ~TransportSerializer() {}
 };
 
-class V1TransportSerializer : public TransportSerializer {
+class V1TransportSerializer : public TransportSerializer
+{
 public:
-    void prepareForTransport(CSerializedNetMsg& msg, std::vector<unsigned char>& header) const override;
+    bool prepareForTransport(CSerializedNetMsg& msg, std::vector<unsigned char>& header) const override;
+};
+
+class V2TransportSerializer : public TransportSerializer
+{
+private:
+    std::unique_ptr<BIP324CipherSuite> m_cipher_suite;
+
+public:
+    V2TransportSerializer(const BIP324Key& key_l, const BIP324Key& key_p, const BIP324Key& rekey_salt) : m_cipher_suite(new BIP324CipherSuite(key_l, key_p, rekey_salt)) {}
+    // prepare for next message
+    bool prepareForTransport(CSerializedNetMsg& msg, std::vector<unsigned char>& header) const override;
 };
 
 struct CNodeOptions
