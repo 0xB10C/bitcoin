@@ -211,6 +211,58 @@ Arguments passed:
 4. The expected transaction fee as an `int64`
 5. The position of the change output as an `int32`
 
+### Context `mempool`
+
+#### Tracepoint `mempool:added`
+
+Is called when a transaction is added to the node's mempool. Passes information
+about the transaction.
+
+Arguments passed:
+1. Transaction ID (hash) as `pointer to unsigned chars` (i.e. 32 bytes in little-endian)
+2. Transaction virtual size as `uint64`
+3. Transaction fee as `int64`
+
+#### Tracepoint `mempool:removed`
+
+Is called when a transaction is removed from the node's mempool. Passes information
+about the transaction.
+
+Arguments passed:
+1. Transaction ID (hash) as `pointer to unsigned chars` (i.e. 32 bytes in little-endian)
+2. Removal reason as `pointer to C-style String` (max. length 9 characters)
+3. Transaction virtual size as `uint64`
+4. Transaction fee as `int64`
+
+#### Tracepoint `mempool:replaced`
+
+Is called when a transaction in the node's mempool is getting replaced by another.
+Passed information about the replaced and replacement transactions.
+
+Arguments passed:
+1. Replacement transaction ID (hash) as `pointer to unsigned chars` (i.e. 32 bytes in little-endian)
+2. Replacement transaction virtual size as `uint64`
+3. Replacement transaction fee as `int64`
+4. Replaced transaction ID (hash) as `pointer to unsigned chars` (i.e. 32 bytes in little-endian)
+5. Replaced transaction virtual size as `uint64`
+6. Replaced transaction fee as `int64`
+
+Note: In cases where a single replacement transaction replaces multiple
+existing transactions in the mempool, the tracepoint is called once for each
+replaced transaction, with data of the replacement transaction being the same
+in each call.
+
+#### Tracepoint `mempool:rejected`
+
+Is called when a transaction received by a peer is rejected and does not enter
+the mempool. Passed information about the rejected transaction and its sender.
+
+Arguments passed:
+1. Transaction ID (hash) as `pointer to unsigned chars` (i.e. 32 bytes in little-endian)
+2. Reject reason as `pointer to C-style String` (max. length 118 characters)
+3. Peer id of sending node as `int64`
+4. Peer address and port (IPv4, IPv6, Tor v3, I2P, ...) as `pointer to C-style String` (max. length 68 characters)
+
 ## Adding tracepoints to Bitcoin Core
 
 All tracepoint-related macros are defined in `src/util/trace.h`. To use these

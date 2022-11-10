@@ -4162,6 +4162,12 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             LogPrint(BCLog::MEMPOOLREJ, "%s from peer=%d was not accepted: %s\n", tx.GetHash().ToString(),
                 pfrom.GetId(),
                 state.ToString());
+            TRACE4(mempool, rejected,
+                    txid.data(),
+                    state.GetRejectReason().c_str(),
+                    pfrom.GetId(),
+                    pfrom.m_addr_name.c_str()
+            );
             MaybePunishNodeForTx(pfrom.GetId(), state);
         }
         return;

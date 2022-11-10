@@ -286,3 +286,49 @@ Spent   a05880b8c77971ed0b9f73062c7c4cdb0ff3856ab14cbf8bc481ed571cd34b83:1      
 Added   eb689865f7d957938978d6207918748f74e6aa074f47874724327089445b0960:0            5589696005 2094513 No
 Added   eb689865f7d957938978d6207918748f74e6aa074f47874724327089445b0960:1               1565556 2094513 No
 ```
+
+### mempool_monitor.py
+
+A BCC Python script producing mempool statistics and an event log. Based on the
+`mempool:added`, `mempool:removed`, `mempool:replaced`, and `mempool:rejected`
+tracepoints.
+
+Statistics include incidence and rate for each event type since the script was
+started (`total`) as well as during the last minute (`1 min`) and ten minutes
+(`10 min`). The event log shows mempool events in real time, each entry
+comprising a timestamp along with all event data available via the event's
+tracepoint.
+
+```console
+$ python3 contrib/tracing/log_utxocache_flush.py ./src/bitcoind
+```
+
+```
+ Mempool Monitor
+ Press CTRL-C to stop.
+
+ ┌─Event count───────────────────────┐  ┌─Event rate──────────────────────────┐
+ │ Event       total   1 min  10 min │  │ Event       total    1 min   10 min │
+ │ added      4130tx   218tx  2211tx │  │ added     3.9tx/s  3.6tx/s  3.7tx/s │
+ │ removed     201tx     5tx    90tx │  │ removed   0.2tx/s  0.1tx/s  0.1tx/s │
+ │ replaced    201tx     5tx    90tx │  │ replaced  0.2tx/s  0.1tx/s  0.1tx/s │
+ │ rejected     31tx     5tx    23tx │  │ rejected  0.0tx/s  0.1tx/s  0.0tx/s │
+ └───────────────────────────────────┘  └─────────────────────────────────────┘
+
+ ┌─Event log───────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+ │ 17:09:56Z event=added, txid=0a2f2ef84d77a13162f26bb7a544efbab7f09d0b8a965b6f00e85bbd64cd8152, vsize=183, fee=4968   │
+ │ 17:09:56Z event=removed, txid=0356df4450c76d2474eab13fab15bfab843e31617edf9ce88d5d5bea5b19bf3e, reason=replaced, vsi│
+ │ ze=110, fee=16655                                                                                                   │
+ │ 17:09:56Z event=removed, txid=653db4f9af156626a7359c18f9cb095009583497ef606d7a9d2f093c63d392da, reason=replaced, vsi│
+ │ ze=110, fee=4037                                                                                                    │
+ │ 17:09:56Z event=rejected, txid=1cd12698577446904e8654372421e1ab5b82bdb8faee3f11f34ed758c17ae85a, reason=bad-txns-inp│
+ │ uts-missingorspent, peer_id=2568, peer_addr=158.69.116.169:8333                                                     │
+ │ 17:09:56Z event=replaced, replacement_txid=db3c91d7dfff65ea5b85ca58bc3e9a26556eb6506ccb04a573f920d297060218, replace│
+ │ ment_vsize=110, replacement_fee=23343, replaced_txid=0356df4450c76d2474eab13fab15bfab843e31617edf9ce88d5d5bea5b19bf3│
+ │ e, replaced_vsize=110, replaced_fee=16655                                                                           │
+ │ 17:09:56Z event=replaced, replacement_txid=9b304b9357df5e2cfcbbbead7ffa67c0efc3c599aac9093362b398478d46a587, replace│
+ │ ment_vsize=110, replacement_fee=4268, replaced_txid=653db4f9af156626a7359c18f9cb095009583497ef606d7a9d2f093c63d392da│
+ │ , replaced_vsize=110, replaced_fee=4037                                                                             │
+ │                                                                                                                     │
+ └─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+```
