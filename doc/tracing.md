@@ -310,6 +310,25 @@ void CConnman::PushMessage(…) {
   );
   …
 }
+To add a new tracepoint, `#include <util/trace.h>` in the compilation unit where
+the tracepoint is inserted and use either the `TRACEPOINT(context, event)` macro
+without arguments or the `TRACEPOINT(context, event, args...)` macro with up to
+12 arguments. The `context` and `event` specify the names by which the
+tracepoint is referred to. Please use `snake_case` and try to make sure that the
+tracepoint names make sense even without detailed knowledge of implementation
+details. Do not forget to update the tracepoint list in this document.
+
+For example, the `net:inbound_messsage` tracepoint with 6 arguments:
+
+```C++
+TRACEPOINT(net, inbound_message,
+    pnode->GetId(),
+    pnode->m_addr_name.c_str(),
+    pnode->ConnectionTypeAsString().c_str(),
+    sanitizedType.c_str(),
+    msg.data.size(),
+    msg.data.data()
+);
 ```
 
 If needed, an extra `if(TRACEPOINT_ACTIVE(context, event) {..}` check can be
