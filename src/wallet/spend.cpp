@@ -946,7 +946,7 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
         return util::Error{err.empty() ?_("Insufficient funds") : err};
     }
     const SelectionResult& result = *select_coins_res;
-    TRACE5(coin_selection, selected_coins, wallet.GetName().c_str(), GetAlgorithmName(result.GetAlgo()).c_str(), result.GetTarget(), result.GetWaste(), result.GetSelectedValue());
+    TRACEPOINT(coin_selection, selected_coins, wallet.GetName().c_str(), GetAlgorithmName(result.GetAlgo()).c_str(), result.GetTarget(), result.GetWaste(), result.GetSelectedValue());
 
     const CAmount change_amount = result.GetChange(coin_selection_params.min_viable_change, coin_selection_params.m_change_fee);
     if (change_amount > 0) {
@@ -1113,13 +1113,13 @@ util::Result<CreatedTransactionResult> CreateTransaction(
     LOCK(wallet.cs_wallet);
 
     auto res = CreateTransactionInternal(wallet, vecSend, change_pos, coin_control, sign);
-    TRACE4(coin_selection, normal_create_tx_internal, wallet.GetName().c_str(), bool(res),
+    TRACEPOINT(coin_selection, normal_create_tx_internal, wallet.GetName().c_str(), bool(res),
            res ? res->fee : 0, res ? res->change_pos : 0);
     if (!res) return res;
     const auto& txr_ungrouped = *res;
     // try with avoidpartialspends unless it's enabled already
     if (txr_ungrouped.fee > 0 /* 0 means non-functional fee rate estimation */ && wallet.m_max_aps_fee > -1 && !coin_control.m_avoid_partial_spends) {
-        TRACE1(coin_selection, attempting_aps_create_tx, wallet.GetName().c_str());
+        TRACEPOINT(coin_selection, attempting_aps_create_tx, wallet.GetName().c_str());
         CCoinControl tmp_cc = coin_control;
         tmp_cc.m_avoid_partial_spends = true;
 
@@ -1132,7 +1132,7 @@ util::Result<CreatedTransactionResult> CreateTransaction(
         auto txr_grouped = CreateTransactionInternal(wallet, vecSend, change_pos, tmp_cc, sign);
         // if fee of this alternative one is within the range of the max fee, we use this one
         const bool use_aps{txr_grouped.has_value() ? (txr_grouped->fee <= txr_ungrouped.fee + wallet.m_max_aps_fee) : false};
-        TRACE5(coin_selection, aps_create_tx_internal, wallet.GetName().c_str(), use_aps, txr_grouped.has_value(),
+        TRACEPOINT(coin_selection, aps_create_tx_internal, wallet.GetName().c_str(), use_aps, txr_grouped.has_value(),
                txr_grouped.has_value() ? txr_grouped->fee : 0, txr_grouped.has_value() ? txr_grouped->change_pos : 0);
         if (txr_grouped) {
             wallet.WalletLogPrintf("Fee non-grouped = %lld, grouped = %lld, using %s\n",

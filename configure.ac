@@ -1401,7 +1401,7 @@ if test "$use_usdt" != "no"; then
   AC_COMPILE_IFELSE([
     AC_LANG_PROGRAM(
       [#include <sys/sdt.h>],
-      [DTRACE_PROBE("context", "event");]
+      [STAP_PROBE("context", "event");]
     )],
     [AC_MSG_RESULT([yes]); AC_DEFINE([ENABLE_TRACING], [1], [Define to 1 to enable tracepoints for Userspace, Statically Defined Tracing])],
     [AC_MSG_RESULT([no]); use_usdt=no;]
