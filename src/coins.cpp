@@ -10,6 +10,10 @@
 #include <util/trace.h>
 #include <version.h>
 
+TRACEPOINT_SEMAPHORE(utxocache, add);
+TRACEPOINT_SEMAPHORE(utxocache, spent);
+TRACEPOINT_SEMAPHORE(utxocache, uncache);
+
 bool CCoinsView::GetCoin(const COutPoint &outpoint, Coin &coin) const { return false; }
 uint256 CCoinsView::GetBestBlock() const { return uint256(); }
 std::vector<uint256> CCoinsView::GetHeadBlocks() const { return std::vector<uint256>(); }

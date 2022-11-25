@@ -213,33 +213,103 @@ Arguments passed:
 
 ## Adding tracepoints to Bitcoin Core
 
-To add a new tracepoint, `#include <util/trace.h>` in the compilation unit where
-the tracepoint is inserted and use either the `TRACEPOINT(context, event)` macro
-without arguments or the `TRACEPOINT(context, event, args...)` macro with up to
-12 arguments. The `context` and `event` specify the names by which the
-tracepoint is referred to. Please use `snake_case` and try to make sure that the
-tracepoint names make sense even without detailed knowledge of implementation
-details. Do not forget to update the tracepoint list in this document.
+All tracepoint-related macros are defined in `src/util/trace.h`. To use these
+macros, `#include <util/trace.h>` in the compilation unit where the tracepoint
+is inserted. A tracepoint has a `context` and `event`, which specify the name by
+which a tracepoint is referred to. Make sure the tracepoint names make sense
+even without detailed knowledge of implementation details. Please use
+`snake_case` for the `context` and `event`.
 
-For example, the `net:inbound_messsage` tracepoint with 6 arguments:
+The `trace.h` header file contains the macro definitions
+`TRACEPOINT0(context, event)` for a tracepoint without arguments and
+`TRACEPOINT(context, event, ...)` for a tracepoint with up to twelve arguments
+(`...` is a variadic). These arguments can pass data to tracing scripts and are
+typically boolean, integer, or pointer to bytes or C-style strings. Often, the
+arguments need to be prepared by, for example, converting a C++ `std::string`
+to a C-style string with `c_str()`, calling getter functions, or doing some
+other light calculations. To avoid computational overhead by perparing
+tracepoint arguments for users not using the tracepoints, the arguments should
+only be prepared if there is something attached to the tracepoint.
+
+On Linux, this is solved with a counting semaphore for each tracepoint. When a
+tracing toolkit like bpftrace, bcc, or libbpf attaches to a tracepoint, the
+respective semaphore is increased. It's decreased when the tracing toolkit
+detaches from the tracepoint. By checking if the semaphore is greater than
+zero, we can cheaply gate the preparation of the tracepoint. The macro
+`TRACEPOINT_SEMAPHORE(context, event)` produces such a semaphore as a global
+variable. It must be placed in the same file as the tracepoint macro. The
+`TRACEPOINT(context, event, ...)` macro already includes the check if the
+tracepoint is being used.
 
 ```C++
-TRACEPOINT(net, inbound_message,
-    pnode->GetId(),
-    pnode->m_addr_name.c_str(),
-    pnode->ConnectionTypeAsString().c_str(),
-    sanitizedType.c_str(),
-    msg.data.size(),
-    msg.data.data()
-);
+// The `net:outbound_message` tracepoint with 6 arguments in `src/net.cpp`.
+
+TRACEPOINT_SEMAPHORE(net, outbound_message);
+…
+void CConnman::PushMessage(…) {
+  …
+  TRACEPOINT(net, outbound_message,
+      pnode->GetId(),
+      pnode->m_addr_name.c_str(),
+      pnode->ConnectionTypeAsString().c_str(),
+      sanitizedType.c_str(),
+      msg.data.size(),
+      msg.data.data()
+  );
+  …
+}
 ```
+
+If needed, an extra `if(TRACEPOINT_ACTIVE(context, event) {..}` check can be
+used to prepare arguments right before the tracepoint.
+
+```C++
+// A fictitious `multiline:argument_preparation` tracepoint with a single argument.
+
+TRACEPOINT_SEMAPHORE(multiline, argument_preparation);
+…
+if(TRACEPOINT_ACTIVE(multiline, argument_preparation) {
+  argument = slightly_expensive_calulation();
+  TRACEPOINT(multiline, argument_preparation, argument);
+}
+```
+
+```C++
+// The `test:zero_args` tracepoint without arguments in `src/test/util_trace_tests.cpp`.
+TRACEPOINT_SEMAPHORE(test, zero_args);
+…
+TRACEPOINT0(test, zero_args);
+```
+
+
+Step-by-step orientation for adding a new tracepoint:
+
+1. Familiarize yourself with the tracepoint macros mentioned above and the
+   tracepoint guidelines and best practices below.
+2. Do you need a tracepoint? Tracepoints are a machine-to-machine
+   interface. Would a machine-to-human interface like logging work too? Is this
+   something others could need too?
+3. Think about where to place the new tracepoint and which arguments you want to
+   pass. Where are the arguments already available? How expensive are the
+   arguments to compute?
+4. Pick descriptive names for the `context` and `event`. Check the list of
+   existing tracepoints too. Your tracepoint might fit into an existing context.
+5. Place the tracepoint, `#include <util/trace.h>`, and place a
+   `TRACEPOINT_SEMAPHORE(context, event)`.
+6. Document the tracepoint with its arguments and what event it traces in the
+   list in this document.
+7. Add a functional test for the tracepoint in
+   `test/functional/interface_usdt_{context}.py`.
+8. Add a tracepoint usage example in `contrib/tracing/`.
 
 ### Guidelines and best practices
 
 #### Clear motivation and use case
 Tracepoints need a clear motivation and use case. The motivation should
 outweigh the impact on, for example, code readability. There is no point in
-adding tracepoints that don't end up being used.
+adding tracepoints that don't end up being used. Additionally, adding many of
+lines of code just for tracepoint argument preparation probably comes with a high
+cost on code readability. During review, such a change might be rejected.
 
 #### Provide an example
 When adding a new tracepoint, provide an example. Examples can show the use case
@@ -249,11 +319,10 @@ the tracepoint. See existing examples in [contrib/tracing/].
 
 [contrib/tracing/]: ../contrib/tracing/
 
-#### No expensive computations for tracepoints
-Data passed to the tracepoint should be inexpensive to compute. Although the
-tracepoint itself only has overhead when enabled, the code to compute arguments
-is always run - even if the tracepoint is not used. For example, avoid
-serialization and parsing.
+#### Limit expensive computations for tracepoints
+While the tracepoint arguments are only prepared when we attach something to the
+tracepoint, an argument preparation should never hang the process. Hashing and
+serialization of data structures is probably fine, a `sleep(10s)` not.
 
 #### Semi-stable API
 Tracepoints should have a semi-stable API. Users should be able to rely on the
@@ -318,7 +387,7 @@ Displaying notes found in: .note.stapsdt
   stapsdt              0x0000005d	NT_STAPSDT (SystemTap probe descriptors)
     Provider: net
     Name: outbound_message
-    Location: 0x0000000000107c05, Base: 0x0000000000579c90, Semaphore: 0x0000000000000000
+    Location: 0x0000000000107c05, Base: 0x0000000000579c90, Semaphore: 0x0000000000a69780
     Arguments: -8@%r12 8@%rbx 8@%rdi 8@192(%rsp) 8@%rax 8@%rdx
 …
 ```
@@ -337,7 +406,7 @@ between distributions. For example, on
 
 ```
 $ tplist -l ./src/bitcoind -v
-b'net':b'outbound_message' [sema 0x0]
+b'net':b'outbound_message' [sema 0xa69780]
   1 location(s)
   6 argument(s)
 …
