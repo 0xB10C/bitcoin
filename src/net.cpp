@@ -2781,14 +2781,17 @@ void CConnman::PushMessage(CNode* pnode, CSerializedNetMsg&& msg)
         CaptureMessage(pnode->addr, msg.m_type, msg.data, /*is_incoming=*/false);
     }
 
-    TRACEPOINT(net, outbound_message,
-        pnode->GetId(),
-        pnode->m_addr_name.c_str(),
-        pnode->ConnectionTypeAsString().c_str(),
-        msg.m_type.c_str(),
-        msg.data.size(),
-        msg.data.data()
-    );
+    if(TRACEPOINT_ACTIVE(net, outbound_message)) {
+      assert(0);
+      TRACEPOINT_UNCHECKED(net, outbound_message,
+          pnode->GetId(),
+          pnode->m_addr_name.c_str(),
+          pnode->ConnectionTypeAsString().c_str(),
+          msg.m_type.c_str(),
+          msg.data.size(),
+          msg.data.data()
+      );
+    }
 
     // make sure we use the appropriate network transport format
     std::vector<unsigned char> serializedHeader;
