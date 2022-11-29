@@ -4368,12 +4368,18 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 tx.GetWitnessHash().ToString(),
                 pfrom.GetId(),
                 state.ToString());
-            TRACEPOINT(mempool, rejected,
+            if(TRACEPOINT_ACTIVE(mempool, rejected)) {
+                CDataStream rejected_tx(SER_NETWORK, PROTOCOL_VERSION);
+                rejected_tx << tx;
+                TRACEPOINT(mempool, rejected,
                     txid.data(),
                     state.GetRejectReason().c_str(),
                     pfrom.GetId(),
-                    pfrom.m_addr_name.c_str()
-            );
+                    pfrom.m_addr_name.c_str(),
+                    rejected_tx.size(),
+                    rejected_tx.data()
+                );
+            }
             MaybePunishNodeForTx(pfrom.GetId(), state);
         }
         return;
