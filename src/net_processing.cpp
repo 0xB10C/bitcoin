@@ -176,6 +176,9 @@ static constexpr size_t MAX_ADDR_PROCESSING_TOKEN_BUCKET{MAX_ADDR_TO_SEND};
 /** The compactblocks version we support. See BIP 152. */
 static constexpr uint64_t CMPCTBLOCKS_VERSION{2};
 
+TRACEPOINT_SEMAPHORE(net, inbound_message);
+TRACEPOINT_SEMAPHORE(mempool, rejected);
+
 // Internal stuff
 namespace {
 /** Blocks that are in flight, and that are in the queue to be downloaded. */
@@ -4365,6 +4368,12 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 tx.GetWitnessHash().ToString(),
                 pfrom.GetId(),
                 state.ToString());
+            TRACEPOINT(mempool, rejected,
+                    txid.data(),
+                    state.GetRejectReason().c_str(),
+                    pfrom.GetId(),
+                    pfrom.m_addr_name.c_str()
+            );
             MaybePunishNodeForTx(pfrom.GetId(), state);
         }
         return;
