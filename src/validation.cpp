@@ -124,6 +124,7 @@ uint256 g_best_block;
 
 TRACEPOINT_SEMAPHORE(validation, block_connected);
 TRACEPOINT_SEMAPHORE(utxocache, flush);
+TRACEPOINT_SEMAPHORE(mempool, replaced);
 
 const CBlockIndex* Chainstate::FindForkInGlobalIndex(const CBlockLocator& locator) const
 {
@@ -1061,7 +1062,7 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
                 hash.ToString(),
                 FormatMoney(ws.m_modified_fees - ws.m_conflicting_fees),
                 (int)entry->GetTxSize() - (int)ws.m_conflicting_size);
-        TRACE6(mempool, replaced,
+        TRACEPOINT(mempool, replaced,
                 hash.data(),
                 entry->GetTxSize(),
                 entry->GetFee(),

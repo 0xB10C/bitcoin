@@ -186,6 +186,7 @@ static constexpr size_t MAX_ADDR_PROCESSING_TOKEN_BUCKET{MAX_ADDR_TO_SEND};
 static constexpr uint64_t CMPCTBLOCKS_VERSION{2};
 
 TRACEPOINT_SEMAPHORE(net, inbound_message);
+TRACEPOINT_SEMAPHORE(mempool, rejected);
 
 // Internal stuff
 namespace {
@@ -4162,7 +4163,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             LogPrint(BCLog::MEMPOOLREJ, "%s from peer=%d was not accepted: %s\n", tx.GetHash().ToString(),
                 pfrom.GetId(),
                 state.ToString());
-            TRACE4(mempool, rejected,
+            TRACEPOINT(mempool, rejected,
                     txid.data(),
                     state.GetRejectReason().c_str(),
                     pfrom.GetId(),
