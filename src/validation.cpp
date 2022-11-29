@@ -1062,14 +1062,24 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
                 hash.ToString(),
                 FormatMoney(ws.m_modified_fees - ws.m_conflicting_fees),
                 (int)entry->GetTxSize() - (int)ws.m_conflicting_size);
-        TRACEPOINT(mempool, replaced,
+        if(TRACEPOINT_ACTIVE(mempool, replaced)) {
+            CDataStream replacement_tx(SER_NETWORK, PROTOCOL_VERSION);
+            replacement_tx << entry->GetTx();
+            CDataStream replaced_tx(SER_NETWORK, PROTOCOL_VERSION);
+            replaced_tx << it->GetTx();
+            TRACEPOINT(mempool, replaced,
                 hash.data(),
                 entry->GetTxSize(),
                 entry->GetFee(),
                 it->GetTx().GetHash().data(),
                 it->GetTxSize(),
-                it->GetFee()
-        );
+                it->GetFee(),
+                replacement_tx.size(),
+                replacement_tx.data(), // possibly swap https://github.com/bitcoin/bitcoin/pull/26531/files#r1036914820
+                replaced_tx.size(), // ^^^
+                replaced_tx.data()
+            );
+        }
         ws.m_replaced_transactions.push_back(it->GetSharedTx());
     }
     m_pool.RemoveStaged(ws.m_all_conflicting, false, MemPoolRemovalReason::REPLACED);

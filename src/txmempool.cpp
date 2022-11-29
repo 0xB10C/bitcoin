@@ -14,6 +14,7 @@
 #include <policy/policy.h>
 #include <policy/settings.h>
 #include <reverse_iterator.h>
+#include <streams.h>
 #include <util/check.h>
 #include <util/moneystr.h>
 #include <util/overflow.h>
@@ -463,11 +464,17 @@ void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAnces
     vTxHashes.emplace_back(tx.GetWitnessHash(), newit);
     newit->vTxHashesIdx = vTxHashes.size() - 1;
 
-    TRACEPOINT(mempool, added,
-        entry.GetTx().GetHash().data(),
-        entry.GetTxSize(),
-        entry.GetFee()
-    );
+    if(TRACEPOINT_ACTIVE(mempool, added)) {
+        CDataStream added_tx(SER_NETWORK, PROTOCOL_VERSION);
+        added_tx << entry.GetTx();
+        TRACEPOINT(mempool, added,
+            entry.GetTx().GetHash().data(),
+            entry.GetTxSize(),
+            entry.GetFee(),
+            added_tx.size(),
+            added_tx.data()
+        );
+    }
 }
 
 void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
@@ -483,12 +490,19 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
         // notification.
         GetMainSignals().TransactionRemovedFromMempool(it->GetSharedTx(), reason, mempool_sequence);
     }
-    TRACEPOINT(mempool, removed,
-        it->GetTx().GetHash().data(),
-        RemovalReasonToString(reason).c_str(),
-        it->GetTxSize(),
-        it->GetFee()
-    );
+
+    if(TRACEPOINT_ACTIVE(mempool, removed)) {
+        CDataStream removed_tx(SER_NETWORK, PROTOCOL_VERSION);
+        removed_tx << it->GetTx();
+        TRACEPOINT(mempool, removed,
+            it->GetTx().GetHash().data(),
+            RemovalReasonToString(reason).c_str(),
+            it->GetTxSize(),
+            it->GetFee(),
+            removed_tx.size(),
+            removed_tx.data()
+        );
+    }
 
     const uint256 hash = it->GetTx().GetHash();
     for (const CTxIn& txin : it->GetTx().vin)
