@@ -34,12 +34,19 @@ MEMPOOL_TRACEPOINTS_PROGRAM = """
 // The longest string returned by RemovalReasonToString() is 'sizelimit'
 #define MAX_REMOVAL_REASON_LENGTH       9
 #define HASH_LENGTH                     32
+// For this test, we don't expect transactions larger than MAX_TX_SIZE byte.
+// On mainnet, transactions can certainly be larger.
+#define MAX_TX_SIZE                     32768
+
+#define MIN(a,b) ({ __typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _a < _b ? _a : _b; })
 
 struct added_event
 {
   u8    hash[HASH_LENGTH];
   u64   vsize;
   s64   fee;
+  u64   size;
+  u8    tx[MAX_TX_SIZE];
 };
 
 struct removed_event
@@ -48,6 +55,8 @@ struct removed_event
   char  reason[MAX_REMOVAL_REASON_LENGTH];
   u64   vsize;
   s64   fee;
+  u64   size;
+  u8    tx[MAX_TX_SIZE];
 };
 
 struct rejected_event
@@ -56,6 +65,8 @@ struct rejected_event
   char  reason[MAX_REJECT_REASON_LENGTH];
   s64   peer_id;
   char  peer_addr[MAX_PEER_ADDR_LENGTH];
+  u64   size;
+  u8    tx[MAX_TX_SIZE];
 };
 
 struct replaced_event
@@ -66,60 +77,82 @@ struct replaced_event
   u8    replaced_hash[HASH_LENGTH];
   u64   replaced_vsize;
   s64   replaced_fee;
+  u64   replacement_size;
+  u8    replacement_tx[MAX_TX_SIZE]; // swap?
+  u64   replaced_size; // ^^^
+  u8    replaced_tx[MAX_TX_SIZE];
 };
 
-// BPF perf buffer to push the data to user space.
-BPF_PERF_OUTPUT(added_events);
-BPF_PERF_OUTPUT(removed_events);
-BPF_PERF_OUTPUT(rejected_events);
-BPF_PERF_OUTPUT(replaced_events);
+// BPF ring buffer to push the data to user space. The ring buffer allows us to
+// allocated enough space for the raw transactions compared to a
+// BPF_PERFBUF_OUTPUT.
+BPF_RINGBUF_OUTPUT(added_events, 128);
+BPF_RINGBUF_OUTPUT(removed_events, 128);
+BPF_RINGBUF_OUTPUT(rejected_events, 128);
+BPF_RINGBUF_OUTPUT(replaced_events, 128);
 
 int trace_added(struct pt_regs *ctx) {
-  struct added_event added = {};
+  struct added_event *added = added_events.ringbuf_reserve(sizeof(struct added_event));
+  if (!added) return -1;
 
-  bpf_usdt_readarg_p(1, ctx, &added.hash, HASH_LENGTH);
-  bpf_usdt_readarg(2, ctx, &added.vsize);
-  bpf_usdt_readarg(3, ctx, &added.fee);
-
-  added_events.perf_submit(ctx, &added, sizeof(added));
+  bpf_usdt_readarg_p(1, ctx, &added->hash, HASH_LENGTH);
+  bpf_usdt_readarg(2, ctx, &added->vsize);
+  bpf_usdt_readarg(3, ctx, &added->fee);
+  bpf_usdt_readarg(4, ctx, &added->size);
+  // If the transaction is larger than MAX_TX_SIZE, it's cut-off after MAX_TX_SIZE bytes.
+  bpf_usdt_readarg_p(5, ctx, &added->tx, MIN(added->size, MAX_TX_SIZE));
+  added_events.ringbuf_submit(added, 0);
   return 0;
 }
 
 int trace_removed(struct pt_regs *ctx) {
-  struct removed_event removed = {};
+  struct removed_event *removed = removed_events.ringbuf_reserve(sizeof(struct removed_event));
+  if (!removed) return -1;
 
-  bpf_usdt_readarg_p(1, ctx, &removed.hash, HASH_LENGTH);
-  bpf_usdt_readarg_p(2, ctx, &removed.reason, MAX_REMOVAL_REASON_LENGTH);
-  bpf_usdt_readarg(3, ctx, &removed.vsize);
-  bpf_usdt_readarg(4, ctx, &removed.fee);
+  bpf_usdt_readarg_p(1, ctx, &removed->hash, HASH_LENGTH);
+  bpf_usdt_readarg_p(2, ctx, &removed->reason, MAX_REMOVAL_REASON_LENGTH);
+  bpf_usdt_readarg(3, ctx, &removed->vsize);
+  bpf_usdt_readarg(4, ctx, &removed->fee);
+  bpf_usdt_readarg(5, ctx, &removed->size);
+  // If the transaction is larger than MAX_TX_SIZE, it's cut-off after MAX_TX_SIZE bytes.
+  bpf_usdt_readarg_p(6, ctx, &removed->tx, MIN(removed->size, MAX_TX_SIZE));
 
-  removed_events.perf_submit(ctx, &removed, sizeof(removed));
+  removed_events.ringbuf_submit(removed, 0);
   return 0;
 }
 
 int trace_rejected(struct pt_regs *ctx) {
-  struct rejected_event rejected = {};
+  struct rejected_event *rejected = rejected_events.ringbuf_reserve(sizeof(struct rejected_event));
+  if (!rejected) return -1;
 
-  bpf_usdt_readarg_p(1, ctx, &rejected.hash, HASH_LENGTH);
-  bpf_usdt_readarg_p(2, ctx, &rejected.reason, MAX_REJECT_REASON_LENGTH);
-  bpf_usdt_readarg(3, ctx, &rejected.peer_id);
-  bpf_usdt_readarg_p(4, ctx, &rejected.peer_addr, MAX_PEER_ADDR_LENGTH);
+  bpf_usdt_readarg_p(1, ctx, &rejected->hash, HASH_LENGTH);
+  bpf_usdt_readarg_p(2, ctx, &rejected->reason, MAX_REJECT_REASON_LENGTH);
+  bpf_usdt_readarg(3, ctx, &rejected->peer_id);
+  bpf_usdt_readarg_p(4, ctx, &rejected->peer_addr, MAX_PEER_ADDR_LENGTH);
+  bpf_usdt_readarg(5, ctx, &rejected->size);
+  // If the transaction is larger than MAX_TX_SIZE, it's cut-off after MAX_TX_SIZE bytes.
+  bpf_usdt_readarg_p(6, ctx, &rejected->tx, MIN(rejected->size, MAX_TX_SIZE));
 
-  rejected_events.perf_submit(ctx, &rejected, sizeof(rejected));
+  rejected_events.ringbuf_submit(rejected, 0);
   return 0;
 }
 
 int trace_replaced(struct pt_regs *ctx) {
-  struct replaced_event replaced = {};
+  struct replaced_event *replaced = replaced_events.ringbuf_reserve(sizeof(struct replaced_event));
+  if (!replaced) return -1;
 
-  bpf_usdt_readarg_p(1, ctx, &replaced.replacement_hash, HASH_LENGTH);
-  bpf_usdt_readarg(2, ctx, &replaced.replacement_vsize);
-  bpf_usdt_readarg(3, ctx, &replaced.replacement_fee);
-  bpf_usdt_readarg_p(4, ctx, &replaced.replaced_hash, HASH_LENGTH);
-  bpf_usdt_readarg(5, ctx, &replaced.replaced_vsize);
-  bpf_usdt_readarg(6, ctx, &replaced.replaced_fee);
+  bpf_usdt_readarg_p(1, ctx, &replaced->replacement_hash, HASH_LENGTH);
+  bpf_usdt_readarg(2, ctx, &replaced->replacement_vsize);
+  bpf_usdt_readarg(3, ctx, &replaced->replacement_fee);
+  bpf_usdt_readarg_p(4, ctx, &replaced->replaced_hash, HASH_LENGTH);
+  bpf_usdt_readarg(5, ctx, &replaced->replaced_vsize);
+  bpf_usdt_readarg(6, ctx, &replaced->replaced_fee);
+  bpf_usdt_readarg(7, ctx, &replaced->replacement_size);
+  bpf_usdt_readarg_p(8, ctx, &replaced->replacement_tx, MIN(replaced->replacement_size, MAX_TX_SIZE));
+  bpf_usdt_readarg(9, ctx, &replaced->replaced_size);
+  bpf_usdt_readarg_p(10, ctx, &replaced->replaced_tx, MIN(replaced->replaced_size, MAX_TX_SIZE));
 
-  replaced_events.perf_submit(ctx, &replaced, sizeof(replaced));
+  replaced_events.ringbuf_submit(replaced, 0);
   return 0;
 }
 """
@@ -143,7 +176,7 @@ class MempoolTracepointTest(BitcoinTestFramework):
 
     def added_test(self):
         """Add a transaction to the mempool and make sure the tracepoint returns
-        the expected txid, vsize, and fee."""
+        the expected txid, vsize, fee, and raw transaction."""
 
         EXPECTED_ADDED_EVENTS = 1
         handled_added_events = 0
@@ -160,9 +193,11 @@ class MempoolTracepointTest(BitcoinTestFramework):
             assert_equal(txid, bytes(event.hash)[::-1].hex())
             assert_equal(vsize, event.vsize)
             assert_equal(fee, event.fee)
+            tx_size = event.size
+            assert_equal(tx_hex, bytes(event.tx)[:tx_size].hex())
             handled_added_events += 1
 
-        bpf["added_events"].open_perf_buffer(handle_added_event)
+        bpf["added_events"].open_ring_buffer(handle_added_event)
 
         self.log.info("Sending transaction...")
         fee = Decimal(31200)
@@ -170,9 +205,10 @@ class MempoolTracepointTest(BitcoinTestFramework):
         # expected data
         txid = tx["txid"]
         vsize = tx["tx"].get_vsize()
+        tx_hex = tx["hex"]
 
         self.log.info("Polling buffer...")
-        bpf.perf_buffer_poll(timeout=200)
+        bpf.ring_buffer_poll(timeout=200)
 
         self.log.info("Cleaning up mempool...")
         self.generate(node, 1)
@@ -202,9 +238,11 @@ class MempoolTracepointTest(BitcoinTestFramework):
             assert_equal(reason, event.reason.decode("UTF-8"))
             assert_equal(vsize, event.vsize)
             assert_equal(fee, event.fee)
+            tx_size = event.size
+            assert_equal(tx_hex, bytes(event.tx)[:tx_size].hex())
             handled_removed_events += 1
 
-        bpf["removed_events"].open_perf_buffer(handle_removed_event)
+        bpf["removed_events"].open_ring_buffer(handle_removed_event)
 
         self.log.info("Sending transaction...")
         fee = Decimal(31200)
@@ -213,6 +251,7 @@ class MempoolTracepointTest(BitcoinTestFramework):
         txid = tx["txid"]
         reason = "expiry"
         vsize = tx["tx"].get_vsize()
+        tx_hex = tx["hex"]
 
         self.log.info("Fast-forwarding time to mempool expiry...")
         entry_time = node.getmempoolentry(txid)["time"]
@@ -224,7 +263,7 @@ class MempoolTracepointTest(BitcoinTestFramework):
         self.wallet.send_self_transfer(from_node=node)
 
         self.log.info("Polling buffer...")
-        bpf.perf_buffer_poll(timeout=200)
+        bpf.ring_buffer_poll(timeout=200)
 
         bpf.cleanup()
 
@@ -253,9 +292,13 @@ class MempoolTracepointTest(BitcoinTestFramework):
             assert_equal(replacement_txid, bytes(event.replacement_hash)[::-1].hex())
             assert_equal(replacement_vsize, event.replacement_vsize)
             assert_equal(replacement_fee, event.replacement_fee)
+            replacement_size = event.replacement_size
+            assert_equal(replacement_hex, bytes(event.replacement_tx)[:replacement_size].hex())
+            replaced_size = event.replaced_size
+            assert_equal(replaced_hex, bytes(event.replaced_tx)[:replaced_size].hex())
             handled_replaced_events += 1
 
-        bpf["replaced_events"].open_perf_buffer(handle_replaced_event)
+        bpf["replaced_events"].open_ring_buffer(handle_replaced_event)
 
         self.log.info("Sending RBF transaction...")
         utxo = self.wallet.get_utxo(mark_as_spent=True)
@@ -274,11 +317,13 @@ class MempoolTracepointTest(BitcoinTestFramework):
         replaced_txid = original_tx["txid"]
         replaced_vsize = original_tx["tx"].get_vsize()
         replaced_fee = original_fee
+        replaced_hex = original_tx["hex"]
         replacement_txid = replacement_tx["txid"]
         replacement_vsize = replacement_tx["tx"].get_vsize()
+        replacement_hex = replacement_tx["hex"]
 
         self.log.info("Polling buffer...")
-        bpf.perf_buffer_poll(timeout=200)
+        bpf.ring_buffer_poll(timeout=200)
 
         bpf.cleanup()
 
@@ -308,9 +353,11 @@ class MempoolTracepointTest(BitcoinTestFramework):
             assert_equal(reason, event.reason.decode("UTF-8"))
             assert_equal(peer_id, event.peer_id)
             assert_equal(peer_addr, event.peer_addr.decode("UTF-8"))
+            tx_size = event.size
+            assert_equal(tx_hex, bytes(event.tx)[:tx_size].hex())
             handled_rejected_events += 1
 
-        bpf["rejected_events"].open_perf_buffer(handle_rejected_event)
+        bpf["rejected_events"].open_ring_buffer(handle_rejected_event)
 
         self.log.info("Sending invalid transaction...")
         tx = self.wallet.create_self_transfer()["tx"]
@@ -322,12 +369,13 @@ class MempoolTracepointTest(BitcoinTestFramework):
         txid = tx.hash
         reason = "bad-txns-too-many-sigops"
         peer_id = 0
+        tx_hex = tx.serialize().hex()
         # extract ip and port used to connect to node
         socket = node.p2ps[0]._transport._sock
         peer_addr = ":".join([str(x) for x in socket.getsockname()])
 
         self.log.info("Polling buffer...")
-        bpf.perf_buffer_poll(timeout=200)
+        bpf.ring_buffer_poll(timeout=200)
 
         bpf.cleanup()
 
