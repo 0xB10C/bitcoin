@@ -77,6 +77,7 @@ struct replaced_event
   u8    replaced_hash[HASH_LENGTH];
   u64   replaced_vsize;
   s64   replaced_fee;
+  u64   replaced_added_time;
   u64   replacement_size;
   u8    replacement_tx[MAX_TX_SIZE]; // swap?
   u64   replaced_size; // ^^^
@@ -147,10 +148,11 @@ int trace_replaced(struct pt_regs *ctx) {
   bpf_usdt_readarg_p(4, ctx, &replaced->replaced_hash, HASH_LENGTH);
   bpf_usdt_readarg(5, ctx, &replaced->replaced_vsize);
   bpf_usdt_readarg(6, ctx, &replaced->replaced_fee);
-  bpf_usdt_readarg(7, ctx, &replaced->replacement_size);
-  bpf_usdt_readarg_p(8, ctx, &replaced->replacement_tx, MIN(replaced->replacement_size, MAX_TX_SIZE));
-  bpf_usdt_readarg(9, ctx, &replaced->replaced_size);
-  bpf_usdt_readarg_p(10, ctx, &replaced->replaced_tx, MIN(replaced->replaced_size, MAX_TX_SIZE));
+  bpf_usdt_readarg(7, ctx, &replaced->replaced_time_added);
+  bpf_usdt_readarg(8, ctx, &replaced->replacement_size);
+  bpf_usdt_readarg_p(9, ctx, &replaced->replacement_tx, MIN(replaced->replacement_size, MAX_TX_SIZE));
+  bpf_usdt_readarg(10, ctx, &replaced->replaced_size);
+  bpf_usdt_readarg_p(11, ctx, &replaced->replaced_tx, MIN(replaced->replaced_size, MAX_TX_SIZE));
 
   replaced_events.ringbuf_submit(replaced, 0);
   return 0;

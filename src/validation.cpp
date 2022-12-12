@@ -1074,9 +1074,10 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
                 it->GetTx().GetHash().data(),
                 it->GetTxSize(),
                 it->GetFee(),
+                std::chrono::duration_cast<std::chrono::duration<std::uint64_t>>(it->GetTime()).count(),
                 replacement_tx.size(),
-                replacement_tx.data(), // possibly swap https://github.com/bitcoin/bitcoin/pull/26531/files#r1036914820
-                replaced_tx.size(), // ^^^
+                replacement_tx.data(),
+                replaced_tx.size(),
                 replaced_tx.data()
             );
         }
