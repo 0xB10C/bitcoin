@@ -60,13 +60,10 @@ struct rejected_event
 {
   u8    hash[HASH_LENGTH];
   char  reason[MAX_REJECT_REASON_LENGTH];
-<<<<<<< HEAD
-=======
   s64   peer_id;
   char  peer_addr[MAX_PEER_ADDR_LENGTH];
   u64   size;
   u8    tx[MAX_TX_SIZE];
->>>>>>> 86a7360bf4 (demo: adopt tests)
 };
 
 struct replaced_event
@@ -75,11 +72,15 @@ struct replaced_event
   s32   replaced_vsize;
   s64   replaced_fee;
 <<<<<<< HEAD
+<<<<<<< HEAD
   u64   replaced_entry_time;
   u8    replacement_hash[HASH_LENGTH];
   s32   replacement_vsize;
   s64   replacement_fee;
 =======
+=======
+  u64   replaced_added_time;
+>>>>>>> 78d608bb00 (add: mempool added time of replaced transaction)
   u64   replacement_size;
   u8    replacement_tx[MAX_TX_SIZE]; // swap?
   u64   replaced_size; // ^^^
@@ -173,11 +174,19 @@ int trace_replaced(struct pt_regs *ctx) {
   bpf_usdt_readarg_p(4, ctx, &replaced->replaced_hash, HASH_LENGTH);
   bpf_usdt_readarg(5, ctx, &replaced->replaced_vsize);
   bpf_usdt_readarg(6, ctx, &replaced->replaced_fee);
+<<<<<<< HEAD
   bpf_usdt_readarg(7, ctx, &replaced->replacement_size);
   bpf_usdt_readarg_p(8, ctx, &replaced->replacement_tx, MIN(replaced->replacement_size, MAX_TX_SIZE));
   bpf_usdt_readarg(9, ctx, &replaced->replaced_size);
   bpf_usdt_readarg_p(10, ctx, &replaced->replaced_tx, MIN(replaced->replaced_size, MAX_TX_SIZE));
 >>>>>>> 86a7360bf4 (demo: adopt tests)
+=======
+  bpf_usdt_readarg(7, ctx, &replaced->replaced_time_added);
+  bpf_usdt_readarg(8, ctx, &replaced->replacement_size);
+  bpf_usdt_readarg_p(9, ctx, &replaced->replacement_tx, MIN(replaced->replacement_size, MAX_TX_SIZE));
+  bpf_usdt_readarg(10, ctx, &replaced->replaced_size);
+  bpf_usdt_readarg_p(11, ctx, &replaced->replaced_tx, MIN(replaced->replaced_size, MAX_TX_SIZE));
+>>>>>>> 78d608bb00 (add: mempool added time of replaced transaction)
 
   replaced_events.ringbuf_submit(replaced, 0);
   return 0;
@@ -210,32 +219,16 @@ class MempoolTracepointTest(BitcoinTestFramework):
         bpf = BPF(text=MEMPOOL_TRACEPOINTS_PROGRAM, usdt_contexts=[ctx], debug=0, cflags=["-Wno-error=implicit-function-declaration"])
 
         def handle_added_event(_, data, __):
-<<<<<<< HEAD
             events.append(bpf["added_events"].event(data))
-=======
-            nonlocal handled_added_events
-            event = bpf["added_events"].event(data)
-            assert_equal(txid, bytes(event.hash)[::-1].hex())
-            assert_equal(vsize, event.vsize)
-            assert_equal(fee, event.fee)
-            tx_size = event.size
-            assert_equal(tx_hex, bytes(event.tx)[:tx_size].hex())
-            handled_added_events += 1
->>>>>>> 86a7360bf4 (demo: adopt tests)
 
         bpf["added_events"].open_ring_buffer(handle_added_event)
 
         self.log.info("Sending transaction...")
         fee = Decimal(31200)
-<<<<<<< HEAD
         tx = self.wallet.send_self_transfer(from_node=node, fee=fee / COIN)
-=======
-        tx = self.wallet.send_self_transfer(from_node=node, fee=fee/COIN)
-        # expected data
         txid = tx["txid"]
         vsize = tx["tx"].get_vsize()
         tx_hex = tx["hex"]
->>>>>>> 86a7360bf4 (demo: adopt tests)
 
         self.log.info("Polling buffer...")
         bpf.ring_buffer_poll(timeout=200)
@@ -249,6 +242,7 @@ class MempoolTracepointTest(BitcoinTestFramework):
         assert_equal(bytes(event.hash)[::-1].hex(), tx["txid"])
         assert_equal(event.vsize, tx["tx"].get_vsize())
         assert_equal(event.fee, fee)
+        assert_equal(tx_hex, bytes(event.tx)[:event.size].hex())
 
         bpf.cleanup()
         self.generate(self.wallet, 1)
@@ -266,19 +260,7 @@ class MempoolTracepointTest(BitcoinTestFramework):
         bpf = BPF(text=MEMPOOL_TRACEPOINTS_PROGRAM, usdt_contexts=[ctx], debug=0, cflags=["-Wno-error=implicit-function-declaration"])
 
         def handle_removed_event(_, data, __):
-<<<<<<< HEAD
             events.append(bpf["removed_events"].event(data))
-=======
-            nonlocal handled_removed_events
-            event = bpf["removed_events"].event(data)
-            assert_equal(txid, bytes(event.hash)[::-1].hex())
-            assert_equal(reason, event.reason.decode("UTF-8"))
-            assert_equal(vsize, event.vsize)
-            assert_equal(fee, event.fee)
-            tx_size = event.size
-            assert_equal(tx_hex, bytes(event.tx)[:tx_size].hex())
-            handled_removed_events += 1
->>>>>>> 86a7360bf4 (demo: adopt tests)
 
         bpf["removed_events"].open_ring_buffer(handle_removed_event)
 
@@ -286,12 +268,9 @@ class MempoolTracepointTest(BitcoinTestFramework):
         fee = Decimal(31200)
         tx = self.wallet.send_self_transfer(from_node=node, fee=fee / COIN)
         txid = tx["txid"]
-<<<<<<< HEAD
-=======
         reason = "expiry"
         vsize = tx["tx"].get_vsize()
         tx_hex = tx["hex"]
->>>>>>> 86a7360bf4 (demo: adopt tests)
 
         self.log.info("Fast-forwarding time to mempool expiry...")
         entry_time = node.getmempoolentry(txid)["time"]
@@ -313,6 +292,7 @@ class MempoolTracepointTest(BitcoinTestFramework):
         assert_equal(event.vsize, tx["tx"].get_vsize())
         assert_equal(event.fee, fee)
         assert_equal(event.entry_time, entry_time)
+        assert_equal(tx_hex, bytes(event.tx)[:event.size].hex())
 
         bpf.cleanup()
         self.generate(self.wallet, 1)
@@ -330,23 +310,7 @@ class MempoolTracepointTest(BitcoinTestFramework):
         bpf = BPF(text=MEMPOOL_TRACEPOINTS_PROGRAM, usdt_contexts=[ctx], debug=0, cflags=["-Wno-error=implicit-function-declaration"])
 
         def handle_replaced_event(_, data, __):
-<<<<<<< HEAD
             events.append(bpf["replaced_events"].event(data))
-=======
-            nonlocal handled_replaced_events
-            event = bpf["replaced_events"].event(data)
-            assert_equal(replaced_txid, bytes(event.replaced_hash)[::-1].hex())
-            assert_equal(replaced_vsize, event.replaced_vsize)
-            assert_equal(replaced_fee, event.replaced_fee)
-            assert_equal(replacement_txid, bytes(event.replacement_hash)[::-1].hex())
-            assert_equal(replacement_vsize, event.replacement_vsize)
-            assert_equal(replacement_fee, event.replacement_fee)
-            replacement_size = event.replacement_size
-            assert_equal(replacement_hex, bytes(event.replacement_tx)[:replacement_size].hex())
-            replaced_size = event.replaced_size
-            assert_equal(replaced_hex, bytes(event.replaced_tx)[:replaced_size].hex())
-            handled_replaced_events += 1
->>>>>>> 86a7360bf4 (demo: adopt tests)
 
         bpf["replaced_events"].open_ring_buffer(handle_replaced_event)
 
@@ -364,8 +328,7 @@ class MempoolTracepointTest(BitcoinTestFramework):
             from_node=node, utxo_to_spend=utxo, fee=replacement_fee / COIN
         )
 
-<<<<<<< HEAD
-=======
+
         # expected data
         replaced_txid = original_tx["txid"]
         replaced_vsize = original_tx["tx"].get_vsize()
@@ -375,7 +338,6 @@ class MempoolTracepointTest(BitcoinTestFramework):
         replacement_vsize = replacement_tx["tx"].get_vsize()
         replacement_hex = replacement_tx["hex"]
 
->>>>>>> 86a7360bf4 (demo: adopt tests)
         self.log.info("Polling buffer...")
         bpf.ring_buffer_poll(timeout=200)
 
@@ -389,6 +351,10 @@ class MempoolTracepointTest(BitcoinTestFramework):
         assert_equal(bytes(event.replacement_hash)[::-1].hex(), replacement_tx["txid"])
         assert_equal(event.replacement_vsize, replacement_tx["tx"].get_vsize())
         assert_equal(event.replacement_fee, replacement_fee)
+        replacement_size = event.replacement_size
+        assert_equal(replacement_hex, bytes(event.replacement_tx)[:replacement_size].hex())
+        replaced_size = event.replaced_size
+        assert_equal(replaced_hex, bytes(event.replaced_tx)[:replaced_size].hex())
 
         bpf.cleanup()
         self.generate(self.wallet, 1)
@@ -409,27 +375,15 @@ class MempoolTracepointTest(BitcoinTestFramework):
         bpf = BPF(text=MEMPOOL_TRACEPOINTS_PROGRAM, usdt_contexts=[ctx], debug=0, cflags=["-Wno-error=implicit-function-declaration"])
 
         def handle_rejected_event(_, data, __):
-<<<<<<< HEAD
             events.append(bpf["rejected_events"].event(data))
-=======
-            nonlocal handled_rejected_events
-            event = bpf["rejected_events"].event(data)
-            assert_equal(txid, bytes(event.hash)[::-1].hex())
-            assert_equal(reason, event.reason.decode("UTF-8"))
-            assert_equal(peer_id, event.peer_id)
-            assert_equal(peer_addr, event.peer_addr.decode("UTF-8"))
-            tx_size = event.size
-            assert_equal(tx_hex, bytes(event.tx)[:tx_size].hex())
-            handled_rejected_events += 1
->>>>>>> 86a7360bf4 (demo: adopt tests)
 
         bpf["rejected_events"].open_ring_buffer(handle_rejected_event)
 
         self.log.info("Sending invalid transaction...")
-<<<<<<< HEAD
+
         tx = self.wallet.create_self_transfer(fee_rate=Decimal(0))
         node.p2ps[0].send_txs_and_test([tx["tx"]], node, success=False)
-=======
+
         tx = self.wallet.create_self_transfer()["tx"]
         tx.vout[0].scriptPubKey = CScript([OP_CHECKSIG] * (MAX_BLOCK_SIGOPS))
         tx.rehash()
@@ -443,7 +397,6 @@ class MempoolTracepointTest(BitcoinTestFramework):
         # extract ip and port used to connect to node
         socket = node.p2ps[0]._transport._sock
         peer_addr = ":".join([str(x) for x in socket.getsockname()])
->>>>>>> 86a7360bf4 (demo: adopt tests)
 
         self.log.info("Polling buffer...")
         bpf.ring_buffer_poll(timeout=200)
