@@ -82,7 +82,7 @@ about the connection. Peers can be selected individually to view recent P2P
 messages.
 
 ```
-$ python3 contrib/tracing/p2p_monitor.py ./src/bitcoind
+$ python3 contrib/tracing/p2p_monitor.py $(pidof bitcoind)
 ```
 
 Lists selectable peers and traffic and connection information.
@@ -150,7 +150,7 @@ lost. BCC prints: `Possibly lost 2 samples` on lost messages.
 
 
 ```
-$ python3 contrib/tracing/log_raw_p2p_msgs.py ./src/bitcoind
+$ python3 contrib/tracing/log_raw_p2p_msgs.py $(pidof bitcoind)
 ```
 
 ```
@@ -241,7 +241,7 @@ A BCC Python script to log the UTXO cache flushes. Based on the
 `utxocache:flush` tracepoint.
 
 ```bash
-$ python3 contrib/tracing/log_utxocache_flush.py ./src/bitcoind
+$ python3 contrib/tracing/log_utxocache_flush.py $(pidof bitcoind)
 ```
 
 ```
