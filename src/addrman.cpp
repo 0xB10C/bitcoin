@@ -681,6 +681,16 @@ bool AddrManImpl::Good_(const CService& addr, bool test_before_evict, NodeSecond
         MakeTried(info, nId);
         LogPrint(BCLog::ADDRMAN, "Moved %s mapped to AS%i to tried[%i][%i]\n",
                  addr.ToStringAddrPort(), m_netgroupman.GetMappedAS(addr), tried_bucket, tried_bucket_pos);
+
+        TRACE6(addrman, move_to_good,
+          tried_bucket,
+          tried_bucket_pos,
+          addr.ToStringAddrPort().c_str(),
+          m_netgroupman.GetMappedAS(addr),
+          info.source.ToStringAddr().c_str(),
+          m_netgroupman.GetMappedAS(info.source)
+        );
+
         return true;
     }
 }
