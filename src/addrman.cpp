@@ -18,6 +18,7 @@
 #include <uint256.h>
 #include <util/check.h>
 #include <util/time.h>
+#include <util/trace.h>
 
 #include <cmath>
 #include <optional>
@@ -625,6 +626,15 @@ bool AddrManImpl::AddSingle(const CAddress& addr, const CNetAddr& source, std::c
             }
         }
     }
+    TRACE7(addrman, attempt_add,
+        fInsert,
+        nUBucket,
+        nUBucketPos,
+        addr.ToStringAddrPort().c_str(),
+        m_netgroupman.GetMappedAS(addr),
+        source.ToStringAddr().c_str(),
+        m_netgroupman.GetMappedAS(source)
+    );
     return fInsert;
 }
 
