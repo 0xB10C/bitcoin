@@ -63,6 +63,9 @@ from test_framework.util import (
 from test_framework.wallet import MiniWallet
 
 
+# Maximum number of missing txn in a compact block for parallel downloads
+MAX_GETBLOCKTXN_TXN_AFTER_FIRST_IN_FLIGHT = 10
+
 # TestP2PConn: A peer we use to send messages to bitcoind, and store responses.
 class TestP2PConn(P2PInterface):
     def __init__(self):
@@ -745,7 +748,7 @@ class CompactBlocksTest(BitcoinTestFramework):
         peer.get_headers(locator=[int(tip, 16)], hashstop=0)
         peer.send_and_ping(msg_sendcmpct(announce=True, version=2))
 
-    def test_compactblock_reconstruction_multiple_peers(self, stalling_peer, delivery_peer):
+    def test_compactblock_reconstruction_stalling_peer(self, stalling_peer, delivery_peer):
         node = self.nodes[0]
         assert len(self.utxos)
 
@@ -776,6 +779,7 @@ class CompactBlocksTest(BitcoinTestFramework):
         self.utxos.append([block.vtx[-1].sha256, 0, block.vtx[-1].vout[0].nValue])
 
         # Now test that delivering an invalid compact block won't break relay
+
         block, cmpct_block = announce_cmpct_block(node, stalling_peer)
         for tx in block.vtx[1:]:
             delivery_peer.send_message(msg_tx(tx))
@@ -822,6 +826,65 @@ class CompactBlocksTest(BitcoinTestFramework):
         hb_test_node.send_and_ping(msg_sendcmpct(announce=False, version=2))
         assert_highbandwidth_states(self.nodes[0], hb_to=True, hb_from=False)
 
+    def test_compactblock_reconstruction_parallel_reconstruction(self, stalling_peer, delivery_peer):
+        node = self.nodes[0]
+        assert len(self.utxos)
+
+        def announce_cmpct_block(node, peer, txn_count):
+            utxo = self.utxos.pop(0)
+            block = self.build_block_with_transactions(node, utxo, txn_count)
+
+            cmpct_block = HeaderAndShortIDs()
+            cmpct_block.initialize_from_block(block)
+            msg = msg_cmpctblock(cmpct_block.to_p2p())
+            peer.send_and_ping(msg)
+            with p2p_lock:
+                assert "getblocktxn" in peer.last_message
+            return block, cmpct_block
+
+        # Test the simple parallel download case...
+        block, cmpct_block = announce_cmpct_block(node, stalling_peer, MAX_GETBLOCKTXN_TXN_AFTER_FIRST_IN_FLIGHT)
+
+        delivery_peer.send_and_ping(msg_cmpctblock(cmpct_block.to_p2p()))
+        with p2p_lock:
+            # The second peer to announce should still get a getblocktxn
+            assert "getblocktxn" in delivery_peer.last_message
+        assert int(node.getbestblockhash(), 16) != block.sha256
+
+        # Second peer completes the compact block first
+        msg = msg_blocktxn()
+        msg.block_transactions.blockhash = block.sha256
+        msg.block_transactions.transactions = block.vtx[1:]
+        delivery_peer.send_and_ping(msg)
+        assert_equal(int(node.getbestblockhash(), 16), block.sha256)
+
+        # Nothing bad should happen if we get a late fill from the first peer...
+        stalling_peer.send_and_ping(msg)
+
+        self.utxos.append([block.vtx[-1].sha256, 0, block.vtx[-1].vout[0].nValue])
+
+        # Now test that parallel downloads are not allowed if they would require too many transactions
+        with p2p_lock:
+            # We're gonna wanna check that stalling_peer didn't send us a getblocktxn in a second
+            del stalling_peer.last_message["getblocktxn"]
+
+        block, cmpct_block = announce_cmpct_block(node, delivery_peer, MAX_GETBLOCKTXN_TXN_AFTER_FIRST_IN_FLIGHT + 1)
+
+        stalling_peer.send_and_ping(msg_cmpctblock(cmpct_block.to_p2p()))
+        with p2p_lock:
+            # The second peer to announce should not get a getblocktxn this time
+            assert "getblocktxn" not in stalling_peer.last_message
+
+        msg = msg_blocktxn()
+        msg.block_transactions.blockhash = block.sha256
+        msg.block_transactions.transactions = block.vtx[1:]
+        stalling_peer.send_and_ping(msg)
+
+        assert int(node.getbestblockhash(), 16) != block.sha256
+
+        delivery_peer.send_and_ping(msg)
+        assert_equal(int(node.getbestblockhash(), 16), block.sha256)
+
     def run_test(self):
         self.wallet = MiniWallet(self.nodes[0])
 
@@ -859,8 +922,11 @@ class CompactBlocksTest(BitcoinTestFramework):
         self.log.info("Testing handling of incorrect blocktxn responses...")
         self.test_incorrect_blocktxn_response(self.segwit_node)
 
-        self.log.info("Testing reconstructing compact blocks from all peers...")
-        self.test_compactblock_reconstruction_multiple_peers(self.segwit_node, self.additional_segwit_node)
+        self.log.info("Testing reconstructing compact blocks with a stalling peer...")
+        self.test_compactblock_reconstruction_stalling_peer(self.segwit_node, self.additional_segwit_node)
+
+        self.log.info("Testing reconstructing compact blocks from multiple peers...")
+        self.test_compactblock_reconstruction_parallel_reconstruction(self.segwit_node, self.additional_segwit_node)
 
         # Test that if we submitblock to node1, we'll get a compact block
         # announcement to all peers.
