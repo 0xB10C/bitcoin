@@ -4472,23 +4472,25 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         {
             LOCK(cs_main);
 
-            bool expected_blocktxn = false;
-            bool first_in_flight = true;
             auto range_flight = mapBlocksInFlight.equal_range(resp.blockhash);
+            size_t already_in_flight = std::distance(range_flight.first, range_flight.second);
+            bool requested_block_from_this_peer{false};
+
             while (range_flight.first != range_flight.second) {
                 auto [node_id, block_it] = range_flight.first->second;
                 if (node_id == pfrom.GetId() && block_it->partialBlock) {
-                    expected_blocktxn = true;
+                    requested_block_from_this_peer = true;
                     break;
                 }
-                first_in_flight = false;
                 range_flight.first++;
             }
 
-            if (!expected_blocktxn) {
+            if (!requested_block_from_this_peer) {
                 LogPrint(BCLog::NET, "Peer %d sent us block transactions for block we weren't expecting\n", pfrom.GetId());
                 return;
             }
+
+            bool first_in_flight = already_in_flight == 0 || (already_in_flight == 1 && requested_block_from_this_peer);
 
             PartiallyDownloadedBlock& partialBlock = *range_flight.first->second.second->partialBlock;
             ReadStatus status = partialBlock.FillBlock(*pblock, resp.txn);
