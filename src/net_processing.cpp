@@ -4294,20 +4294,20 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
 
         auto range_flight = mapBlocksInFlight.equal_range(pindex->GetBlockHash());
         size_t already_in_flight = std::distance(range_flight.first, range_flight.second);
-        bool in_flight_same_peer{false};
+        bool requested_block_from_this_peer{false};
 
         while (range_flight.first != range_flight.second) {
             if (range_flight.first->second.first == pfrom.GetId()) {
-                in_flight_same_peer = true;
+                requested_block_from_this_peer = true;
                 break;
             }
             range_flight.first++;
         }
-        bool first_in_flight = already_in_flight == 0 || (already_in_flight == 1 && in_flight_same_peer);
+        bool first_in_flight = already_in_flight == 0 || (already_in_flight == 1 && requested_block_from_this_peer);
 
         if (pindex->nChainWork <= m_chainman.ActiveChain().Tip()->nChainWork || // We know something better
                 pindex->nTx != 0) { // We had this block at some point, but pruned it
-            if (in_flight_same_peer) {
+            if (requested_block_from_this_peer) {
                 // We requested this block for some reason, but our mempool will probably be useless
                 // so we just grab the block via normal getdata
                 std::vector<CInv> vInv(1);
@@ -4318,7 +4318,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
 
         // If we're not close to tip yet, give up and let parallel block fetch work its magic
-        if (!in_flight_same_peer && !CanDirectFetch()) {
+        if (!requested_block_from_this_peer && !CanDirectFetch()) {
             return;
         }
 
@@ -4326,7 +4326,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // possibilities in compact block processing...
         if (pindex->nHeight <= m_chainman.ActiveChain().Height() + 2) {
             if ((already_in_flight < MAX_CMPCTBLOCKS_INFLIGHT_PER_BLOCK && nodestate->vBlocksInFlight.size() < MAX_BLOCKS_IN_TRANSIT_PER_PEER) ||
-                 in_flight_same_peer) {
+                 requested_block_from_this_peer) {
                 std::list<QueuedBlock>::iterator* queuedBlockIt = nullptr;
                 if (!BlockRequested(pfrom.GetId(), *pindex, &queuedBlockIt)) {
                     if (!(*queuedBlockIt)->partialBlock)
@@ -4400,7 +4400,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                 }
             }
         } else {
-            if (in_flight_same_peer) {
+            if (requested_block_from_this_peer) {
                 // We requested this block, but its far into the future, so our
                 // mempool will probably be useless - request the block normally
                 std::vector<CInv> vInv(1);
