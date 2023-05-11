@@ -4372,9 +4372,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     // We will try to round-trip any compact blocks we get on failure,
                     // as long as it's first, or not too large and as long as we chose
                     // the peer for high-bandwidth relay.
-                    auto hb_peer = std::find(lNodesAnnouncingHeaderAndIDs.begin(), lNodesAnnouncingHeaderAndIDs.end(), pfrom.GetId());
                     if (first_in_flight ||
-                        (hb_peer != lNodesAnnouncingHeaderAndIDs.end() && req.indexes.size() <= MAX_GETBLOCKTXN_TXN_AFTER_FIRST_IN_FLIGHT)) {
+                        (pfrom.m_bip152_highbandwidth_to && req.indexes.size() <= MAX_GETBLOCKTXN_TXN_AFTER_FIRST_IN_FLIGHT)) {
                         req.blockhash = pindex->GetBlockHash();
                         m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::GETBLOCKTXN, req));
                     } else {
