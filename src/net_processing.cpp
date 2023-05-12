@@ -4368,18 +4368,16 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     txn.blockhash = blockhash;
                     blockTxnMsg << txn;
                     fProcessBLOCKTXN = true;
-                } else {
+                } else if (first_in_flight ||
+                    (pfrom.m_bip152_highbandwidth_to && req.indexes.size() <= MAX_GETBLOCKTXN_TXN_AFTER_FIRST_IN_FLIGHT)) {
                     // We will try to round-trip any compact blocks we get on failure,
                     // as long as it's first, or not too large and as long as we chose
                     // the peer for high-bandwidth relay.
-                    if (first_in_flight ||
-                        (pfrom.m_bip152_highbandwidth_to && req.indexes.size() <= MAX_GETBLOCKTXN_TXN_AFTER_FIRST_IN_FLIGHT)) {
-                        req.blockhash = pindex->GetBlockHash();
-                        m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::GETBLOCKTXN, req));
-                    } else {
-                        // Give up for this peer and wait for other peer(s)
-                        RemoveBlockRequest(pindex->GetBlockHash(), pfrom.GetId());
-                    }
+                    req.blockhash = pindex->GetBlockHash();
+                    m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::GETBLOCKTXN, req));
+                } else {
+                    // Give up for this peer and wait for other peer(s)
+                    RemoveBlockRequest(pindex->GetBlockHash(), pfrom.GetId());
                 }
             } else {
                 // This block is either already in flight from a different
