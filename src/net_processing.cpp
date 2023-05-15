@@ -876,6 +876,9 @@ private:
     /** Have we requested this block from a peer */
     bool IsBlockRequested(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
 
+    /** Have we requested this block from an outbound peer */
+    bool IsBlockRequestedFromOutbound(const uint256& hash) EXCLUSIVE_LOCKS_REQUIRED(cs_main);
+
     /** Remove this block from our tracked requested blocks. Called if:
      *  - the block has been received from a peer
      *  - the request for the block has timed out
@@ -1119,6 +1122,18 @@ std::chrono::microseconds PeerManagerImpl::NextInvToInbounds(std::chrono::micros
 bool PeerManagerImpl::IsBlockRequested(const uint256& hash)
 {
     return mapBlocksInFlight.count(hash);
+}
+
+bool PeerManagerImpl::IsBlockRequestedFromOutbound(const uint256& hash)
+{
+    for (auto range = mapBlocksInFlight.equal_range(hash); range.first != range.second; range.first++) {
+        auto [nodeid, block_it] = range.first->second;
+        CNodeState *nodestate = State(nodeid);
+        assert(nodestate);
+        if (!nodestate->m_is_inbound) return true;
+    }
+
+    return false;
 }
 
 void PeerManagerImpl::RemoveBlockRequest(const uint256& hash, std::optional<NodeId> from_peer)
@@ -4368,11 +4383,19 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
                     txn.blockhash = blockhash;
                     blockTxnMsg << txn;
                     fProcessBLOCKTXN = true;
-                } else if (first_in_flight ||
-                    (pfrom.m_bip152_highbandwidth_to && req.indexes.size() <= MAX_GETBLOCKTXN_TXN_AFTER_FIRST_IN_FLIGHT)) {
+                } else if (first_in_flight) {
                     // We will try to round-trip any compact blocks we get on failure,
-                    // as long as it's first, or not too large and as long as we chose
-                    // the peer for high-bandwidth relay.
+                    // as long as it's first...
+                    req.blockhash = pindex->GetBlockHash();
+                    m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::GETBLOCKTXN, req));
+                } else if (pfrom.m_bip152_highbandwidth_to &&
+                    (!nodestate->m_is_inbound ||
+                    IsBlockRequestedFromOutbound(blockhash) ||
+                    already_in_flight < MAX_CMPCTBLOCKS_INFLIGHT_PER_BLOCK - 1)) {
+                    // ... or it's a hb relay peer and:
+                    // - peer is outbound, or
+                    // - we already have an outbound attempt in flight(so we'll take what we can get), or
+                    // - it's not the final parallel download slot (which we may reserve for first outbound)
                     req.blockhash = pindex->GetBlockHash();
                     m_connman.PushMessage(&pfrom, msgMaker.Make(NetMsgType::GETBLOCKTXN, req));
                 } else {

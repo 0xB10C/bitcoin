@@ -24,8 +24,6 @@ static const bool DEFAULT_PEERBLOCKFILTERS = false;
 static const int DISCOURAGEMENT_THRESHOLD{100};
 /** Maximum number of outstanding CMPCTBLOCK requests for the same block. */
 static const unsigned int MAX_CMPCTBLOCKS_INFLIGHT_PER_BLOCK = 3;
-/** Maximum number of missing transactions for a non-first getblocktxn request */
-static const unsigned int MAX_GETBLOCKTXN_TXN_AFTER_FIRST_IN_FLIGHT = 10;
 
 struct CNodeStateStats {
     int nSyncHeight = -1;

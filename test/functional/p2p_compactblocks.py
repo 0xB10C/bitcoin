@@ -63,9 +63,6 @@ from test_framework.util import (
 from test_framework.wallet import MiniWallet
 
 
-# Maximum number of missing txn in a compact block for parallel downloads
-MAX_GETBLOCKTXN_TXN_AFTER_FIRST_IN_FLIGHT = 10
-
 # TestP2PConn: A peer we use to send messages to bitcoind, and store responses.
 class TestP2PConn(P2PInterface):
     def __init__(self):
@@ -107,6 +104,10 @@ class TestP2PConn(P2PInterface):
             self.last_message.pop("inv", None)
             self.last_message.pop("headers", None)
             self.last_message.pop("cmpctblock", None)
+
+    def clear_getblocktxn(self):
+        with p2p_lock:
+            self.last_message.pop("getblocktxn", None)
 
     def get_headers(self, locator, hashstop):
         msg = msg_getheaders()
@@ -826,7 +827,10 @@ class CompactBlocksTest(BitcoinTestFramework):
         hb_test_node.send_and_ping(msg_sendcmpct(announce=False, version=2))
         assert_highbandwidth_states(self.nodes[0], hb_to=True, hb_from=False)
 
-    def test_compactblock_reconstruction_parallel_reconstruction(self, stalling_peer, delivery_peer):
+    def test_compactblock_reconstruction_parallel_reconstruction(self, stalling_peer, delivery_peer, inbound_peer, outbound_peer):
+        """ All p2p connections are inbound except outbound_peer. We test that ultimate parallel slot
+            can only be taken by an outbound node unless prior attempts were done by an outbound
+        """
         node = self.nodes[0]
         assert len(self.utxos)
 
@@ -842,48 +846,72 @@ class CompactBlocksTest(BitcoinTestFramework):
                 assert "getblocktxn" in peer.last_message
             return block, cmpct_block
 
+        # First, make delivery_peer, inbound_peer, and outbound_peer high bandwidth
+        block, cmpct_block = announce_cmpct_block(node, delivery_peer, 1)
+        msg = msg_blocktxn()
+        msg.block_transactions.blockhash = block.sha256
+        msg.block_transactions.transactions = block.vtx[1:]
+        delivery_peer.send_and_ping(msg)
+        assert_equal(int(node.getbestblockhash(), 16), block.sha256)
+        delivery_peer.clear_getblocktxn()
+
+        block, cmpct_block = announce_cmpct_block(node, inbound_peer, 1)
+        msg = msg_blocktxn()
+        msg.block_transactions.blockhash = block.sha256
+        msg.block_transactions.transactions = block.vtx[1:]
+        inbound_peer.send_and_ping(msg)
+        assert_equal(int(node.getbestblockhash(), 16), block.sha256)
+        inbound_peer.clear_getblocktxn()
+
+        block, cmpct_block = announce_cmpct_block(node, outbound_peer, 1)
+        msg = msg_blocktxn()
+        msg.block_transactions.blockhash = block.sha256
+        msg.block_transactions.transactions = block.vtx[1:]
+        outbound_peer.send_and_ping(msg)
+        assert_equal(int(node.getbestblockhash(), 16), block.sha256)
+        outbound_peer.clear_getblocktxn()
+
         # Test the simple parallel download case...
-        block, cmpct_block = announce_cmpct_block(node, stalling_peer, MAX_GETBLOCKTXN_TXN_AFTER_FIRST_IN_FLIGHT)
+        for num_missing in [1, 5, 20]:
 
-        delivery_peer.send_and_ping(msg_cmpctblock(cmpct_block.to_p2p()))
-        with p2p_lock:
-            # The second peer to announce should still get a getblocktxn
-            assert "getblocktxn" in delivery_peer.last_message
-        assert int(node.getbestblockhash(), 16) != block.sha256
+            # Remaining low-bandwidth peer is stalling_peer, who announces first
+            [peer['bip152_hb_to'] for peer in node.getpeerinfo()] == [False, True, True, True]
 
-        # Second peer completes the compact block first
-        msg = msg_blocktxn()
-        msg.block_transactions.blockhash = block.sha256
-        msg.block_transactions.transactions = block.vtx[1:]
-        delivery_peer.send_and_ping(msg)
-        assert_equal(int(node.getbestblockhash(), 16), block.sha256)
+            block, cmpct_block = announce_cmpct_block(node, stalling_peer, num_missing)
 
-        # Nothing bad should happen if we get a late fill from the first peer...
-        stalling_peer.send_and_ping(msg)
+            delivery_peer.send_and_ping(msg_cmpctblock(cmpct_block.to_p2p()))
+            with p2p_lock:
+                # The second peer to announce should still get a getblocktxn
+                assert "getblocktxn" in delivery_peer.last_message
+            assert int(node.getbestblockhash(), 16) != block.sha256
 
-        self.utxos.append([block.vtx[-1].sha256, 0, block.vtx[-1].vout[0].nValue])
+            inbound_peer.send_and_ping(msg_cmpctblock(cmpct_block.to_p2p()))
+            with p2p_lock:
+                # The third inbound peer to announce should *not* get a getblocktxn
+                assert "getblocktxn" not in inbound_peer.last_message
+            assert int(node.getbestblockhash(), 16) != block.sha256
 
-        # Now test that parallel downloads are not allowed if they would require too many transactions
-        with p2p_lock:
-            # We're gonna wanna check that stalling_peer didn't send us a getblocktxn in a second
-            del stalling_peer.last_message["getblocktxn"]
+            outbound_peer.send_and_ping(msg_cmpctblock(cmpct_block.to_p2p()))
+            with p2p_lock:
+                # The third peer to announce should get a getblocktxn if outbound
+                assert "getblocktxn" in outbound_peer.last_message
+            assert int(node.getbestblockhash(), 16) != block.sha256
 
-        block, cmpct_block = announce_cmpct_block(node, delivery_peer, MAX_GETBLOCKTXN_TXN_AFTER_FIRST_IN_FLIGHT + 1)
+            # Second peer completes the compact block first
+            msg = msg_blocktxn()
+            msg.block_transactions.blockhash = block.sha256
+            msg.block_transactions.transactions = block.vtx[1:]
+            delivery_peer.send_and_ping(msg)
+            assert_equal(int(node.getbestblockhash(), 16), block.sha256)
 
-        stalling_peer.send_and_ping(msg_cmpctblock(cmpct_block.to_p2p()))
-        with p2p_lock:
-            # The second peer to announce should not get a getblocktxn this time
-            assert "getblocktxn" not in stalling_peer.last_message
+            # Nothing bad should happen if we get a late fill from the first peer...
+            stalling_peer.send_and_ping(msg)
+            self.utxos.append([block.vtx[-1].sha256, 0, block.vtx[-1].vout[0].nValue])
 
-        msg = msg_blocktxn()
-        msg.block_transactions.blockhash = block.sha256
-        msg.block_transactions.transactions = block.vtx[1:]
-        stalling_peer.send_and_ping(msg)
+            delivery_peer.clear_getblocktxn()
+            inbound_peer.clear_getblocktxn()
+            outbound_peer.clear_getblocktxn()
 
-        assert int(node.getbestblockhash(), 16) != block.sha256
-
-        delivery_peer.send_and_ping(msg)
-        assert_equal(int(node.getbestblockhash(), 16), block.sha256)
 
     def run_test(self):
         self.wallet = MiniWallet(self.nodes[0])
@@ -891,6 +919,8 @@ class CompactBlocksTest(BitcoinTestFramework):
         # Setup the p2p connections
         self.segwit_node = self.nodes[0].add_p2p_connection(TestP2PConn())
         self.additional_segwit_node = self.nodes[0].add_p2p_connection(TestP2PConn())
+        self.onemore_inbound_node = self.nodes[0].add_p2p_connection(TestP2PConn())
+        self.outbound_node = self.nodes[0].add_outbound_p2p_connection(TestP2PConn(), p2p_idx=3, connection_type="outbound-full-relay")
 
         # We will need UTXOs to construct transactions in later tests.
         self.make_utxos()
@@ -900,6 +930,8 @@ class CompactBlocksTest(BitcoinTestFramework):
         self.log.info("Testing SENDCMPCT p2p message... ")
         self.test_sendcmpct(self.segwit_node)
         self.test_sendcmpct(self.additional_segwit_node)
+        self.test_sendcmpct(self.onemore_inbound_node)
+        self.test_sendcmpct(self.outbound_node)
 
         self.log.info("Testing compactblock construction...")
         self.test_compactblock_construction(self.segwit_node)
@@ -926,7 +958,7 @@ class CompactBlocksTest(BitcoinTestFramework):
         self.test_compactblock_reconstruction_stalling_peer(self.segwit_node, self.additional_segwit_node)
 
         self.log.info("Testing reconstructing compact blocks from multiple peers...")
-        self.test_compactblock_reconstruction_parallel_reconstruction(self.segwit_node, self.additional_segwit_node)
+        self.test_compactblock_reconstruction_parallel_reconstruction(stalling_peer=self.segwit_node, inbound_peer=self.onemore_inbound_node, delivery_peer=self.additional_segwit_node, outbound_peer=self.outbound_node)
 
         # Test that if we submitblock to node1, we'll get a compact block
         # announcement to all peers.
