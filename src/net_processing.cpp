@@ -4878,6 +4878,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             }
             pfrom.m_bloom_filter_loaded = true;
             pfrom.m_relays_txs = true;
+            if (pfrom.IsInboundConn() && !m_connman.EvictTxPeerIfFull()) {
+                // We don't have room for another tx-relay peer, disconnect
+                LogPrint(BCLog::NET, "filterload received, but no capacity for tx-relay and no other peer to evict. disconnecting peer=%d\n", pfrom.GetId());
+                pfrom.fDisconnect = true;
+            };
         }
         return;
     }
@@ -4926,6 +4931,11 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
         pfrom.m_bloom_filter_loaded = false;
         pfrom.m_relays_txs = true;
+        if (pfrom.IsInboundConn() && !m_connman.EvictTxPeerIfFull()) {
+            // We don't have room for another tx-relay peer, disconnect
+            LogPrint(BCLog::NET, "filterclear received, but no capacity for tx-relay and no other peer to evict. disconnecting peer=%d\n", pfrom.GetId());
+            pfrom.fDisconnect = true;
+        };
         return;
     }
 
