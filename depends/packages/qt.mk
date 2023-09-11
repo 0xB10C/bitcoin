@@ -268,8 +268,6 @@ endef
 
 define $(package)_config_cmds
   export PKG_CONFIG_SYSROOT_DIR=/ && \
-  export PKG_CONFIG_LIBDIR=$(host_prefix)/lib/pkgconfig && \
-  export QT_MAC_SDK_NO_VERSION_CHECK=1 && \
   cd qtbase && \
   ./configure -top-level $($(package)_config_opts)
 endef
