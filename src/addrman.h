@@ -25,11 +25,12 @@ public:
 };
 
 class AddrManImpl;
+class AddrInfo;
 
 /** Default for -checkaddrman */
 static constexpr int32_t DEFAULT_ADDRMAN_CONSISTENCY_CHECKS{0};
 
-/** Test-only struct, capturing info about an address in AddrMan */
+/** Info about an address in AddrMan */
 struct AddressPosition {
     // Whether the address is in the new or tried table
     const bool tried;
@@ -167,6 +168,15 @@ public:
      * @return                   A vector of randomly selected addresses from vRandom.
      */
     std::vector<CAddress> GetAddr(size_t max_addresses, size_t max_pct, std::optional<Network> network) const;
+
+    /**
+     * Return information, including bucket and position, about all entries of a addrman table.
+     *
+     * @param[in] from_tried     If tried table entries should be returned. Otherwise, new table entries are returned.
+     *
+     * @return                   A vector of pairs consisting of AddrInfo and AddressPosition.
+     */
+    std::vector<std::pair<AddrInfo, AddressPosition>> GetEntries(bool from_tried) const;
 
     /** We have successfully connected to this peer. Calling this function
      *  updates the CAddress's nTime, which is used in our IsTerrible()
