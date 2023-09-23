@@ -26,6 +26,11 @@ from test_framework.util import (
 )
 from test_framework.wallet import MiniWallet
 
+# Address manager size constants as defined in addrman_impl.h
+ADDRMAN_NEW_BUCKET_COUNT = 1 << 10
+ADDRMAN_TRIED_BUCKET_COUNT = 1 << 8
+ADDRMAN_BUCKET_SIZE = 1 << 6
+
 
 def assert_net_servicesnames(servicesflag, servicenames):
     """Utility that checks if all flags are correctly decoded in
@@ -38,6 +43,30 @@ def assert_net_servicesnames(servicesflag, servicenames):
     for servicename in servicenames:
         servicesflag_generated |= getattr(test_framework.messages, 'NODE_' + servicename)
     assert servicesflag_generated == servicesflag
+
+
+def assert_addr_information(bucket, position, bucket_count, info, expected):
+    """Utility that checks if an json object `info` returned from `getrawaddrman`
+    matches `expected`. Also does sanity checks the bucket and position.
+
+    :param bucket: The bucket the address info is in.
+    :param position: The position the address info is in.
+    :param bucket_count: The count of buckets in the table.
+    :param info: The address info returned from `getrawaddrman`.
+    :param expected: The expected info value.
+    """
+    # bucket and position only be sanity checked here as the test-addrman isn't deterministic
+    assert 0 <= int(bucket) < bucket_count
+    assert 0 <= int(position) < ADDRMAN_BUCKET_SIZE
+
+    assert_equal(info["address"], expected["address"])
+    assert_equal(info["port"], expected["port"])
+    assert_equal(info["services"], expected["services"])
+    assert_equal(info["network"], expected["network"])
+    assert_equal(info["source"], expected["source"])
+    assert_equal(info["source_network"], expected["source_network"])
+    # To avoid failing slow test runners, use a 10s vspan here.
+    assert_approx(info["time"], time.time(), vspan=10)
 
 
 class NetTest(BitcoinTestFramework):
@@ -67,6 +96,7 @@ class NetTest(BitcoinTestFramework):
         self.test_addpeeraddress()
         self.test_sendmsgtopeer()
         self.test_getaddrmaninfo()
+        self.test_getrawaddrman()
 
     def test_connection_count(self):
         self.log.info("Test getconnectioncount")
@@ -385,6 +415,99 @@ class NetTest(BitcoinTestFramework):
             assert_equal(res[net]["new"], 0)
             assert_equal(res[net]["tried"], 0)
             assert_equal(res[net]["total"], 0)
+
+    def test_getrawaddrman(self):
+        self.log.info("Test getrawaddrman")
+        node = self.nodes[1]
+
+        self.log.debug("Test that getrawaddrman is a hidden RPC")
+        # It is hidden from general help, but its detailed help may be called directly.
+        assert "getrawaddrman" not in node.help()
+        assert "getrawaddrman" in node.help("getrawaddrman")
+
+        # we expect one addrman new and tried table entry added in a previous test
+        expected_entries_new = [{
+            "address": "2.0.0.0",
+            "port": 8333,
+            "services": 9,
+            "network": "ipv4",
+            "source": "2.0.0.0",
+            "source_network": "ipv4",
+        }]
+
+        expected_entries_tried = [{
+            "address": "1.2.3.4",
+            "port": 8333,
+            "services": 9,
+            "network": "ipv4",
+            "source": "1.2.3.4",
+            "source_network": "ipv4",
+        }]
+
+        self.log.debug("Test that the getrawaddrman contains information about the addresses added in a previous test")
+        res = node.getrawaddrman()
+        addrmaninfo = node.getaddrmaninfo()
+        for (table_name, bucket_count, expected_entries) in [
+            ("new", ADDRMAN_NEW_BUCKET_COUNT, expected_entries_new),
+                ("tried", ADDRMAN_TRIED_BUCKET_COUNT, expected_entries_tried)]:
+
+            assert_equal(len(res[table_name]), 1)
+            assert_equal(len(res[table_name]),
+                         addrmaninfo["all_networks"][table_name])
+            bucket = list(res[table_name].keys())[0]
+            position = list(res[table_name][bucket].keys())[0]
+            entry = res[table_name][bucket][position]
+            assert_addr_information(
+                bucket, position, bucket_count, entry, expected_entries[0])
+
+        self.log.debug("Add one new address to each addrman table")
+        expected_entries_new.append({
+            "address": "2803:0:1234:abcd::1",
+            "services": 9,
+            "network": "ipv6",
+            "source": "2803:0:1234:abcd::1",
+            "source_network": "ipv6",
+        })
+        expected_entries_tried.append({
+            "address": "nrfj6inpyf73gpkyool35hcmne5zwfmse3jl3aw23vk7chdemalyaqad.onion",
+            "services": 9,
+            "network": "onion",
+            "source": "nrfj6inpyf73gpkyool35hcmne5zwfmse3jl3aw23vk7chdemalyaqad.onion",
+            "source_network": "onion",
+        })
+        port = 0
+        for to_tried in [True, False]:
+            # There's a slight chance that the to-be-added address collides with an already
+            # present table entry. To avoid this, we increment the port until an address has been
+            # added. Incrementing the port changes the position in the new table bucket (bucket
+            # stays the same) and changes both the bucket and the position in the tried table.
+            while True:
+                address = expected_entries_tried[1]["address"] if to_tried else expected_entries_new[1]["address"]
+                if node.addpeeraddress(address=address, port=port, tried=to_tried)["success"]:
+                    if to_tried:
+                        expected_entries_tried[1]["port"] = port
+                    else:
+                        expected_entries_new[1]["port"] = port
+                    break
+                else:
+                    port += 1
+
+        self.log.debug("Test that the newly added addresses appear in getrawaddrman")
+        res = node.getrawaddrman()
+        addrmaninfo = node.getaddrmaninfo()
+        for (table_name, bucket_count, expected_entries) in [
+            ("new", ADDRMAN_NEW_BUCKET_COUNT, expected_entries_new),
+                ("tried", ADDRMAN_TRIED_BUCKET_COUNT, expected_entries_tried)]:
+
+            assert_equal(len(res[table_name]), 2)
+            assert_equal(len(res[table_name]), addrmaninfo["all_networks"][table_name])
+            for bucket in res[table_name].keys():
+                for position in res[table_name][bucket].keys():
+                    entry = res[table_name][bucket][position]
+                    expected = list(filter(
+                        lambda expected: expected["address"] == entry["address"], expected_entries))[0]
+                    assert_addr_information(bucket, position, bucket_count, entry, expected)
+
 
 if __name__ == '__main__':
     NetTest().main()
