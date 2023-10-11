@@ -237,7 +237,13 @@ static int GetnScore(const CService& addr)
 std::optional<CService> GetLocalAddrForPeer(CNode& node)
 {
     CService addrLocal{GetLocalAddress(node)};
-    if (gArgs.GetBoolArg("-addrmantest", false)) {
+
+    const auto options = gArgs.GetArgs("-addrtest");
+    bool relayForTests = std::any_of(options.begin(), options.end(), [](const auto& option) {
+        return option == "relay";
+    });
+
+    if (relayForTests) {
         // use IPv4 loopback during addrmantest
         addrLocal = CService(LookupNumeric("127.0.0.1", GetListenPort()));
     }
@@ -260,7 +266,7 @@ std::optional<CService> GetLocalAddrForPeer(CNode& node)
             addrLocal.SetIP(node.GetAddrLocal());
         }
     }
-    if (addrLocal.IsRoutable() || gArgs.GetBoolArg("-addrmantest", false))
+    if (addrLocal.IsRoutable() || relayForTests)
     {
         LogPrint(BCLog::NET, "Advertising address %s to peer=%d\n", addrLocal.ToStringAddrPort(), node.GetId());
         return addrLocal;
