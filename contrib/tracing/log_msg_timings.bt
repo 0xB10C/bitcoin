@@ -1,0 +1,35 @@
+#!/usr/bin/env bpftrace
+
+// Send message timings.
+// Must match the struct in SendMessages()
+struct Timings {
+  int64_t total;
+  int64_t headers;
+  int64_t invs;
+  int64_t check_header_sync_timeouts;
+  int64_t check_stalling;
+  int64_t getdata_blocks;
+  int64_t getdata_tx;
+}
+
+BEGIN
+{
+  printf("%s;%s;%s;%s;%s;%s;%s;%s;%s\n", "timestamp", "action", "peer_id", "connection-type", "relays_tx", "conntime", "msg", "duration", "extra");
+}
+
+usdt:./src/bitcoind:net:process_messages
+{
+  time("%s"); // prints the timestamp
+  printf(";process;%ld;%s;%s;%d;%s;%ld;[]\n", arg0, str(arg1), arg2 ? "true":"false", arg3, str(arg4), arg5);
+}
+
+usdt:./src/bitcoind:net:send_messages
+{
+  $timings = (struct Timings *) arg4;
+  time("%s");
+  printf(";send;%ld;%s;%s;%d;%s;%ld", arg0, str(arg1), arg2 ? "true":"false", arg3, "unknown", $timings->total);
+  // print additional timings
+  printf(";[%ld,%ld,%ld,%ld,%ld,%ld]\n", $timings->headers,
+    $timings->invs, $timings->check_header_sync_timeouts,
+    $timings->check_stalling, $timings->getdata_blocks, $timings->getdata_tx);
+}
