@@ -5037,6 +5037,7 @@ bool PeerManagerImpl::MaybeDiscourageAndDisconnect(CNode& pnode, Peer& peer)
 bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interruptMsgProc)
 {
     AssertLockHeld(g_msgproc_mutex);
+    const auto start{SteadyClock::now()};
 
     PeerRef peer = GetPeerRef(pfrom->GetId());
     if (peer == nullptr) return false;
@@ -5107,6 +5108,15 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
     } catch (...) {
         LogPrint(BCLog::NET, "%s(%s, %u bytes): Unknown exception caught\n", __func__, SanitizeString(msg.m_type), msg.m_message_size);
     }
+
+    TRACE6(net, process_messages,
+        pfrom->GetId(),
+        pfrom->ConnectionTypeAsString().c_str(),
+        pfrom->m_relays_txs,
+        count_seconds(pfrom->m_connected),
+        msg.m_type.c_str(),
+        Ticks<std::chrono::nanoseconds>(SteadyClock::now() - start)
+    );
 
     return fMoreWork;
 }
@@ -5531,6 +5541,18 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
 {
     AssertLockHeld(g_msgproc_mutex);
 
+    struct Timings {
+        int64_t total;
+        int64_t headers;
+        int64_t invs;
+        int64_t check_header_sync_timeouts;
+        int64_t check_stalling;
+        int64_t getdata_blocks;
+        int64_t getdata_tx;
+    };
+    Timings timings;
+    const auto start{SteadyClock::now()};
+
     PeerRef peer = GetPeerRef(pto->GetId());
     if (!peer) return false;
     const Consensus::Params& consensusParams = m_chainparams.GetConsensus();
@@ -5626,6 +5648,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         //
         // Try sending block announcements via headers
         //
+        const auto start_headers{SteadyClock::now()};
         {
             // If we have no more than MAX_BLOCKS_TO_ANNOUNCE in our
             // list of block hashes we're relaying, and our peer wants
@@ -5755,10 +5778,12 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             }
             peer->m_blocks_for_headers_relay.clear();
         }
+        timings.headers = Ticks<std::chrono::nanoseconds>(SteadyClock::now() - start_headers);
 
         //
         // Message: inventory
         //
+        const auto start_invs{SteadyClock::now()};
         std::vector<CInv> vInv;
         {
             LOCK(peer->m_block_inv_mutex);
@@ -5881,8 +5906,10 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         }
         if (!vInv.empty())
             m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::INV, vInv));
+        timings.invs = Ticks<std::chrono::nanoseconds>(SteadyClock::now() - start_invs);
 
         // Detect whether we're stalling
+        const auto start_check_stalling{SteadyClock::now()};
         auto stalling_timeout = m_block_stalling_timeout.load();
         if (state.m_stalling_since.count() && state.m_stalling_since < current_time - stalling_timeout) {
             // Stalling only triggers when the block download window cannot move. During normal steady state,
@@ -5898,6 +5925,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
             }
             return true;
         }
+        timings.check_stalling = Ticks<std::chrono::nanoseconds>(SteadyClock::now() - start_check_stalling);
         // In case there is a block that has been in flight from this peer for block_interval * (1 + 0.5 * N)
         // (with N the number of peers from which we're downloading validated blocks), disconnect due to timeout.
         // We compensate for other peers to prevent killing off peers due to our own downstream link
@@ -5912,7 +5940,9 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 return true;
             }
         }
+
         // Check for headers sync timeouts
+        const auto start_check_header_sync_timeouts{SteadyClock::now()};
         if (state.fSyncStarted && peer->m_headers_sync_timeout < std::chrono::microseconds::max()) {
             // Detect whether this is a stalling initial-headers-sync peer
             if (m_chainman.m_best_header->Time() <= GetAdjustedTime() - 24h) {
@@ -5944,6 +5974,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 peer->m_headers_sync_timeout = std::chrono::microseconds::max();
             }
         }
+        timings.check_header_sync_timeouts = Ticks<std::chrono::nanoseconds>(SteadyClock::now() - start_check_header_sync_timeouts);
 
         // Check that outbound peers have reasonable chains
         // GetTime() is used by this anti-DoS logic so we can test this using mocktime
@@ -5952,6 +5983,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
         //
         // Message: getdata (blocks)
         //
+        const auto start_getdata_blocks{SteadyClock::now()};
         std::vector<CInv> vGetData;
         if (CanServeBlocks(*peer) && ((sync_blocks_and_headers_from_peer && !IsLimitedPeer(*peer)) || !m_chainman.IsInitialBlockDownload()) && state.vBlocksInFlight.size() < MAX_BLOCKS_IN_TRANSIT_PER_PEER) {
             std::vector<const CBlockIndex*> vToDownload;
@@ -5984,10 +6016,12 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                 }
             }
         }
+        timings.getdata_blocks = Ticks<std::chrono::nanoseconds>(SteadyClock::now() - start_getdata_blocks);
 
         //
         // Message: getdata (transactions)
         //
+        const auto start_getdata_tx{SteadyClock::now()};
         std::vector<std::pair<NodeId, GenTxid>> expired;
         auto requestable = m_txrequest.GetRequestable(pto->GetId(), current_time, &expired);
         for (const auto& entry : expired) {
@@ -6014,7 +6048,19 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
 
         if (!vGetData.empty())
             m_connman.PushMessage(pto, msgMaker.Make(NetMsgType::GETDATA, vGetData));
+        timings.getdata_tx = Ticks<std::chrono::nanoseconds>(SteadyClock::now() - start_getdata_tx);
     } // release cs_main
     MaybeSendFeefilter(*pto, *peer, current_time);
+
+    timings.total = Ticks<std::chrono::nanoseconds>(SteadyClock::now() - start);
+
+    TRACE5(net, send_messages,
+        pto->GetId(),
+        pto->ConnectionTypeAsString().c_str(),
+        pto->m_relays_txs,
+        count_seconds(pto->m_connected),
+        &timings
+    );
+
     return true;
 }
