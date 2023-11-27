@@ -15,6 +15,14 @@ TRACEPOINT_SEMAPHORE(test, twelve_args);
 TRACEPOINT_SEMAPHORE(test, check_if_attached);
 TRACEPOINT_SEMAPHORE(test, expensive_section);
 
+TRACEPOINT_DEFINITION(test, zero_args);
+TRACEPOINT_DEFINITION(test, one_arg, int32_t);
+TRACEPOINT_DEFINITION(test, six_args, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t);
+TRACEPOINT_DEFINITION(test, twelve_args, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t);
+TRACEPOINT_DEFINITION(test, check_if_attached, int32_t);
+TRACEPOINT_DEFINITION(test, expensive_section);
+
+
 BOOST_FIXTURE_TEST_SUITE(util_trace_tests, BasicTestingSetup)
 
 // Tests the TRACEPOINT macro and that we can compile tracepoints with 0 to 12 args.

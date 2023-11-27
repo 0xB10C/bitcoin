@@ -1121,13 +1121,13 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
                 FormatMoney(ws.m_modified_fees - ws.m_conflicting_fees),
                 (int)entry->GetTxSize() - (int)ws.m_conflicting_size);
         TRACEPOINT(mempool, replaced,
-                it->GetTx().GetHash().data(),
-                it->GetTxSize(),
-                it->GetFee(),
-                std::chrono::duration_cast<std::chrono::duration<std::uint64_t>>(it->GetTime()).count(),
-                hash.data(),
-                entry->GetTxSize(),
-                entry->GetFee()
+                 reinterpret_cast<const unsigned char*>(it->GetTx().GetHash().data()),
+                 it->GetTxSize(),
+                 it->GetFee(),
+                 std::chrono::duration_cast<std::chrono::duration<std::uint64_t>>(it->GetTime()).count(),
+                 reinterpret_cast<const unsigned char*>(hash.data()),
+                 entry->GetTxSize(),
+                 entry->GetFee()
         );
         ws.m_replaced_transactions.push_back(it->GetSharedTx());
     }
@@ -1628,8 +1628,8 @@ MempoolAcceptResult AcceptToMemoryPool(Chainstate& active_chainstate, const CTra
         for (const COutPoint& hashTx : coins_to_uncache)
             active_chainstate.CoinsTip().Uncache(hashTx);
         TRACEPOINT(mempool, rejected,
-                tx->GetHash().data(),
-                result.m_state.GetRejectReason().c_str()
+            reinterpret_cast<const unsigned char*>(tx->GetHash().data()),
+            result.m_state.GetRejectReason().c_str()
         );
     }
     // After we've (potentially) uncached entries, ensure our coins cache is still within its size limits
@@ -2501,7 +2501,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         block.vtx.size(),
         nInputs,
         nSigOpsCost,
-        time_5 - time_start // in microseconds (µs)
+        int64_t{Ticks<std::chrono::microseconds>(time_5 - time_start)}
     );
 
     return true;
@@ -2670,11 +2670,11 @@ bool Chainstate::FlushStateToDisk(
             m_last_flush = nNow;
             full_flush_completed = true;
             TRACEPOINT(utxocache, flush,
-                   int64_t{Ticks<std::chrono::microseconds>(SteadyClock::now() - nNow)},
-                   (uint32_t)mode,
-                   (uint64_t)coins_count,
-                   (uint64_t)coins_mem_usage,
-                   (bool)fFlushForPrune);
+                int64_t{Ticks<std::chrono::microseconds>(SteadyClock::now() - nNow)},
+                (uint32_t)mode,
+                (uint64_t)coins_count,
+                (uint64_t)coins_mem_usage,
+                (bool)fFlushForPrune);
         }
     }
     if (full_flush_completed) {

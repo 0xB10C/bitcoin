@@ -5051,7 +5051,7 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
         pfrom->ConnectionTypeAsString().c_str(),
         msg.m_type.c_str(),
         msg.m_recv.size(),
-        msg.m_recv.data()
+        (unsigned char*)msg.m_recv.data()
     );
 
     if (m_opts.capture_messages) {

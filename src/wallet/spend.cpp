@@ -1132,7 +1132,7 @@ static util::Result<CreatedTransactionResult> CreateTransactionInternal(
         return util::Error{err.empty() ?_("Insufficient funds") : err};
     }
     const SelectionResult& result = *select_coins_res;
-    TRACEPOINT(coin_selection, selected_coins, wallet.GetName().c_str(), GetAlgorithmName(result.GetAlgo()).c_str(), result.GetTarget(), result.GetWaste(), result.GetSelectedValue());
+    //TRACEPOINT(coin_selection, selected_coins, wallet.GetName().c_str(), GetAlgorithmName(result.GetAlgo()).c_str(), result.GetTarget(), result.GetWaste(), result.GetSelectedValue());
 
     const CAmount change_amount = result.GetChange(coin_selection_params.min_viable_change, coin_selection_params.m_change_fee);
     if (change_amount > 0) {
@@ -1347,7 +1347,7 @@ util::Result<CreatedTransactionResult> CreateTransaction(
     const auto& txr_ungrouped = *res;
     // try with avoidpartialspends unless it's enabled already
     if (txr_ungrouped.fee > 0 /* 0 means non-functional fee rate estimation */ && wallet.m_max_aps_fee > -1 && !coin_control.m_avoid_partial_spends) {
-        TRACEPOINT(coin_selection, attempting_aps_create_tx, wallet.GetName().c_str());
+        //TRACEPOINT(coin_selection, attempting_aps_create_tx, wallet.GetName().c_str());
         CCoinControl tmp_cc = coin_control;
         tmp_cc.m_avoid_partial_spends = true;
 

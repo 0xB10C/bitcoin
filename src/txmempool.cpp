@@ -478,7 +478,7 @@ void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAnces
     newit->idx_randomized = txns_randomized.size() - 1;
 
     TRACEPOINT(mempool, added,
-        entry.GetTx().GetHash().data(),
+        reinterpret_cast<const unsigned char*>(entry.GetTx().GetHash().data()),
         entry.GetTxSize(),
         entry.GetFee()
     );
@@ -498,7 +498,7 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
         GetMainSignals().TransactionRemovedFromMempool(it->GetSharedTx(), reason, mempool_sequence);
     }
     TRACEPOINT(mempool, removed,
-        it->GetTx().GetHash().data(),
+        reinterpret_cast<const unsigned char*>(it->GetTx().GetHash().data()),
         RemovalReasonToString(reason).c_str(),
         it->GetTxSize(),
         it->GetFee(),
