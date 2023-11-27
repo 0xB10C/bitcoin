@@ -3752,7 +3752,6 @@ void CConnman::PushMessage(CNode* pnode, CSerializedNetMsg&& msg)
     if (gArgs.GetBoolArg("-capturemessages", false)) {
         CaptureMessage(pnode->addr, msg.m_type, msg.data, /*is_incoming=*/false);
     }
-
     TRACEPOINT(net, outbound_message,
         pnode->GetId(),
         pnode->m_addr_name.c_str(),
