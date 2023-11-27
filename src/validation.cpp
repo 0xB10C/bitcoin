@@ -108,9 +108,9 @@ std::condition_variable g_best_block_cv;
 uint256 g_best_block;
 
 TRACEPOINT_SEMAPHORE(validation, block_connected);
-TRACEPOINT_SEMAPHORE(utxocache, flush);
-TRACEPOINT_SEMAPHORE(mempool, replaced);
-TRACEPOINT_SEMAPHORE(mempool, rejected);
+// TRACEPOINT_SEMAPHORE(utxocache, flush);
+// TRACEPOINT_SEMAPHORE(mempool, replaced);
+// TRACEPOINT_SEMAPHORE(mempool, rejected);
 
 const CBlockIndex* Chainstate::FindForkInGlobalIndex(const CBlockLocator& locator) const
 {
@@ -1119,15 +1119,15 @@ bool MemPoolAccept::Finalize(const ATMPArgs& args, Workspace& ws)
                 tx.GetWitnessHash().ToString(),
                 FormatMoney(ws.m_modified_fees - ws.m_conflicting_fees),
                 (int)entry->GetTxSize() - (int)ws.m_conflicting_size);
-        TRACEPOINT(mempool, replaced,
-                it->GetTx().GetHash().data(),
-                it->GetTxSize(),
-                it->GetFee(),
-                std::chrono::duration_cast<std::chrono::duration<std::uint64_t>>(it->GetTime()).count(),
-                hash.data(),
-                entry->GetTxSize(),
-                entry->GetFee()
-        );
+        // TRACEPOINT(mempool, replaced,
+        //         it->GetTx().GetHash().data(),
+        //         it->GetTxSize(),
+        //         it->GetFee(),
+        //         std::chrono::duration_cast<std::chrono::duration<std::uint64_t>>(it->GetTime()).count(),
+        //         hash.data(),
+        //         entry->GetTxSize(),
+        //         entry->GetFee()
+        // );
         ws.m_replaced_transactions.push_back(it->GetSharedTx());
     }
     m_pool.RemoveStaged(ws.m_all_conflicting, false, MemPoolRemovalReason::REPLACED);
@@ -1623,10 +1623,10 @@ MempoolAcceptResult AcceptToMemoryPool(Chainstate& active_chainstate, const CTra
 
         for (const COutPoint& hashTx : coins_to_uncache)
             active_chainstate.CoinsTip().Uncache(hashTx);
-        TRACEPOINT(mempool, rejected,
-                tx->GetHash().data(),
-                result.m_state.GetRejectReason().c_str()
-        );
+        // TRACEPOINT(mempool, rejected,
+        //         tx->GetHash().data(),
+        //         result.m_state.GetRejectReason().c_str()
+        // );
     }
     // After we've (potentially) uncached entries, ensure our coins cache is still within its size limits
     BlockValidationState state_dummy;
@@ -2509,7 +2509,7 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         block.vtx.size(),
         nInputs,
         nSigOpsCost,
-        time_5 - time_start // in microseconds (µs)
+        int64_t{Ticks<std::chrono::microseconds>(time_5 - time_start)}
     );
 
     return true;
@@ -2677,12 +2677,12 @@ bool Chainstate::FlushStateToDisk(
                 return FatalError(m_chainman.GetNotifications(), state, "Failed to write to coin database");
             m_last_flush = nNow;
             full_flush_completed = true;
-            TRACEPOINT(utxocache, flush,
-                   int64_t{Ticks<std::chrono::microseconds>(SteadyClock::now() - nNow)},
-                   (uint32_t)mode,
-                   (uint64_t)coins_count,
-                   (uint64_t)coins_mem_usage,
-                   (bool)fFlushForPrune);
+            // TRACEPOINT(utxocache, flush,
+            //        int64_t{Ticks<std::chrono::microseconds>(SteadyClock::now() - nNow)},
+            //        (uint32_t)mode,
+            //        (uint64_t)coins_count,
+            //        (uint64_t)coins_mem_usage,
+            //        (bool)fFlushForPrune);
         }
     }
     if (full_flush_completed) {
