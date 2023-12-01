@@ -305,7 +305,7 @@ class NetTest(BitcoinTestFramework):
         by first testing adding a tried table entry before testing adding a new table one.
         """
         self.log.info("Test addpeeraddress")
-        self.restart_node(1, ["-checkaddrman=1"])
+        self.restart_node(1, ["-checkaddrman=1", "-cjdnsreachable", "-addrtest=addrman"])
         node = self.nodes[1]
 
         self.log.debug("Test that addpeerinfo is a hidden RPC")
@@ -384,18 +384,25 @@ class NetTest(BitcoinTestFramework):
         node = self.nodes[1]
 
         # current count of ipv4 addresses in addrman is {'new':1, 'tried':1}
-        self.log.info("Test that count of addresses in addrman match expected values")
+        node.addpeeraddress(address="pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion", tried=True, port=8333)  # onion address
+        node.addpeeraddress(address="c4gfnttsuwqomiygupdqqqyy5y5emnk5c73hrfvatri67prd7vyq.b32.i2p", tried=False, port=8333)  # i2p address
+        node.addpeeraddress(address="1233:3432:2434:2343:3234:2345:6546:4534", tried=True, port=8333)  # ipv6 address
+        node.addpeeraddress(address="fc00:1:2:3:4:5:6:7", tried=False, port=8333)  # cjdns address
+
+        network_count = {
+            'all_networks': {'new': 3, 'tried': 3, 'total': 6},
+            'ipv4': {'new': 1, 'tried': 1, 'total': 2},
+            'ipv6': {'new': 0, 'tried': 1, 'total': 1},
+            'onion': {'new': 0, 'tried': 1, 'total': 1},
+            'i2p': {'new': 1, 'tried': 0, 'total': 1},
+            'cjdns': {'new': 1, 'tried': 0, 'total': 1},
+        }
+        self.log.debug("Test that getaddrmaninfo provides correct new/tried table address count")
         res = node.getaddrmaninfo()
-        assert_equal(res["ipv4"]["new"], 1)
-        assert_equal(res["ipv4"]["tried"], 1)
-        assert_equal(res["ipv4"]["total"], 2)
-        assert_equal(res["all_networks"]["new"], 1)
-        assert_equal(res["all_networks"]["tried"], 1)
-        assert_equal(res["all_networks"]["total"], 2)
-        for net in ["ipv6", "onion", "i2p", "cjdns"]:
-            assert_equal(res[net]["new"], 0)
-            assert_equal(res[net]["tried"], 0)
-            assert_equal(res[net]["total"], 0)
+        for network, count in network_count.items():
+            assert_equal(res[network]['new'], count['new'])
+            assert_equal(res[network]['tried'], count['tried'])
+            assert_equal(res[network]['total'], count['total'])
 
     def test_getrawaddrman(self):
         self.log.info("Test getrawaddrman")
@@ -437,7 +444,7 @@ class NetTest(BitcoinTestFramework):
                     expected_entry = list(filter(lambda e: e["address"] == entry["address"], table_info["entries"]))[0]
                     check_addr_information(entry, expected_entry)
 
-        # we expect one addrman new and tried table entry, which were added in a previous test
+        # we expect 3 new and 3 tried table entries in the addrman, which were added in a previous test
         expected = {
             "new": {
                 "bucket_count": ADDRMAN_NEW_BUCKET_COUNT,
@@ -449,6 +456,22 @@ class NetTest(BitcoinTestFramework):
                         "network": "ipv4",
                         "source": "2.0.0.0",
                         "source_network": "ipv4",
+                    },
+                    {
+                        "address": "fc00:1:2:3:4:5:6:7",
+                        "port": 8333,
+                        "services": 9,
+                        "network": "cjdns",
+                        "source": "fc00:1:2:3:4:5:6:7",
+                        "source_network": "cjdns",
+                    },
+                    {
+                        "address": "c4gfnttsuwqomiygupdqqqyy5y5emnk5c73hrfvatri67prd7vyq.b32.i2p",
+                        "port": 8333,
+                        "services": 9,
+                        "network": "i2p",
+                        "source": "c4gfnttsuwqomiygupdqqqyy5y5emnk5c73hrfvatri67prd7vyq.b32.i2p",
+                        "source_network": "i2p",
                     }
                 ]
             },
@@ -462,6 +485,22 @@ class NetTest(BitcoinTestFramework):
                         "network": "ipv4",
                         "source": "1.2.3.4",
                         "source_network": "ipv4",
+                    },
+                    {
+                        "address": "1233:3432:2434:2343:3234:2345:6546:4534",
+                        "port": 8333,
+                        "services": 9,
+                        "network": "ipv6",
+                        "source": "1233:3432:2434:2343:3234:2345:6546:4534",
+                        "source_network": "ipv6",
+                    },
+                    {
+                        "address": "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion",
+                        "port": 8333,
+                        "services": 9,
+                        "network": "onion",
+                        "source": "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion",
+                        "source_network": "onion"
                     }
                 ]
             }
@@ -477,7 +516,7 @@ class NetTest(BitcoinTestFramework):
             "network": "ipv6",
             "source": "2803:0:1234:abcd::1",
             "source_network": "ipv6",
-            "port": -1,  # set once addpeeraddress is successful
+            "port": 45324,
         })
         expected["tried"]["entries"].append({
             "address": "nrfj6inpyf73gpkyool35hcmne5zwfmse3jl3aw23vk7chdemalyaqad.onion",
@@ -485,22 +524,13 @@ class NetTest(BitcoinTestFramework):
             "network": "onion",
             "source": "nrfj6inpyf73gpkyool35hcmne5zwfmse3jl3aw23vk7chdemalyaqad.onion",
             "source_network": "onion",
-            "port": -1,  # set once addpeeraddress is successful
+            "port": 45324,
         })
 
-        port = 0
         for (table_name, table_info) in expected.items():
-            # There's a slight chance that the to-be-added address collides with an already
-            # present table entry. To avoid this, we increment the port until an address has been
-            # added. Incrementing the port changes the position in the new table bucket (bucket
-            # stays the same) and changes both the bucket and the position in the tried table.
-            while True:
-                if node.addpeeraddress(address=table_info["entries"][1]["address"], port=port, tried=table_name == "tried")["success"]:
-                    table_info["entries"][1]["port"] = port
-                    self.log.debug(f"Added {table_info['entries'][1]['address']} to {table_name} table")
-                    break
-                else:
-                    port += 1
+            # the new table and tried table in the addrman had 3 entries each and were filled
+            # from index 0-2 in "entries". the insertion done in above line fills index 3 in "entries"
+            node.addpeeraddress(address=table_info["entries"][3]["address"], port=45324, tried=table_name == "tried")
 
         self.log.debug("Test that the newly added addresses appear in getrawaddrman")
         check_getrawaddrman_entries(expected)
