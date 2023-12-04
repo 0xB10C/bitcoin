@@ -336,7 +336,7 @@ class NetTest(BitcoinTestFramework):
 
         self.log.debug("Test that adding an already-present tried address to the new and tried tables fails")
         for value in [True, False]:
-            assert_equal(node.addpeeraddress(address="1.2.3.4", tried=value, port=8333), {"success": False})
+            assert_equal(node.addpeeraddress(address="1.2.3.4", tried=value, port=8333), {"success": False, "error": "failed-adding-to-new"})
         assert_equal(len(node.getnodeaddresses(count=0)), 1)
 
         self.log.debug("Test that adding a second address, this time to the new table, succeeds")
