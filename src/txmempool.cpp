@@ -31,10 +31,8 @@
 #include <string_view>
 #include <utility>
 
-/*
 TRACEPOINT_SEMAPHORE(mempool, added);
 TRACEPOINT_SEMAPHORE(mempool, removed);
-*/
 
 bool TestLockPointValidity(CChain& active_chain, const LockPoints& lp)
 {
@@ -489,13 +487,11 @@ void CTxMemPool::addUnchecked(const CTxMemPoolEntry &entry, setEntries &setAnces
     txns_randomized.emplace_back(newit->GetSharedTx());
     newit->idx_randomized = txns_randomized.size() - 1;
 
-    /*
     TRACEPOINT(mempool, added,
-        entry.GetTx().GetHash().data(),
+        reinterpret_cast<const unsigned char*>(entry.GetTx().GetHash().data()),
         entry.GetTxSize(),
         entry.GetFee()
     );
-    */
 }
 
 void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
@@ -511,13 +507,13 @@ void CTxMemPool::removeUnchecked(txiter it, MemPoolRemovalReason reason)
         // notification.
         GetMainSignals().TransactionRemovedFromMempool(it->GetSharedTx(), reason, mempool_sequence);
     }
-    // TRACEPOINT(mempool, removed,
-    //     it->GetTx().GetHash().data(),
-    //     RemovalReasonToString(reason).c_str(),
-    //     it->GetTxSize(),
-    //     it->GetFee(),
-    //     std::chrono::duration_cast<std::chrono::duration<std::uint64_t>>(it->GetTime()).count()
-    // );
+    TRACEPOINT(mempool, removed,
+        reinterpret_cast<const unsigned char*>(it->GetTx().GetHash().data()),
+        RemovalReasonToString(reason).c_str(),
+        it->GetTxSize(),
+        it->GetFee(),
+        std::chrono::duration_cast<std::chrono::duration<std::uint64_t>>(it->GetTime()).count()
+    );
 
     const uint256 hash = it->GetTx().GetHash();
     for (const CTxIn& txin : it->GetTx().vin)

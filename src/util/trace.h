@@ -115,24 +115,121 @@
 #endif
 
 // Tracepoints
-TRACEPOINT_DEFINITION(net, outbound_message, int64_t, const char *, const char *, const char *, int64_t, const unsigned char *);
-TRACEPOINT_DEFINITION(net, inbound_message, int64_t, const char *, const char *, const char *, int64_t, const unsigned char *);
+TRACEPOINT_DEFINITION(net, outbound_message,
+    int64_t,                // peer id
+    const char *,           // address and port
+    const char *,           // connection type
+    const char *,           // msg command
+    int64_t,                // msg size
+    const unsigned char *   // raw message
+);
 
-TRACEPOINT_DEFINITION(validation, block_connected, unsigned char *, int32_t, uint64_t, int32_t, uint64_t, uint64_t);
+TRACEPOINT_DEFINITION(net, inbound_message,
+    int64_t,                // peer id
+    const char *,           // address and port
+    const char *,           // connection type
+    const char *,           // msg command
+    int64_t,                // msg size
+    const unsigned char *   // raw message
+);
 
-/*
+TRACEPOINT_DEFINITION(validation, block_connected,
+    unsigned char *,        // block hash
+    int32_t,                // block height
+    uint64_t,               // number of transactions
+    int32_t,                // inputs spent in block
+    uint64_t,               // sigops
+    uint64_t                // block connection duration in µs
+);
 
+TRACEPOINT_DEFINITION(mempool, rejected,
+    const unsigned char *,  // rejected tx txid
+    const char *            // rejection reason
+);
 
-TRACEPOINT_DEFINITION(utxocache, flush, int64_t, uint32_t, uint64_t, uint64_t, uint8_t);
-TRACEPOINT_DEFINITION(utxocache, add, unsigned char *, uint32_t, uint32_t, int64_t, uint8_t);
-TRACEPOINT_DEFINITION(utxocache, spent, unsigned char *, uint32_t, uint32_t, int64_t, uint8_t);
-TRACEPOINT_DEFINITION(utxocache, uncache, unsigned char *, uint32_t, uint32_t, int64_t, uint8_t);
+TRACEPOINT_DEFINITION(mempool, added,
+    const unsigned char *,  // added tx txid
+    uint32_t,               // added tx size
+    uint64_t                // added tx fee
+);
 
-TRACEPOINT_DEFINITION(coin_selection, selected_coins, char *, char *, int64_t, int64_t, int64_t) ;
-TRACEPOINT_DEFINITION(coin_selection, normal_create_tx_internal, char *, uint8_t, int64_t, int32_t);
-TRACEPOINT_DEFINITION(coin_selection, attempting_aps_create_tx, char *);
-TRACEPOINT_DEFINITION(coin_selection, aps_create_tx_internal, char *, uint8_t, uint8_t, int64_t, int32_t);
-*/
+TRACEPOINT_DEFINITION(mempool, removed,
+    const unsigned char *,  // removed tx txid
+    const char *,           // removal reason
+    uint32_t,               // removed tx size
+    uint64_t,               // removed tx fee
+    uint64_t                // mempool entry time
+);
+
+TRACEPOINT_DEFINITION(mempool, replaced,
+    const unsigned char *,  // replaced tx txid
+    uint32_t,               // replaced tx size
+    uint64_t,               // replaced tx fee
+    uint64_t,               // replaced tx mempool entry time
+    const unsigned char *,  // replacement tx txid
+    uint32_t,               // replacement tx size
+    uint64_t                // replacement tx fee
+);
+
+TRACEPOINT_DEFINITION(utxocache, add,
+    const unsigned char *,  // added tx txid
+    uint32_t,               // output index
+    uint32_t,               // coin creation height
+    int64_t,                // coin value
+    bool                    // if it's a coinbase
+);
+
+TRACEPOINT_DEFINITION(utxocache, spent,
+    const unsigned char *,  // spent tx txid
+    uint32_t,               // output index
+    uint32_t,               // coin spent height
+    int64_t,                // coin value
+    bool                    // if it's a coinbase
+);
+
+TRACEPOINT_DEFINITION(utxocache, uncache,
+    const unsigned char *,  // uncached tx txid
+    uint32_t,               // output index
+    uint32_t,               // coin uncache height
+    int64_t,                // coin value
+    bool                    // if it's a coinbase
+);
+
+TRACEPOINT_DEFINITION(utxocache, flush,
+    int64_t,                // flush duration
+    uint32_t,               // flush mode
+    uint64_t,               // cache size (count)
+    uint64_t,               // cache memory usage (bytes)
+    bool                    // flush for prune
+);
+
+TRACEPOINT_DEFINITION(coin_selection, selected_coins,
+    char *,                 // wallet name
+    char *,                 // coin selection algorithm
+    int64_t,                // selection target value
+    int64_t,                // waste metic
+    int64_t                 // total value of inputs
+);
+
+TRACEPOINT_DEFINITION(coin_selection, normal_create_tx_internal,
+    char *,                 // wallet name
+    bool,                   // CreateTransactionInternal success
+    int64_t,                // expected transaction fee
+    int32_t                 // position of the change output
+);
+
+TRACEPOINT_DEFINITION(coin_selection, attempting_aps_create_tx,
+    char *                  // wallet name
+);
+
+TRACEPOINT_DEFINITION(coin_selection, aps_create_tx_internal,
+    char *,                 // wallet name
+    bool,                   // using the Avoid Partial Spends solution?
+    bool,                   // CreateTransactionInternal success
+    int64_t,                // expected transaction fee
+    int32_t                 // position of the change output
+);
+
 #endif // ENABLE_TRACING
 
 #endif // BITCOIN_UTIL_TRACE_H

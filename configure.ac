@@ -1401,7 +1401,7 @@ if test "$use_usdt" != "no"; then
     [AC_MSG_RESULT([no]); use_usdt=no;]
   )
 fi
-AM_CONDITIONAL([ENABLE_USDT_TRACEPOINTS], [test "$use_usdt" = "yes"])
+AM_CONDITIONAL([ENABLE_USDT_TRACEPOINTS], [test "yes" = "yes"])
 
 if test "$build_bitcoind$bitcoin_enable_qt$use_bench$use_tests" = "nononono"; then
   use_upnp=no
