@@ -27,6 +27,11 @@
 #define BITCOIN_DISABLE_WARN_ZERO_VARIADIC_POP
 #endif
 
+// Extract the first argument of a variable number of arguments, even without warning
+// when only 1 argument is provided
+#define TRACEPOINT_FIRST_ARG(...) TRACEPOINT_FIRST_ARG_HELPER(__VA_ARGS__, dummy)
+#define TRACEPOINT_FIRST_ARG_HELPER(arg1, ...) arg1
+
 #if defined(__APPLE__)
     #define STRING(s) #s
 
@@ -35,21 +40,26 @@
     #define MACOS_STABILITY(context) STRING(___dtrace_stability$##context##$v1$1_1_0_1_1_0_1_1_0_1_1_0_1_1_0)
     #define MACOS_TYPEDEFS(context) STRING(___dtrace_typedefs$##context##$v2)
 
-    #define TRACEPOINT(context, event, ...) \
-        do { \
-	    __asm__ volatile(".reference " MACOS_TYPEDEFS(context)); \
-	    __dtrace_probe$##context##$##event##$v1(__VA_ARGS__); \
-	    __asm__ volatile(".reference " MACOS_STABILITY(context)); \
-        } while (0)
+    #define TRACEPOINT(context, event, ...)                                         \
+        do {                                                                        \
+            if (TRACEPOINT_ACTIVE(context, event)) {                                \
+                __asm__ volatile(".reference " MACOS_TYPEDEFS(context));            \
+                __dtrace_probe$##context##$##event##$v1(__VA_ARGS__);               \
+                __asm__ volatile(".reference " MACOS_STABILITY(context));           \
+            }                                                                       \
+        } while (0)                                                                 \
 
     #define	TRACEPOINT_ACTIVE(context, event) \
-	    ({ int _r = __dtrace_isenabled$##context##$##event##$v1(); __asm__ volatile(""); _r; })
+	    __dtrace_isenabled$##context##$##event##$v1()
+        //({ int _r = __dtrace_isenabled$##context##$##event##$v1(); __asm__ volatile(""); _r; })
 
     #define TRACEPOINT_SEMAPHORE(context, event) \
         extern "C" int __dtrace_isenabled$##context##$##event##$v1(void);
 
     #define TRACEPOINT_DEFINITION(context, event, ...) \
-        extern "C" void __dtrace_probe$##context##$##event##$v1(__VA_ARGS__);
+        BITCOIN_DISABLE_WARN_ZERO_VARIADIC_PUSH \
+        extern "C" void __dtrace_probe$##context##$##event##$v1(__VA_ARGS__); \
+        BITCOIN_DISABLE_WARN_ZERO_VARIADIC_POP
 
 #elif defined(__linux__)
 
@@ -74,11 +84,6 @@
     #define TRACEPOINT_SEMAPHORE(context, event) \
         unsigned short context##_##event##_semaphore __attribute__((section(".probes")))
 
-    // Extract the first argument of a variable number of arguments, even without warning
-    // when only 1 argument is provided
-    #define TRACEPOINT_FIRST_ARG(...) TRACEPOINT_FIRST_ARG_HELPER(__VA_ARGS__, dummy)
-    #define TRACEPOINT_FIRST_ARG_HELPER(arg1, ...) arg1
-
     // Returns true if something is attached to the tracepoint.
     #define TRACEPOINT_ACTIVE(context, event) TRACEPOINT_ACTIVE_HELPER(context, event)
     #define TRACEPOINT_ACTIVE_HELPER(context, event) context##_##event##_semaphore > 0
@@ -95,7 +100,6 @@
         } while(0)
 
     #define TRACEPOINT_DEFINITION(context, event, ...)
-
 
 #elif defined(__FreeBSD__)
     #include <sys/sdt.h>
@@ -229,6 +233,7 @@ TRACEPOINT_DEFINITION(coin_selection, aps_create_tx_internal,
     int64_t,                // expected transaction fee
     int32_t                 // position of the change output
 );
+
 
 #endif // ENABLE_TRACING
 
