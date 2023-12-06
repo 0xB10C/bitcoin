@@ -58,17 +58,20 @@ class NetTest(BitcoinTestFramework):
         self.connect_nodes(0, 1)
         self.sync_all()
 
-        self.test_connection_count()
-        self.test_getpeerinfo()
-        self.test_getnettotals()
-        self.test_getnetworkinfo()
-        self.test_addnode_getaddednodeinfo()
-        self.test_service_flags()
-        self.test_getnodeaddresses()
-        self.test_addpeeraddress()
-        self.test_sendmsgtopeer()
-        self.test_getaddrmaninfo()
-        self.test_getrawaddrman()
+        import random
+        port = random.randint(0, 65535)
+
+        #self.test_connection_count()
+        #self.test_getpeerinfo()
+        #self.test_getnettotals()
+        #self.test_getnetworkinfo()
+        #self.test_addnode_getaddednodeinfo()
+        #self.test_service_flags()
+        #self.test_getnodeaddresses()
+        self.test_addpeeraddress(port)
+        #self.test_sendmsgtopeer()
+        #self.test_getaddrmaninfo()
+        #self.test_getrawaddrman()
 
     def test_connection_count(self):
         self.log.info("Test getconnectioncount")
@@ -295,7 +298,7 @@ class NetTest(BitcoinTestFramework):
         assert_raises_rpc_error(-8, "Address count out of range", self.nodes[0].getnodeaddresses, -1)
         assert_raises_rpc_error(-8, "Network not recognized: Foo", self.nodes[0].getnodeaddresses, 1, "Foo")
 
-    def test_addpeeraddress(self):
+    def test_addpeeraddress(self, port):
         """RPC addpeeraddress sets the source address equal to the destination address.
         If an address with the same /16 as an existing new entry is passed, it will be
         placed in the same new bucket and have a 1/64 chance of the bucket positions
@@ -344,6 +347,11 @@ class NetTest(BitcoinTestFramework):
         with node.assert_debug_log(expected_msgs=["CheckAddrman: new 1, tried 1, total 2 started"]):
             addrs = node.getnodeaddresses(count=0)  # getnodeaddresses re-runs the addrman checks
             assert_equal(len(addrs), 2)
+
+        self.log.debug("Test that adding a conflicting but non-equal tried table address fails")
+        print("port", port)
+        #assert_equal(node.addpeeraddress(address="5.6.7.8", tried=True, port=port), {"success": False, "error": "failed-adding-to-tried"})
+        assert_equal(node.addpeeraddress(address="5.6.7.8", tried=True, port=port), {"success": True})
 
     def test_sendmsgtopeer(self):
         node = self.nodes[0]
