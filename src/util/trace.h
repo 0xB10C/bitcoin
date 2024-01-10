@@ -203,7 +203,7 @@ TRACEPOINT_DEFINITION(coin_selection, selected_coins,
 );
 
 TRACEPOINT_DEFINITION(coin_selection, normal_create_tx_internal,
-    char *,                 // wallet name
+    const char *,                 // wallet name
     bool,                   // CreateTransactionInternal success
     int64_t,                // expected transaction fee
     int32_t                 // position of the change output
@@ -214,7 +214,7 @@ TRACEPOINT_DEFINITION(coin_selection, attempting_aps_create_tx,
 );
 
 TRACEPOINT_DEFINITION(coin_selection, aps_create_tx_internal,
-    char *,                 // wallet name
+    const char *,           // wallet name
     bool,                   // using the Avoid Partial Spends solution?
     bool,                   // CreateTransactionInternal success
     int64_t,                // expected transaction fee
