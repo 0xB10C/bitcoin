@@ -4,6 +4,8 @@
 
 #include <chainparams.h>
 #include <consensus/amount.h>
+#include <consensus/merkle.h>
+#include <core_io.h>
 #include <net.h>
 #include <signet.h>
 #include <uint256.h>
@@ -143,6 +145,33 @@ BOOST_AUTO_TEST_CASE(test_assumeutxo)
     const auto out110_2 = *params->AssumeutxoForBlockhash(uint256S("0x696e92821f65549c7ee134edceeeeaaa4105647a3c4fd9f298c0aec0ab50425c"));
     BOOST_CHECK_EQUAL(out110_2.hash_serialized.ToString(), "6657b736d4fe4db0cbc796789e812d5dba7f5c143764b1b6905612f1830609d1");
     BOOST_CHECK_EQUAL(out110_2.nChainTx, 111U);
+}
+
+BOOST_AUTO_TEST_CASE(block_malleation)
+{
+    // tx1: ff204bd0000000000000
+    // tx2: 8ae53c92000000000000
+    // 64 byte tx of the form h(tx1)||h(tx2), tx3:
+    // cdaf22d00002c6a7f848f8ae4d30054e61dcf3303d6fe01d282163341f06feecc10032b3160fcab87bdfe3ecfb769206ef2d991b92f8a268e423a6ef4d485f06
+
+    CMutableTransaction tx1;
+    BOOST_CHECK(DecodeHexTx(tx1, "ff204bd0000000000000", /*try_no_witness=*/true, /*try_witness=*/false));
+    CMutableTransaction tx2;
+    BOOST_CHECK(DecodeHexTx(tx2, "8ae53c92000000000000", /*try_no_witness=*/true, /*try_witness=*/false));
+    CMutableTransaction tx3;
+    BOOST_CHECK(DecodeHexTx(tx3, "cdaf22d00002c6a7f848f8ae4d30054e61dcf3303d6fe01d282163341f06feecc10032b3160fcab87bdfe3ecfb769206ef2d991b92f8a268e423a6ef4d485f06", /*try_no_witness=*/true, /*try_witness=*/false));
+
+    CBlock block;
+    block.vtx.push_back(MakeTransactionRef(tx1));
+    block.vtx.push_back(MakeTransactionRef(tx2));
+    block.hashMerkleRoot = BlockMerkleRoot(block);
+    CBlock mutated_block;
+    mutated_block.vtx.push_back(MakeTransactionRef(tx3));
+    mutated_block.hashMerkleRoot = BlockMerkleRoot(mutated_block);
+
+    BOOST_CHECK(block.hashMerkleRoot == mutated_block.hashMerkleRoot);
+    BOOST_CHECK(IsBlockMutated(mutated_block, false));
+    BOOST_CHECK(!IsBlockMutated(block, false));
 }
 
 BOOST_AUTO_TEST_SUITE_END()
