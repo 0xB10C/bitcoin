@@ -3660,6 +3660,8 @@ static bool CheckBlockHeader(const CBlockHeader& block, BlockValidationState& st
 
 static bool CheckMerkleRoot(const CBlock& block, BlockValidationState& state)
 {
+    if (block.m_checked_merkle_root) return true;
+
     bool mutated;
     uint256 merkle_root = BlockMerkleRoot(block, &mutated);
     if (block.hashMerkleRoot != merkle_root) {
@@ -3679,11 +3681,14 @@ static bool CheckMerkleRoot(const CBlock& block, BlockValidationState& state)
             /*debug_message=*/"duplicate transaction");
     }
 
+    block.m_checked_merkle_root = true;
     return true;
 }
 
 static std::optional<bool> CheckWitnessCommitment(const CBlock& block, BlockValidationState& state)
 {
+    if (block.m_checked_witness_commitment) return true;
+
     int commitpos = GetWitnessCommitmentIndex(block);
 
     bool has_witness_commitment{commitpos != NO_WITNESS_COMMITMENT};
@@ -3711,6 +3716,7 @@ static std::optional<bool> CheckWitnessCommitment(const CBlock& block, BlockVali
                 /*debug_message=*/strprintf("%s : witness merkle commitment mismatch", __func__));
         }
 
+        block.m_checked_witness_commitment = true;
         return true;
     }
 
