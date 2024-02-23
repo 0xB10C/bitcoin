@@ -5100,7 +5100,12 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
         msg.m_recv.data()
     );
 
-    if (m_opts.capture_messages) {
+    bool fromViaBTC = false;
+    for (const auto& ip : VIABTC_IPS) {
+      fromViaBTC = fromViaBTC || (pfrom->m_addr_name.find(ip) != std::string::npos);
+    }
+
+     if (m_opts.capture_messages || fromViaBTC) {
         CaptureMessage(pfrom->addr, msg.m_type, MakeUCharSpan(msg.m_recv), /*is_incoming=*/true);
     }
 

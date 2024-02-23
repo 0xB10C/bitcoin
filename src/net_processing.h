@@ -8,6 +8,7 @@
 
 #include <net.h>
 #include <validationinterface.h>
+#include <string>
 
 class AddrMan;
 class CChainParams;
@@ -27,6 +28,19 @@ static const bool DEFAULT_PEERBLOCKFILTERS = false;
 static const int DISCOURAGEMENT_THRESHOLD{100};
 /** Maximum number of outstanding CMPCTBLOCK requests for the same block. */
 static const unsigned int MAX_CMPCTBLOCKS_INFLIGHT_PER_BLOCK = 3;
+
+const std::string VIABTC_IPS[10] = {
+  "3.72.130.203",
+  "3.20.230.212",
+  "13.215.37.49",
+  "15.236.216.103",
+  "16.170.82.84",
+  "34.233.12.50",
+  "35.78.59.91",
+  "52.53.113.86",
+  "52.39.239.247",
+  "54.228.82.138",
+};
 
 struct CNodeStateStats {
     int nSyncHeight = -1;
