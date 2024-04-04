@@ -5010,8 +5010,11 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
     CNetMessage& msg{poll_result->first};
     bool fMoreWork = poll_result->second;
 
+    // HACK: on aarch64, systemtap points to the peer_id with -8@v0, but this isn't supported by 
+    // libbpf. Change this by storing the peer_id in a separate variable.
+    auto peer_id = pfrom->GetId();
     TRACE6(net, inbound_message,
-        pfrom->GetId(),
+        peer_id,
         pfrom->m_addr_name.c_str(),
         pfrom->ConnectionTypeAsString().c_str(),
         msg.m_type.c_str(),
