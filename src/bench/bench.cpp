@@ -136,7 +136,7 @@ void BenchRunner::RunAll(const Args& args)
                                                                "{{#result}}{{name}}, {{epochs}}, {{average(iterations)}}, {{sumProduct(iterations, elapsed)}}, {{minimum(elapsed)}}, {{maximum(elapsed)}}, {{median(elapsed)}}\n"
                                                                "{{/result}}");
     GenerateTemplateResults(benchmarkResults, args.output_json, ankerl::nanobench::templates::json());
-    GenerateTemplateResults(benchmarkResults, args.output_bencher, "[{{#result}}{\"{{name}}\": {\"latency\": {\"value\": {{average(elapsed)}}, \"lower_value\": {{minimum(elapsed)}}, \"upper_value\": {{maximum(elapsed)}}}}}{{^-last}},\n{{/-last}} {{/result}}]");
+    GenerateTemplateResults(benchmarkResults, args.output_bencher, "{ {{#result}}\"{{name}}\": {\"latency-s\": {\"value\": {{average(elapsed)}}, \"lower_value\": {{minimum(elapsed)}}, \"upper_value\": {{maximum(elapsed)}}}}{{^-last}},\n{{/-last}} {{/result}}\n}");
 }
 
 } // namespace benchmark
