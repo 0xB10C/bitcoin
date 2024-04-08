@@ -93,6 +93,18 @@ jobs:
           make -j $(nproc) -C src bitcoin_bench
       - name: Run bench_bitcoin
         run: ./src/bench/bench_bitcoin
+      - uses: bencherdev/bencher@main
+      - name: Track base branch benchmarks with Bencher
+        run: |
+          bencher run \
+          --project 0xb10c-s-bitcoin-core \
+          --token '${{ secrets.BENCHER_API_TOKEN }}' \
+          --branch master \
+          --testbed ubuntu-latest \
+          --adapter json \
+          --file bencher.json \
+          --err \
+          "./src/bench/bench_bitcoin -output-bencher=bencher.json"
 
   macos-native-x86_64:
     name: 'macOS 13 native, x86_64, no depends, sqlite only, gui'

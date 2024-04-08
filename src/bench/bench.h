@@ -58,6 +58,7 @@ struct Args {
     std::vector<double> asymptote;
     fs::path output_csv;
     fs::path output_json;
+    fs::path output_bencher;
     std::string regex_filter;
     uint8_t priority;
 };
