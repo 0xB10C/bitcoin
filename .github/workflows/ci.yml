@@ -91,6 +91,8 @@ jobs:
           ./autogen.sh
           CC=clang-15 CXX=clang++-15 ./configure --enable-bench
           make -j $(nproc) -C src bitcoin_bench
+      - name: Run bench_bitcoin
+        run: ./src/bench/bench_bitcoin
 
   macos-native-x86_64:
     name: 'macOS 13 native, x86_64, no depends, sqlite only, gui'
