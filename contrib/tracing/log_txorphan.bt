@@ -1,0 +1,37 @@
+#!/usr/bin/env bpftrace
+
+usdt:./src/bitcoind:orphan:add
+{
+  $txid = arg0;
+  $weight = (uint32)arg2;
+  $peer_id = (uint64)arg3;
+  $size = (int64)arg4;
+  $map_size = (int64)arg5;
+
+  printf("Added orphan tx ");
+  $p = $txid + 31;
+  unroll(32) {
+    $b = *(uint8*)$p;
+    printf("%02x", $b);
+    $p-=1;
+  }
+
+  printf(": weight=%d peer=%ld orphans=%ld map=%ld\n", $weight, $peer_id, $size, $map_size);
+}
+
+usdt:./src/bitcoind:orphan:removed
+{
+  $txid = arg0;
+  $size = (int64)arg2;
+  $map_size = (int64)arg3;
+
+  printf("Removed orphan tx ");
+  $p = $txid + 31;
+  unroll(32) {
+    $b = *(uint8*)$p;
+    printf("%02x", $b);
+    $p-=1;
+  }
+
+  printf(": orphans=%ld map=%ld\n", $size, $map_size);
+}

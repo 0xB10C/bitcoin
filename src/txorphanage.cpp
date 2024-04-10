@@ -8,6 +8,7 @@
 #include <logging.h>
 #include <policy/policy.h>
 #include <primitives/transaction.h>
+#include <util/trace.h>
 
 #include <cassert>
 
@@ -51,6 +52,16 @@ bool TxOrphanage::AddTx(const CTransactionRef& tx, NodeId peer)
 
     LogPrint(BCLog::TXPACKAGES, "stored orphan tx %s (wtxid=%s) (mapsz %u outsz %u)\n", hash.ToString(), wtxid.ToString(),
              m_orphans.size(), m_outpoint_to_orphan_it.size());
+
+    TRACE6(orphan, add,
+        hash.data(),
+        wtxid.data(),
+        sz,
+        peer,
+        m_orphans.size(),
+        m_outpoint_to_orphan_it.size()
+    );
+
     return true;
 }
 
@@ -91,6 +102,12 @@ int TxOrphanage::EraseTxNoLock(const Txid& txid)
     m_wtxid_to_orphan_it.erase(it->second.tx->GetWitnessHash());
 
     m_orphans.erase(it);
+    TRACE4(orphan, removed,
+        txid.data(),
+        wtxid.data(),
+        m_orphans.size(),
+        m_outpoint_to_orphan_it.size()
+    );
     return 1;
 }
 
