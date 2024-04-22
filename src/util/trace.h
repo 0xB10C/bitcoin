@@ -9,7 +9,7 @@
 #include <config/bitcoin-config.h>
 #endif
 
-#ifdef ENABLE_TRACING
+#if defined(__linux__)
 
 // Setting SDT_USE_VARIADIC let's systemtap (sys/sdt.h) know that we want to use
 // the optional variadic macros to define tracepoints.
@@ -30,7 +30,7 @@
 #define TRACEPOINT_SEMAPHORE(context, event) \
     unsigned short context##_##event##_semaphore __attribute__((section(".probes")))
 
-#include <sys/sdt.h>
+#include <util/systemtap.h>
 
 // Returns true if something is attached to the tracepoint.
 #define TRACEPOINT_ACTIVE(context, event) context##_##event##_semaphore > 0
@@ -50,7 +50,7 @@
 #define TRACEPOINT_ACTIVE(context, event) false
 #define TRACEPOINT(context, ...)
 
-#endif // ENABLE_TRACING
+#endif // __linux__
 
 
 #endif // BITCOIN_UTIL_TRACE_H
