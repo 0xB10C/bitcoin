@@ -11,11 +11,11 @@
 
 #if defined(__linux__)
 
-// Setting SDT_USE_VARIADIC let's systemtap (sys/sdt.h) know that we want to use
+// Setting SDT_USE_VARIADIC let's systemtap know that we want to use
 // the optional variadic macros to define tracepoints.
 #define SDT_USE_VARIADIC 1
 
-// Setting _SDT_HAS_SEMAPHORES let's systemtap (sys/sdt.h) know that we want to
+// Setting _SDT_HAS_SEMAPHORES let's systemtap know that we want to
 // use the optional semaphore feature for our tracepoints. This feature allows
 // us to check if something is attached to a tracepoint. We only want to prepare
 // some potentially expensive tracepoint arguments, if the tracepoint is being

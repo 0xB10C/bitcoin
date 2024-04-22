@@ -11,7 +11,6 @@ You can find installation instructions in the `build-*.md` file for your platfor
 | [Clang](https://clang.llvm.org) | [14.0](https://github.com/bitcoin/bitcoin/pull/29208) |
 | [GCC](https://gcc.gnu.org) | [11.1](https://github.com/bitcoin/bitcoin/pull/29091) |
 | [Python](https://www.python.org) (scripts, tests) | [3.9](https://github.com/bitcoin/bitcoin/pull/28211) |
-| [systemtap](https://sourceware.org/systemtap/) ([tracing](tracing.md))| N/A |
 
 ## Required
 

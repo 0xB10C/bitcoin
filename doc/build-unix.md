@@ -69,10 +69,6 @@ ZMQ dependencies (provides ZMQ API):
 
     sudo apt-get install libzmq3-dev
 
-User-Space, Statically Defined Tracing (USDT) dependencies:
-
-    sudo apt install systemtap-sdt-dev
-
 GUI dependencies:
 
 If you want to build bitcoin-qt, make sure that the required packages for Qt development
@@ -125,10 +121,6 @@ Optional port mapping libraries (see: `--with-miniupnpc` and `--with-natpmp`):
 ZMQ dependencies (provides ZMQ API):
 
     sudo dnf install zeromq-devel
-
-User-Space, Statically Defined Tracing (USDT) dependencies:
-
-    sudo dnf install systemtap-sdt-devel
 
 GUI dependencies:
 
