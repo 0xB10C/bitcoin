@@ -5369,9 +5369,9 @@ bool PeerManagerImpl::ProcessMessages(CNode* pfrom, std::atomic<bool>& interrupt
 
     CNetMessage& msg{poll_result->first};
     bool fMoreWork = poll_result->second;
-
+    auto id = pfrom->GetId();
     TRACE6(net, inbound_message,
-        pfrom->GetId(),
+        id,
         pfrom->m_addr_name.c_str(),
         pfrom->ConnectionTypeAsString().c_str(),
         msg.m_type.c_str(),
