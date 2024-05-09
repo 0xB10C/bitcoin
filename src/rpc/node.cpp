@@ -6,6 +6,7 @@
 #include <config/bitcoin-config.h> // IWYU pragma: keep
 
 #include <chainparams.h>
+#include <clientversion.h>
 #include <httpserver.h>
 #include <index/blockfilterindex.h>
 #include <index/coinstatsindex.h>
@@ -188,6 +189,39 @@ static RPCHelpMan getmemoryinfo()
     } else {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "unknown mode " + mode);
     }
+},
+    };
+}
+
+static RPCHelpMan getversion()
+{
+    return RPCHelpMan{"getversion",
+                "\nReturns an object containing information about the node version.\n",
+                {},
+                RPCResult{RPCResult::Type::OBJ, "", "",
+                    {
+                        {RPCResult::Type::STR, "short", "Node version formatted as 'MAJOR.MINOR.BUILD'."},
+                        {RPCResult::Type::STR, "long", "Detailed node version with git commit information, if available."},
+                        {RPCResult::Type::NUM, "numeric", "Node version as integer in '10000 * MAJOR + 100 * MINOR + 1 * BUILD' format."},
+                        {RPCResult::Type::STR, "client", "The client name."},
+                        {RPCResult::Type::NUM, "release_canidate", "The release canidate number. Zero means the binary is not a release candiate."},
+                        {RPCResult::Type::BOOL, "is_release", "True if the node is build from a release branch."},
+                    },
+                },
+                RPCExamples{
+                    HelpExampleCli("getversion", "")
+            + HelpExampleRpc("getversion", "")
+                },
+        [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue
+{
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("short", FormatVersion(CLIENT_VERSION));
+    obj.pushKV("long", FormatFullVersion());
+    obj.pushKV("numeric", CLIENT_VERSION);
+    obj.pushKV("client", CLIENT_NAME);
+    obj.pushKV("release_canidate", CLIENT_VERSION_RC);
+    obj.pushKV("is_release", CLIENT_VERSION_IS_RELEASE);
+    return obj;
 },
     };
 }
@@ -406,6 +440,7 @@ void RegisterNodeRPCCommands(CRPCTable& t)
     static const CRPCCommand commands[]{
         {"control", &getmemoryinfo},
         {"control", &logging},
+        {"control", &getversion},
         {"util", &getindexinfo},
         {"hidden", &setmocktime},
         {"hidden", &mockscheduler},
