@@ -10,7 +10,7 @@
 #include <pubkey.h>
 #include <random.h>
 #include <uint256.h>
-
+#include <util/trace.h>
 #include <cuckoocache.h>
 
 #include <algorithm>
@@ -109,10 +109,14 @@ bool CachingTransactionSignatureChecker::VerifyECDSASignature(const std::vector<
 {
     uint256 entry;
     signatureCache.ComputeEntryECDSA(entry, sighash, vchSig, pubkey);
-    if (signatureCache.Get(entry, !store))
+    if (signatureCache.Get(entry, !store)) {
+        TRACE(sigcache, ecdsa_cache_hit);
         return true;
+    }
+
     if (!TransactionSignatureChecker::VerifyECDSASignature(vchSig, pubkey, sighash))
         return false;
+    TRACE(sigcache, ecdsa_verified);
     if (store)
         signatureCache.Set(entry);
     return true;
@@ -122,8 +126,12 @@ bool CachingTransactionSignatureChecker::VerifySchnorrSignature(Span<const unsig
 {
     uint256 entry;
     signatureCache.ComputeEntrySchnorr(entry, sighash, sig, pubkey);
-    if (signatureCache.Get(entry, !store)) return true;
+    if (signatureCache.Get(entry, !store)) {
+        TRACE(sigcache, schnorr_cache_hit);
+        return true;
+    }
     if (!TransactionSignatureChecker::VerifySchnorrSignature(sig, pubkey, sighash)) return false;
+    TRACE(sigcache, schnorr_verified);
     if (store) signatureCache.Set(entry);
     return true;
 }
