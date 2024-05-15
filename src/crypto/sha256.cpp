@@ -6,7 +6,7 @@
 
 #include <crypto/sha256.h>
 #include <crypto/common.h>
-
+#include <util/trace.h>
 #include <assert.h>
 #include <string.h>
 
@@ -699,6 +699,7 @@ CSHA256::CSHA256()
 
 CSHA256& CSHA256::Write(const unsigned char* data, size_t len)
 {
+    TRACE1(crpyto, sha256, len);
     const unsigned char* end = data + len;
     size_t bufsize = bytes % 64;
     if (bufsize && bufsize + len >= 64) {
