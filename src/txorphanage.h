@@ -81,6 +81,8 @@ public:
         NodeSeconds nTimeExpire;
     };
 
+    std::vector<OrphanTxBase> GetOrphanTransactions();
+
 protected:
     struct OrphanTx : public OrphanTxBase {
         size_t list_pos;
