@@ -27,7 +27,10 @@ from .authproxy import (
     serialization_fallback,
 )
 from .descriptors import descsum_create
-from .messages import NODE_P2P_V2
+from .messages import (
+    CTransaction,
+    NODE_P2P_V2
+)
 from .p2p import P2P_SERVICES, P2P_SUBVERSION
 from .util import (
     MAX_NODES,
@@ -841,6 +844,10 @@ class TestNode():
     def wait_until(self, test_function, timeout=60):
         return wait_until_helper_internal(test_function, timeout=timeout, timeout_factor=self.timeout_factor)
 
+    def tx_in_orphanage(self, tx: CTransaction) -> bool:
+        """Returns true if the transaction is in the orphanage."""
+        found = [o for o in self.getorphantxs(verbosity=1) if o["txid"] == tx.rehash() and o["wtxid"] == tx.getwtxid()]
+        return len(found) == 1
 
 class TestNodeCLIAttr:
     def __init__(self, cli, command):
