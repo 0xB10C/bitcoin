@@ -81,6 +81,18 @@ void RPCTypeCheckObj(const UniValue& o,
     }
 }
 
+int ParseVerbosity(const UniValue& arg)
+{
+    if (!arg.isNull()) {
+        if (arg.isBool()) {
+            return arg.get_bool();
+        } else {
+            return arg.getInt<int>();
+        }
+    }
+    return 0;
+}
+
 CAmount AmountFromValue(const UniValue& value, int decimals)
 {
     if (!value.isNum() && !value.isStr())
