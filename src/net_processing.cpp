@@ -4574,9 +4574,9 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         // due to parent-orphan fetching.
         bool is_expected = tx.HasWitness() ? m_txrequest.ExpectedTx(pfrom.GetId(), wtxid) ||
             m_txrequest.ExpectedTx(pfrom.GetId(), txid) : m_txrequest.ExpectedTx(pfrom.GetId(), txid);
-        if (!is_expected) {
-            LogDebug(BCLog::NET, "unrequested transaction %s (wtxid=%s) from peer=%d (%s)\n",
-                     tx.GetHash().ToString(), tx.GetWitnessHash().ToString(), pfrom.GetId(), pfrom.m_addr_name);
+        if (!is_expected && !AlreadyHaveTx(GenTxid::Wtxid(tx.GetWitnessHash()), true)) {
+            LogDebug(BCLog::NET, "unrequested transaction %s (wtxid=%s) from peer=%d (%s;%s)\n",
+                     tx.GetHash().ToString(), tx.GetWitnessHash().ToString(), pfrom.GetId(), pfrom.m_addr_name, pfrom.cleanSubVer);
         }
 
         m_txrequest.ReceivedResponse(pfrom.GetId(), txid);
