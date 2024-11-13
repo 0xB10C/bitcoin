@@ -134,6 +134,11 @@ task:
   name: 'Win64, unit tests, no gui tests, no functional tests'
   << : *GLOBAL_TASK_TEMPLATE
   persistent_worker:
+    isolation:
+      vetu:
+        image: ghcr.io/cirruslabs/ubuntu:latest
+        user: admin
+        password: admin
     labels:
       type: small
   env:
@@ -143,6 +148,11 @@ task:
   name: '32-bit CentOS, dash, gui'
   << : *GLOBAL_TASK_TEMPLATE
   persistent_worker:
+    isolation:
+      vetu:
+        image: ghcr.io/cirruslabs/ubuntu:latest
+        user: admin
+        password: admin
     labels:
       type: small
   env:
@@ -161,6 +171,11 @@ task:
   name: 'TSan, depends, gui'
   << : *GLOBAL_TASK_TEMPLATE
   persistent_worker:
+    isolation:
+      vetu:
+        image: ghcr.io/cirruslabs/ubuntu:latest
+        user: admin
+        password: admin
     labels:
       type: medium
   env:
@@ -170,6 +185,11 @@ task:
   name: 'MSan, depends'
   << : *GLOBAL_TASK_TEMPLATE
   persistent_worker:
+    isolation:
+      vetu:
+        image: ghcr.io/cirruslabs/ubuntu:latest
+        user: admin
+        password: admin
     labels:
       type: small
   timeout_in: 300m  # Use longer timeout for the *rare* case where a full build (llvm + msan + depends + ...) needs to be done.
@@ -180,6 +200,11 @@ task:
   name: 'fuzzer,address,undefined,integer, no depends'
   << : *GLOBAL_TASK_TEMPLATE
   persistent_worker:
+    isolation:
+      vetu:
+        image: ghcr.io/cirruslabs/ubuntu:latest
+        user: admin
+        password: admin
     labels:
       type: medium
   env:
@@ -189,6 +214,11 @@ task:
   name: 'multiprocess, i686, DEBUG'
   << : *GLOBAL_TASK_TEMPLATE
   persistent_worker:
+    isolation:
+      vetu:
+        image: ghcr.io/cirruslabs/ubuntu:latest
+        user: admin
+        password: admin
     labels:
       type: medium
   env:
@@ -198,6 +228,11 @@ task:
   name: 'no wallet, libbitcoinkernel'
   << : *GLOBAL_TASK_TEMPLATE
   persistent_worker:
+    isolation:
+      vetu:
+        image: ghcr.io/cirruslabs/ubuntu:latest
+        user: admin
+        password: admin
     labels:
       type: small
   env:
@@ -207,6 +242,11 @@ task:
   name: 'macOS-cross, gui, no tests'
   << : *GLOBAL_TASK_TEMPLATE
   persistent_worker:
+    isolation:
+      vetu:
+        image: ghcr.io/cirruslabs/ubuntu:latest
+        user: admin
+        password: admin
     labels:
       type: small
   env:
