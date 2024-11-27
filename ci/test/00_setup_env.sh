@@ -68,3 +68,8 @@ export CI_BASE_PACKAGES=${CI_BASE_PACKAGES:-build-essential pkg-config curl ca-c
 export GOAL=${GOAL:-install}
 export DIR_QA_ASSETS=${DIR_QA_ASSETS:-${BASE_SCRATCH_DIR}/qa-assets}
 export CI_RETRY_EXE=${CI_RETRY_EXE:-"retry --"}
+# The (optional) `docker build` cache directory.
+# If set, the folder exists only on the CI host and is used
+# as a build cache for the docker build of CI images. This
+# cache can be multiple GB in size.
+export DOCKER_BUILD_CACHE_HOST_DIR=${DOCKER_BUILD_CACHE_HOST_DIR:-}
