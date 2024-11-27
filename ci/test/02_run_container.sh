@@ -25,6 +25,23 @@ if [ -z "$DANGER_RUN_CI_ON_HOST" ]; then
   fi
   echo "Creating $CI_IMAGE_NAME_TAG container to run in"
 
+  DOCKER_BUILD_CACHE_ARG=""
+  DOCKER_BUILD_CACHE_TEMPDIR=""
+  DOCKER_BUILD_CACHE_OLD_DIR=""
+  DOCKER_BUILD_CACHE_NEW_DIR=""
+  if [ "$DOCKER_BUILD_CACHE_HOST_DIR" ]; then
+    # Directory where the current cache for this run could be. If not existing
+    # or empty, "docker build" will warn, but treat it as cache-miss and continue.
+    DOCKER_BUILD_CACHE_OLD_DIR="${DOCKER_BUILD_CACHE_HOST_DIR}/${CONTAINER_NAME}"
+    # Temporary directory for a newly created cache. We can't write the new
+    # cache into OLD_DIR directly, as old cache layers woudln't be removed.
+    # The NEW_DIR contents are moved to OLD_DIR after OLD_DIR has been cleared
+    # (see below).
+    DOCKER_BUILD_CACHE_TEMPDIR="$(mktemp --directory)"
+    DOCKER_BUILD_CACHE_NEW_DIR="${DOCKER_BUILD_CACHE_TEMPDIR}/${CONTAINER_NAME}"
+    DOCKER_BUILD_CACHE_ARG="--cache-from type=local,src=${DOCKER_BUILD_CACHE_OLD_DIR} --cache-to type=local,dest=${DOCKER_BUILD_CACHE_NEW_DIR},mode=max"
+  fi
+
   # shellcheck disable=SC2086
   DOCKER_BUILDKIT=1 docker build \
       --file "${BASE_READ_ONLY_DIR}/ci/test_imagefile" \
@@ -33,7 +50,19 @@ if [ -z "$DANGER_RUN_CI_ON_HOST" ]; then
       $MAYBE_CPUSET \
       --label="${CI_IMAGE_LABEL}" \
       --tag="${CONTAINER_NAME}" \
+      $DOCKER_BUILD_CACHE_ARG \
       "${BASE_READ_ONLY_DIR}"
+
+  if [ "$DOCKER_BUILD_CACHE_HOST_DIR" ]; then
+    if [ -e "${DOCKER_BUILD_CACHE_NEW_DIR}/index.json" ]; then
+      echo "Removing the existing docker build cache in ${DOCKER_BUILD_CACHE_OLD_DIR}"
+      rm -rf "${DOCKER_BUILD_CACHE_OLD_DIR}"
+      echo "Moving the contents of ${DOCKER_BUILD_CACHE_NEW_DIR} to ${DOCKER_BUILD_CACHE_OLD_DIR}"
+      mv "${DOCKER_BUILD_CACHE_NEW_DIR}" "${DOCKER_BUILD_CACHE_OLD_DIR}"
+    fi
+    rm -rf "${DOCKER_BUILD_CACHE_TEMPDIR}"
+    echo "The docker build cache for this task now has a size of: $(du --summarize -h $DOCKER_BUILD_CACHE_OLD_DIR | cut -f1)"
+  fi
 
   docker volume create "${CONTAINER_NAME}_ccache" || true
   docker volume create "${CONTAINER_NAME}_depends" || true
