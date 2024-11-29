@@ -2963,6 +2963,7 @@ void Chainstate::PruneAndFlush()
 }
 
 static void UpdateTipLog(
+    const ChainstateManager& chainman,
     const CCoinsViewCache& coins_tip,
     const CBlockIndex* tip,
     const CChainParams& params,
@@ -2977,7 +2978,7 @@ static void UpdateTipLog(
         tip->GetBlockHash().ToString(), tip->nHeight, tip->nVersion,
         log(tip->nChainWork.getdouble()) / log(2.0), tip->m_chain_tx_count,
         FormatISO8601DateTime(tip->GetBlockTime()),
-        GuessVerificationProgress(params.TxData(), tip),
+        chainman.GuessVerificationProgress(tip),
         coins_tip.DynamicMemoryUsage() * (1.0 / (1 << 20)),
         coins_tip.GetCacheSize(),
         !warning_messages.empty() ? strprintf(" warning='%s'", warning_messages) : "");
@@ -2996,7 +2997,7 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
         // Only log every so often so that we don't bury log messages at the tip.
         constexpr int BACKGROUND_LOG_INTERVAL = 2000;
         if (pindexNew->nHeight % BACKGROUND_LOG_INTERVAL == 0) {
-            UpdateTipLog(coins_tip, pindexNew, params, __func__, "[background validation] ", "");
+            UpdateTipLog(m_chainman, coins_tip, pindexNew, params, __func__, "[background validation] ", "");
         }
         return;
     }
@@ -3022,7 +3023,7 @@ void Chainstate::UpdateTip(const CBlockIndex* pindexNew)
             }
         }
     }
-    UpdateTipLog(coins_tip, pindexNew, params, __func__, "",
+    UpdateTipLog(m_chainman, coins_tip, pindexNew, params, __func__, "",
                  util::Join(warning_messages, Untranslated(", ")).original);
 }
 
@@ -4700,7 +4701,7 @@ bool Chainstate::LoadChainTip()
               tip->GetBlockHash().ToString(),
               m_chain.Height(),
               FormatISO8601DateTime(tip->GetBlockTime()),
-              GuessVerificationProgress(m_chainman.GetParams().TxData(), tip));
+              m_chainman.GuessVerificationProgress(tip));
     return true;
 }
 
@@ -5584,9 +5585,12 @@ bool Chainstate::ResizeCoinsCaches(size_t coinstip_size, size_t coinsdb_size)
 
 //! Guess how far we are in the verification process at the given block index
 //! require cs_main if pindex has not been validated yet (because m_chain_tx_count might be unset)
-double GuessVerificationProgress(const ChainTxData& data, const CBlockIndex *pindex) {
-    if (pindex == nullptr)
+double ChainstateManager::GuessVerificationProgress(const CBlockIndex* pindex) const
+{
+    const ChainTxData& data{GetParams().TxData()};
+    if (pindex == nullptr) {
         return 0.0;
+    }
 
     if (!Assume(pindex->m_chain_tx_count > 0)) {
         LogWarning("Internal bug detected: block %d has unset m_chain_tx_count (%s %s). Please report this issue here: %s\n",
