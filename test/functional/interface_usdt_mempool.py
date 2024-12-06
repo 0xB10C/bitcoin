@@ -99,9 +99,11 @@ int trace_removed(struct pt_regs *ctx) {
 
 int trace_rejected(struct pt_regs *ctx) {
   struct rejected_event rejected = {};
+  uint64_t reason_addr;
 
   bpf_usdt_readarg_p(1, ctx, &rejected.hash, HASH_LENGTH);
-  bpf_usdt_readarg_p(2, ctx, &rejected.reason, MAX_REJECT_REASON_LENGTH);
+  bpf_usdt_readarg(2, ctx, &reason_addr);
+  bpf_probe_read_user_str(&rejected.reason, sizeof(rejected.reason), (void *) reason_addr);
 
   rejected_events.perf_submit(ctx, &rejected, sizeof(rejected));
   return 0;
