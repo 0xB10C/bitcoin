@@ -14,8 +14,9 @@ if [ -z "$DANGER_RUN_CI_ON_HOST" ]; then
   # Though, exclude those with newlines to avoid parsing problems.
   python3 -c 'import os; [print(f"{key}={value}") for key, value in os.environ.items() if "\n" not in value and "HOME" != key and "PATH" != key and "USER" != key]' | tee "/tmp/env-$USER-$CONTAINER_NAME"
   # System-dependent env vars must be kept as is. So read them from the container.
+  docker images --no-trunc --digests
   docker run --rm "${CI_IMAGE_NAME_TAG}" bash -c "env | grep --extended-regexp '^(HOME|PATH|USER)='" | tee --append "/tmp/env-$USER-$CONTAINER_NAME"
-
+  docker images --no-trunc --digests
   # Env vars during the build can not be changed. For example, a modified
   # $MAKEJOBS is ignored in the build process. Use --cpuset-cpus as an
   # approximation to respect $MAKEJOBS somewhat, if cpuset is available.
