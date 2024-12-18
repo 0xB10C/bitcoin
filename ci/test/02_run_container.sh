@@ -71,7 +71,7 @@ if [ -z "$DANGER_RUN_CI_ON_HOST" ]; then
    fi # End temporary exclusion
   fi
 
-  docker network create --ipv6 --subnet 1111:1111::/112 ci-ip6net || true
+  docker network create --internal --ipv6 --subnet 1111:1111::/112 ci-ip6net || true
 
   if [ -n "${RESTART_CI_DOCKER_BEFORE_RUN}" ] ; then
     echo "Restart docker before run to stop and clear all containers started with --rm"
