@@ -77,6 +77,7 @@ BPF_PERF_OUTPUT(outbound_messages);
 int trace_inbound_message(struct pt_regs *ctx) {
     int idx = 0;
     struct p2p_message *msg = msg_arr.lookup(&idx);
+    uint64_t paddr, pconn_type, pmsg_type, pmsg;
 
     // lookup() does not return a NULL pointer. However, the BPF verifier
     // requires an explicit check that that the `msg` pointer isn't a NULL
@@ -84,11 +85,15 @@ int trace_inbound_message(struct pt_regs *ctx) {
     if (msg == NULL) return 1;
 
     bpf_usdt_readarg(1, ctx, &msg->peer_id);
-    bpf_usdt_readarg_p(2, ctx, &msg->peer_addr, MAX_PEER_ADDR_LENGTH);
-    bpf_usdt_readarg_p(3, ctx, &msg->peer_conn_type, MAX_PEER_CONN_TYPE_LENGTH);
-    bpf_usdt_readarg_p(4, ctx, &msg->msg_type, MAX_MSG_TYPE_LENGTH);
+    bpf_usdt_readarg(2, ctx, &paddr);
+    bpf_probe_read_user_str(&msg.peer_addr, sizeof(msg.peer_addr), (void *) paddr);
+    bpf_usdt_readarg(3, ctx, &pconn_type);
+    bpf_probe_read_user_str(&msg.peer_conn_type, sizeof(msg.peer_conn_type), (void *) pconn_type);
+    bpf_usdt_readarg(4, ctx, &pconn_type);
+    bpf_probe_read_user_str(&msg.msg_type, sizeof(msg.msg_type), (void *) pmsg_type);
     bpf_usdt_readarg(5, ctx, &msg->msg_size);
-    bpf_usdt_readarg_p(6, ctx, &msg->msg, MIN(msg->msg_size, MAX_MSG_DATA_LENGTH));
+    bpf_usdt_readarg(6, ctx, &pmsg);
+    bpf_probe_read_user(&msg.msg, MIN(msg->msg_size, MAX_MSG_DATA_LENGTH), (void *) pmsg);
 
     inbound_messages.perf_submit(ctx, msg, sizeof(*msg));
     return 0;
@@ -97,6 +102,7 @@ int trace_inbound_message(struct pt_regs *ctx) {
 int trace_outbound_message(struct pt_regs *ctx) {
     int idx = 0;
     struct p2p_message *msg = msg_arr.lookup(&idx);
+    uint64_t paddr, pconn_type, pmsg_type, pmsg;
 
     // lookup() does not return a NULL pointer. However, the BPF verifier
     // requires an explicit check that that the `msg` pointer isn't a NULL
@@ -104,11 +110,15 @@ int trace_outbound_message(struct pt_regs *ctx) {
     if (msg == NULL) return 1;
 
     bpf_usdt_readarg(1, ctx, &msg->peer_id);
-    bpf_usdt_readarg_p(2, ctx, &msg->peer_addr, MAX_PEER_ADDR_LENGTH);
-    bpf_usdt_readarg_p(3, ctx, &msg->peer_conn_type, MAX_PEER_CONN_TYPE_LENGTH);
-    bpf_usdt_readarg_p(4, ctx, &msg->msg_type, MAX_MSG_TYPE_LENGTH);
+    bpf_usdt_readarg(2, ctx, &paddr);
+    bpf_probe_read_user_str(&msg.peer_addr, sizeof(msg.peer_addr), (void *) paddr);
+    bpf_usdt_readarg(3, ctx, &pconn_type);
+    bpf_probe_read_user_str(&msg.peer_conn_type, sizeof(msg.peer_conn_type), (void *) pconn_type);
+    bpf_usdt_readarg(4, ctx, &pconn_type);
+    bpf_probe_read_user_str(&msg.msg_type, sizeof(msg.msg_type), (void *) pmsg_type);
     bpf_usdt_readarg(5, ctx, &msg->msg_size);
-    bpf_usdt_readarg_p(6, ctx, &msg->msg,  MIN(msg->msg_size, MAX_MSG_DATA_LENGTH));
+    bpf_usdt_readarg(6, ctx, &pmsg);
+    bpf_probe_read_user(&msg.msg, MIN(msg->msg_size, MAX_MSG_DATA_LENGTH), (void *) pmsg);
 
     outbound_messages.perf_submit(ctx, msg, sizeof(*msg));
     return 0;
