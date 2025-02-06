@@ -569,7 +569,7 @@ void CNode::CloseSocketDisconnect()
             GetId(),
             m_addr_name.c_str(),
             ConnectionTypeAsString().c_str(),
-            ConnectedThroughNetwork(),
+            addr.IsInternal() ? 0 : ConnectedThroughBIP155Network(),
             Ticks<std::chrono::seconds>(m_connected));
     }
     m_i2p_sam_session.reset();
@@ -608,6 +608,11 @@ void CNode::SetAddrLocal(const CService& addrLocalIn) {
 Network CNode::ConnectedThroughNetwork() const
 {
     return m_inbound_onion ? NET_ONION : addr.GetNetClass();
+}
+
+CNetAddr::BIP155Network CNode::ConnectedThroughBIP155Network() const
+{
+    return m_inbound_onion ? CNetAddr::BIP155Network::TORV3 : addr.GetBIP155Network();
 }
 
 bool CNode::IsConnectedThroughPrivacyNet() const
@@ -1723,7 +1728,7 @@ bool CConnman::AttemptToEvictConnection()
                 pnode->GetId(),
                 pnode->m_addr_name.c_str(),
                 pnode->ConnectionTypeAsString().c_str(),
-                pnode->ConnectedThroughNetwork(),
+                pnode->addr.IsInternal() ? 0 : pnode->ConnectedThroughBIP155Network(),
                 Ticks<std::chrono::seconds>(pnode->m_connected));
             pnode->fDisconnect = true;
             return true;
@@ -1854,7 +1859,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
         pnode->GetId(),
         pnode->m_addr_name.c_str(),
         pnode->ConnectionTypeAsString().c_str(),
-        pnode->ConnectedThroughNetwork(),
+        pnode->addr.IsInternal() ? 0 : pnode->ConnectedThroughBIP155Network(),
         GetNodeCount(ConnectionDirection::In));
 
     // We received a new connection, harvest entropy from the time (and our peer count)
@@ -3023,7 +3028,7 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
         pnode->GetId(),
         pnode->m_addr_name.c_str(),
         pnode->ConnectionTypeAsString().c_str(),
-        pnode->ConnectedThroughNetwork(),
+        pnode->addr.IsInternal() ? 0 : pnode->ConnectedThroughBIP155Network(),
         GetNodeCount(ConnectionDirection::Out));
 }
 

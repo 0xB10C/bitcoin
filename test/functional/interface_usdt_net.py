@@ -14,7 +14,7 @@ try:
     from bcc import BPF, USDT  # type: ignore[import]
 except ImportError:
     pass
-from test_framework.messages import CBlockHeader, MAX_HEADERS_RESULTS, msg_headers, msg_version
+from test_framework.messages import CBlockHeader, MAX_HEADERS_RESULTS, msg_headers, msg_version, CAddress
 from test_framework.p2p import P2PInterface
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import assert_equal
@@ -28,8 +28,6 @@ MAX_MISBEHAVING_MESSAGE_LENGTH = 128
 # larger messanges see contrib/tracing/log_raw_p2p_msgs.py
 MAX_MSG_DATA_LENGTH = 150
 
-# from net_address.h
-NETWORK_TYPE_UNROUTABLE = 0
 # Use in -maxconnections. Results in a maximum of 21 inbound connections
 MAX_CONNECTIONS = 32
 MAX_INBOUND_CONNECTIONS = MAX_CONNECTIONS - 10 - 1  # 10 outbound and 1 feeler
@@ -356,7 +354,7 @@ class NetTracepointTest(BitcoinTestFramework):
             assert inbound_connection.conn.id > 0
             assert inbound_connection.existing > 0
             assert_equal(b'inbound', inbound_connection.conn.conn_type)
-            assert_equal(NETWORK_TYPE_UNROUTABLE, inbound_connection.conn.network)
+            assert_equal(CAddress.NET_IPV4, inbound_connection.conn.network)
 
         bpf.cleanup()
         for node in testnodes:
@@ -397,7 +395,7 @@ class NetTracepointTest(BitcoinTestFramework):
             assert outbound_connection.conn.id > 0
             assert outbound_connection.existing > 0
             assert_equal(EXPECTED_CONNECTION_TYPE, outbound_connection.conn.conn_type.decode('utf-8'))
-            assert_equal(NETWORK_TYPE_UNROUTABLE, outbound_connection.conn.network)
+            assert_equal(CAddress.NET_IPV4, outbound_connection.conn.network)
 
         bpf.cleanup()
         for node in testnodes:
@@ -434,7 +432,7 @@ class NetTracepointTest(BitcoinTestFramework):
             assert evicted_connection.conn.id > 0
             assert evicted_connection.time_established > 0
             assert_equal("inbound", evicted_connection.conn.conn_type.decode('utf-8'))
-            assert_equal(NETWORK_TYPE_UNROUTABLE, evicted_connection.conn.network)
+            assert_equal(CAddress.NET_IPV4, evicted_connection.conn.network)
 
         bpf.cleanup()
         for node in testnodes:
@@ -507,7 +505,7 @@ class NetTracepointTest(BitcoinTestFramework):
         for closed_connection in closed_connections:
             assert closed_connection.conn.id > 0
             assert_equal("inbound", closed_connection.conn.conn_type.decode('utf-8'))
-            assert_equal(0, closed_connection.conn.network)
+            assert_equal(CAddress.NET_IPV4, closed_connection.conn.network)
             assert closed_connection.time_established > 0
 
         bpf.cleanup()

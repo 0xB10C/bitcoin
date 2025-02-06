@@ -76,6 +76,7 @@ BOOST_AUTO_TEST_CASE(cnode_simple_test)
     BOOST_CHECK(pnode1->IsInboundConn() == false);
     BOOST_CHECK(pnode1->m_inbound_onion == false);
     BOOST_CHECK_EQUAL(pnode1->ConnectedThroughNetwork(), Network::NET_IPV4);
+    BOOST_CHECK_EQUAL(pnode1->ConnectedThroughBIP155Network(), CNetAddr::BIP155Network::IPV4);
 
     std::unique_ptr<CNode> pnode2 = std::make_unique<CNode>(id++,
                                                             /*sock=*/nullptr,
@@ -94,6 +95,7 @@ BOOST_AUTO_TEST_CASE(cnode_simple_test)
     BOOST_CHECK(pnode2->IsInboundConn() == true);
     BOOST_CHECK(pnode2->m_inbound_onion == false);
     BOOST_CHECK_EQUAL(pnode2->ConnectedThroughNetwork(), Network::NET_IPV4);
+    BOOST_CHECK_EQUAL(pnode2->ConnectedThroughBIP155Network(), CNetAddr::BIP155Network::IPV4);
 
     std::unique_ptr<CNode> pnode3 = std::make_unique<CNode>(id++,
                                                             /*sock=*/nullptr,
@@ -112,6 +114,7 @@ BOOST_AUTO_TEST_CASE(cnode_simple_test)
     BOOST_CHECK(pnode3->IsInboundConn() == false);
     BOOST_CHECK(pnode3->m_inbound_onion == false);
     BOOST_CHECK_EQUAL(pnode3->ConnectedThroughNetwork(), Network::NET_IPV4);
+    BOOST_CHECK_EQUAL(pnode3->ConnectedThroughBIP155Network(), CNetAddr::BIP155Network::IPV4);
 
     std::unique_ptr<CNode> pnode4 = std::make_unique<CNode>(id++,
                                                             /*sock=*/nullptr,
@@ -130,6 +133,7 @@ BOOST_AUTO_TEST_CASE(cnode_simple_test)
     BOOST_CHECK(pnode4->IsInboundConn() == true);
     BOOST_CHECK(pnode4->m_inbound_onion == true);
     BOOST_CHECK_EQUAL(pnode4->ConnectedThroughNetwork(), Network::NET_ONION);
+    BOOST_CHECK_EQUAL(pnode4->ConnectedThroughBIP155Network(), CNetAddr::BIP155Network::TORV3);
 }
 
 BOOST_AUTO_TEST_CASE(cnetaddr_basic)

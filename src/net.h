@@ -839,6 +839,20 @@ public:
      */
     Network ConnectedThroughNetwork() const;
 
+    /**
+     * Get BIP155 network the peer connected through.
+     *
+     * Must not be called for IsInternal() objects.
+     *
+     * Returns BIP155Network::TORV3 for *inbound* onion connections, and
+     * CNetAddr::GetBIP155Network() otherwise. The latter cannot be used directly
+     * because it doesn't detect the former, and it's not the responsibility of
+     * the CNetAddr class to know the actual network a peer is connected through.
+     *
+     * @return BIP155 network the peer connected through.
+     */
+    CNetAddr::BIP155Network ConnectedThroughBIP155Network() const;
+
     /** Whether this peer connected through a privacy network. */
     [[nodiscard]] bool IsConnectedThroughPrivacyNet() const;
 
