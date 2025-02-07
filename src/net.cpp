@@ -569,7 +569,7 @@ void CNode::CloseSocketDisconnect()
             GetId(),
             m_addr_name.c_str(),
             ConnectionTypeAsString().c_str(),
-            ConnectedThroughNetwork(),
+            GetNetworkName(ConnectedThroughNetwork()).c_str(),
             Ticks<std::chrono::seconds>(m_connected));
     }
     m_i2p_sam_session.reset();
@@ -1723,7 +1723,7 @@ bool CConnman::AttemptToEvictConnection()
                 pnode->GetId(),
                 pnode->m_addr_name.c_str(),
                 pnode->ConnectionTypeAsString().c_str(),
-                pnode->ConnectedThroughNetwork(),
+                GetNetworkName(pnode->ConnectedThroughNetwork()).c_str(),
                 Ticks<std::chrono::seconds>(pnode->m_connected));
             pnode->fDisconnect = true;
             return true;
@@ -1854,7 +1854,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
         pnode->GetId(),
         pnode->m_addr_name.c_str(),
         pnode->ConnectionTypeAsString().c_str(),
-        pnode->ConnectedThroughNetwork(),
+        GetNetworkName(pnode->ConnectedThroughNetwork()).c_str(),
         GetNodeCount(ConnectionDirection::In));
 
     // We received a new connection, harvest entropy from the time (and our peer count)
@@ -3023,7 +3023,7 @@ void CConnman::OpenNetworkConnection(const CAddress& addrConnect, bool fCountFai
         pnode->GetId(),
         pnode->m_addr_name.c_str(),
         pnode->ConnectionTypeAsString().c_str(),
-        pnode->ConnectedThroughNetwork(),
+        GetNetworkName(pnode->ConnectedThroughNetwork()).c_str(),
         GetNodeCount(ConnectionDirection::Out));
 }
 

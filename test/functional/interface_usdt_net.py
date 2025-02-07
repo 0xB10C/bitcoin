@@ -23,13 +23,14 @@ from test_framework.util import assert_equal
 MAX_PEER_ADDR_LENGTH = 68
 MAX_PEER_CONN_TYPE_LENGTH = 20
 MAX_MSG_TYPE_LENGTH = 20
+# "not_publicly_routable" is 21 chars long + 1 char for zero-delimiter
+MAX_NETWORK_NAME_LENGTH = 21 + 1
 MAX_MISBEHAVING_MESSAGE_LENGTH = 128
 # We won't process messages larger than 150 byte in this test. For reading
 # larger messanges see contrib/tracing/log_raw_p2p_msgs.py
 MAX_MSG_DATA_LENGTH = 150
 
-# from net_address.h
-NETWORK_TYPE_UNROUTABLE = 0
+NETWORK_TYPE_UNROUTABLE = "not_publicly_routable"
 # Use in -maxconnections. Results in a maximum of 21 inbound connections
 MAX_CONNECTIONS = 32
 MAX_INBOUND_CONNECTIONS = MAX_CONNECTIONS - 10 - 1  # 10 outbound and 1 feeler
@@ -42,12 +43,14 @@ net_tracepoints_program = """
 #define MAX_MSG_TYPE_LENGTH {}
 #define MAX_MSG_DATA_LENGTH {}
 #define MAX_MISBEHAVING_MESSAGE_LENGTH {}
+#define MAX_NETWORK_NAME_LENGTH {}
 """.format(
     MAX_PEER_ADDR_LENGTH,
     MAX_PEER_CONN_TYPE_LENGTH,
     MAX_MSG_TYPE_LENGTH,
     MAX_MSG_DATA_LENGTH,
     MAX_MISBEHAVING_MESSAGE_LENGTH,
+    MAX_NETWORK_NAME_LENGTH,
 ) + """
 // A min() macro. Prefixed with _TRACEPOINT_TEST to avoid collision with other MIN macros.
 #define _TRACEPOINT_TEST_MIN(a,b) ({ __typeof__ (a) _a = (a); __typeof__ (b) _b = (b); _a < _b ? _a : _b; })
@@ -67,7 +70,7 @@ struct Connection
     u64     id;
     char    addr[MAX_PEER_ADDR_LENGTH];
     char    type[MAX_PEER_CONN_TYPE_LENGTH];
-    u32     network;
+    char    network[MAX_NETWORK_NAME_LENGTH];
 };
 
 struct NewConnection
@@ -117,14 +120,15 @@ int trace_outbound_message(struct pt_regs *ctx) {
 BPF_PERF_OUTPUT(inbound_connections);
 int trace_inbound_connection(struct pt_regs *ctx) {
     struct NewConnection inbound = {};
-    void *conn_type_pointer = NULL, *address_pointer = NULL;
+    void *conn_type_pointer = NULL, *address_pointer = NULL, *network_pointer = NULL;
     bpf_usdt_readarg(1, ctx, &inbound.conn.id);
     bpf_usdt_readarg(2, ctx, &address_pointer);
     bpf_usdt_readarg(3, ctx, &conn_type_pointer);
-    bpf_usdt_readarg(4, ctx, &inbound.conn.network);
+    bpf_usdt_readarg(4, ctx, &network_pointer);
     bpf_usdt_readarg(5, ctx, &inbound.existing);
     bpf_probe_read_user_str(&inbound.conn.addr, sizeof(inbound.conn.addr), address_pointer);
     bpf_probe_read_user_str(&inbound.conn.type, sizeof(inbound.conn.type), conn_type_pointer);
+    bpf_probe_read_user_str(&inbound.conn.network, sizeof(inbound.conn.network), network_pointer);
     inbound_connections.perf_submit(ctx, &inbound, sizeof(inbound));
     return 0;
 };
@@ -132,14 +136,15 @@ int trace_inbound_connection(struct pt_regs *ctx) {
 BPF_PERF_OUTPUT(outbound_connections);
 int trace_outbound_connection(struct pt_regs *ctx) {
     struct NewConnection outbound = {};
-    void *conn_type_pointer = NULL, *address_pointer = NULL;
+    void *conn_type_pointer = NULL, *address_pointer = NULL, *network_pointer = NULL;
     bpf_usdt_readarg(1, ctx, &outbound.conn.id);
     bpf_usdt_readarg(2, ctx, &address_pointer);
     bpf_usdt_readarg(3, ctx, &conn_type_pointer);
-    bpf_usdt_readarg(4, ctx, &outbound.conn.network);
+        bpf_usdt_readarg(4, ctx, &network_pointer);
     bpf_usdt_readarg(5, ctx, &outbound.existing);
     bpf_probe_read_user_str(&outbound.conn.addr, sizeof(outbound.conn.addr), address_pointer);
     bpf_probe_read_user_str(&outbound.conn.type, sizeof(outbound.conn.type), conn_type_pointer);
+    bpf_probe_read_user_str(&outbound.conn.network, sizeof(outbound.conn.network), network_pointer);
     outbound_connections.perf_submit(ctx, &outbound, sizeof(outbound));
     return 0;
 };
@@ -147,14 +152,15 @@ int trace_outbound_connection(struct pt_regs *ctx) {
 BPF_PERF_OUTPUT(evicted_inbound_connections);
 int trace_evicted_inbound_connection(struct pt_regs *ctx) {
     struct ClosedConnection evicted = {};
-    void *conn_type_pointer = NULL, *address_pointer = NULL;
+    void *conn_type_pointer = NULL, *address_pointer = NULL, *network_pointer = NULL;
     bpf_usdt_readarg(1, ctx, &evicted.conn.id);
     bpf_usdt_readarg(2, ctx, &address_pointer);
     bpf_usdt_readarg(3, ctx, &conn_type_pointer);
-    bpf_usdt_readarg(4, ctx, &evicted.conn.network);
+    bpf_usdt_readarg(4, ctx, &network_pointer);
     bpf_usdt_readarg(5, ctx, &evicted.time_established);
     bpf_probe_read_user_str(&evicted.conn.addr, sizeof(evicted.conn.addr), address_pointer);
     bpf_probe_read_user_str(&evicted.conn.type, sizeof(evicted.conn.type), conn_type_pointer);
+    bpf_probe_read_user_str(&evicted.conn.network, sizeof(evicted.conn.network), network_pointer);
     evicted_inbound_connections.perf_submit(ctx, &evicted, sizeof(evicted));
     return 0;
 };
@@ -173,14 +179,15 @@ int trace_misbehaving_connection(struct pt_regs *ctx) {
 BPF_PERF_OUTPUT(closed_connections);
 int trace_closed_connection(struct pt_regs *ctx) {
     struct ClosedConnection closed = {};
-    void *conn_type_pointer = NULL, *address_pointer = NULL;
+    void *conn_type_pointer = NULL, *address_pointer = NULL, *network_pointer = NULL;
     bpf_usdt_readarg(1, ctx, &closed.conn.id);
     bpf_usdt_readarg(2, ctx, &address_pointer);
     bpf_usdt_readarg(3, ctx, &conn_type_pointer);
-    bpf_usdt_readarg(4, ctx, &closed.conn.network);
+    bpf_usdt_readarg(4, ctx, &network_pointer);
     bpf_usdt_readarg(5, ctx, &closed.time_established);
     bpf_probe_read_user_str(&closed.conn.addr, sizeof(closed.conn.addr), address_pointer);
     bpf_probe_read_user_str(&closed.conn.type, sizeof(closed.conn.type), conn_type_pointer);
+    bpf_probe_read_user_str(&closed.conn.network, sizeof(closed.conn.network), network_pointer);
     closed_connections.perf_submit(ctx, &closed, sizeof(closed));
     return 0;
 };
@@ -192,7 +199,7 @@ class Connection(ctypes.Structure):
         ("id", ctypes.c_uint64),
         ("addr", ctypes.c_char * MAX_PEER_ADDR_LENGTH),
         ("conn_type", ctypes.c_char * MAX_PEER_CONN_TYPE_LENGTH),
-        ("network", ctypes.c_uint32),
+        ("network", ctypes.c_char * MAX_NETWORK_NAME_LENGTH),
     ]
 
     def __repr__(self):
@@ -356,7 +363,7 @@ class NetTracepointTest(BitcoinTestFramework):
             assert inbound_connection.conn.id > 0
             assert inbound_connection.existing > 0
             assert_equal(b'inbound', inbound_connection.conn.conn_type)
-            assert_equal(NETWORK_TYPE_UNROUTABLE, inbound_connection.conn.network)
+            assert_equal(NETWORK_TYPE_UNROUTABLE, inbound_connection.conn.network.decode('utf-8'))
 
         bpf.cleanup()
         for node in testnodes:
@@ -397,7 +404,7 @@ class NetTracepointTest(BitcoinTestFramework):
             assert outbound_connection.conn.id > 0
             assert outbound_connection.existing > 0
             assert_equal(EXPECTED_CONNECTION_TYPE, outbound_connection.conn.conn_type.decode('utf-8'))
-            assert_equal(NETWORK_TYPE_UNROUTABLE, outbound_connection.conn.network)
+            assert_equal(NETWORK_TYPE_UNROUTABLE, outbound_connection.conn.network.decode('utf-8'))
 
         bpf.cleanup()
         for node in testnodes:
@@ -434,7 +441,7 @@ class NetTracepointTest(BitcoinTestFramework):
             assert evicted_connection.conn.id > 0
             assert evicted_connection.time_established > 0
             assert_equal("inbound", evicted_connection.conn.conn_type.decode('utf-8'))
-            assert_equal(NETWORK_TYPE_UNROUTABLE, evicted_connection.conn.network)
+            assert_equal(NETWORK_TYPE_UNROUTABLE, evicted_connection.conn.network.decode('utf-8'))
 
         bpf.cleanup()
         for node in testnodes:
@@ -507,7 +514,7 @@ class NetTracepointTest(BitcoinTestFramework):
         for closed_connection in closed_connections:
             assert closed_connection.conn.id > 0
             assert_equal("inbound", closed_connection.conn.conn_type.decode('utf-8'))
-            assert_equal(0, closed_connection.conn.network)
+            assert_equal(NETWORK_TYPE_UNROUTABLE, closed_connection.conn.network.decode('utf-8'))
             assert closed_connection.time_established > 0
 
         bpf.cleanup()
