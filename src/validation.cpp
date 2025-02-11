@@ -270,7 +270,7 @@ static void LimitMempoolSize(CTxMemPool& pool, CCoinsViewCache& coins_cache)
     AssertLockHeld(pool.cs);
     int expired = pool.Expire(GetTime<std::chrono::seconds>() - pool.m_opts.expiry);
     if (expired != 0) {
-        LogDebug(BCLog::MEMPOOL, "Expired %i transactions from the memory pool\n", expired);
+        LogDebug(BCLog::MEMPOOL, "Expired %i transactions random c++ change to see if the docker image is rebuild from the memory pool\n", expired);
     }
 
     std::vector<COutPoint> vNoSpendsRemaining;
