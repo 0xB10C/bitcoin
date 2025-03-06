@@ -57,6 +57,7 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
 
     header = cmpctblock.header;
     txn_available.resize(cmpctblock.BlockTxCount());
+    prefill_candidates.resize(cmpctblock.BlockTxCount());
 
     int32_t lastprefilledindex = -1;
     for (size_t i = 0; i < cmpctblock.prefilledtxn.size(); i++) {
@@ -73,6 +74,14 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
             return READ_STATUS_INVALID;
         }
         txn_available[lastprefilledindex] = cmpctblock.prefilledtxn[i].tx;
+
+        // TODO: check if a prefilled is in our mempool, if it is:
+        // count size and numbers for logging
+        // TODO lock cs_main?
+        // LOCK(pool->cs);
+        if (!pool->exists(GenTxid::Wtxid(cmpctblock.prefilledtxn[i].tx->GetWitnessHash()))) {
+            prefill_candidates[i] = true;
+        }
     }
     prefilled_count = cmpctblock.prefilledtxn.size();
 
@@ -142,6 +151,7 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
         if (idit != shorttxids.end()) {
             if (!have_txn[idit->second]) {
                 txn_available[idit->second] = extra_txn[i];
+                prefill_candidates[idit->second] = true;
                 have_txn[idit->second]  = true;
                 mempool_count++;
                 extra_count++;
@@ -180,6 +190,11 @@ bool PartiallyDownloadedBlock::IsTxAvailable(size_t index) const
     return txn_available[index] != nullptr;
 }
 
+std::vector<bool> PartiallyDownloadedBlock::PrefillCandidates() const
+{
+    return prefill_candidates;
+}
+
 ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing)
 {
     if (header.IsNull()) return READ_STATUS_INVALID;
@@ -191,8 +206,10 @@ ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<
     size_t tx_missing_offset = 0;
     for (size_t i = 0; i < txn_available.size(); i++) {
         if (!txn_available[i]) {
-            if (vtx_missing.size() <= tx_missing_offset)
+            if (vtx_missing.size() <= tx_missing_offset) {
                 return READ_STATUS_INVALID;
+            }
+            prefill_candidates[i] = true;
             block.vtx[i] = vtx_missing[tx_missing_offset++];
         } else
             block.vtx[i] = std::move(txn_available[i]);

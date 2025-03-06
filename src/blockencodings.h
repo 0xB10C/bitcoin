@@ -8,6 +8,7 @@
 #include <primitives/block.h>
 
 #include <functional>
+#include <unordered_set>
 
 class CTxMemPool;
 class BlockValidationState;
@@ -137,6 +138,14 @@ protected:
     std::vector<CTransactionRef> txn_available;
     size_t prefilled_count = 0, mempool_count = 0, extra_count = 0;
     const CTxMemPool* pool;
+    // Keep track of the block position of transactions that we didn't have in
+    // our mempool while reconstructing this block. If this PartiallyDownloadedBlock
+    // advances our chain, we can use these positions to predictively prefill these
+    // transactions in our compact block annoucements. This includes transactions that:
+    // - were prefilled by the cmpctblock announcer and we didn't know about
+    // - transactions we found in our extrapool (but not mempool)
+    // - transactions we had to request from the announcer
+    std::vector<bool> prefill_candidates;
 public:
     CBlockHeader header;
 
@@ -150,6 +159,7 @@ public:
     ReadStatus InitData(const CBlockHeaderAndShortTxIDs& cmpctblock, const std::vector<CTransactionRef>& extra_txn);
     bool IsTxAvailable(size_t index) const;
     ReadStatus FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing);
+    std::vector<bool> PrefillCandidates() const;
 };
 
 #endif // BITCOIN_BLOCKENCODINGS_H

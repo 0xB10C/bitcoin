@@ -791,6 +791,13 @@ private:
     /** Hash of the last block we received via INV */
     uint256 m_last_block_inv_triggering_headers_sync GUARDED_BY(g_msgproc_mutex){};
 
+    /** A best-effort pair of block hash and prefill candidates for compact block
+     * annoucements where true indicates that the transaction is likely a good
+     * candidate to prefill for compact block annoucements related to the block
+     * hash. TODO: lock?
+     */
+    std::optional<std::pair<uint256, std::vector<bool>>> compact_block_prefill_candidates {};
+
     /**
      * Sources of received blocks, saved to be able punish them when processing
      * happens afterwards.
@@ -3289,6 +3296,7 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
 {
     std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
     bool fBlockRead{false};
+    std::vector<bool> prefill_candidates;
     {
         LOCK(cs_main);
 
@@ -3358,6 +3366,7 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
             // out to be invalid.
             mapBlockSource.emplace(block_transactions.blockhash, std::make_pair(pfrom.GetId(), false));
         }
+        prefill_candidates = partialBlock.PrefillCandidates();
     } // Don't hold cs_main when we call into ProcessNewBlock
     if (fBlockRead) {
         // Since we requested this block (it was in mapBlocksInFlight), force it to be processed,
@@ -3368,6 +3377,13 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
         // in compact block optimistic reconstruction handling.
         ProcessBlock(pfrom, pblock, /*force_processing=*/true, /*min_pow_checked=*/true);
     }
+    // TODO: If any received transactions helped us to reconstruct the block, store their txids/index's
+    // to be able to prefill them in compact block annoucements we sent.
+    // Also need to make sure this block is actually at the tip.
+    if (block_transactions.blockhash == m_chainman.ActiveChain().Tip()->GetBlockHash()) {
+        compact_block_prefill_candidates = std::make_pair(block_transactions.blockhash, prefill_candidates);
+    }
+
     return;
 }
 
