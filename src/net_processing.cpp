@@ -796,7 +796,7 @@ private:
      * candidate to prefill for compact block annoucements related to the block
      * hash. TODO: lock?
      */
-    std::optional<std::pair<uint256, std::vector<bool>>> compact_block_prefill_candidates {};
+    std::optional<std::pair<uint256, std::unordered_set<uint32_t>>> compact_block_prefill_candidates{std::nullopt};
 
     /**
      * Sources of received blocks, saved to be able punish them when processing
@@ -1988,7 +1988,7 @@ void PeerManagerImpl::BlockDisconnected(const std::shared_ptr<const CBlock> &blo
  */
 void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock>& pblock)
 {
-    auto pcmpctblock = std::make_shared<const CBlockHeaderAndShortTxIDs>(*pblock, FastRandomContext().rand64());
+    auto pcmpctblock = std::make_shared<const CBlockHeaderAndShortTxIDs>(*pblock, FastRandomContext().rand64(), compact_block_prefill_candidates);
 
     LOCK(cs_main);
 
@@ -2343,7 +2343,7 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
                 if (a_recent_compact_block && a_recent_compact_block->header.GetHash() == pindex->GetBlockHash()) {
                     MakeAndPushMessage(pfrom, NetMsgType::CMPCTBLOCK, *a_recent_compact_block);
                 } else {
-                    CBlockHeaderAndShortTxIDs cmpctblock{*pblock, m_rng.rand64()};
+                    CBlockHeaderAndShortTxIDs cmpctblock{*pblock, m_rng.rand64(), compact_block_prefill_candidates};
                     MakeAndPushMessage(pfrom, NetMsgType::CMPCTBLOCK, cmpctblock);
                 }
             } else {
@@ -3296,7 +3296,6 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
 {
     std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
     bool fBlockRead{false};
-    std::vector<bool> prefill_candidates;
     {
         LOCK(cs_main);
 
@@ -3356,6 +3355,12 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
             // though the block was successfully read, and rely on the
             // handling in ProcessNewBlock to ensure the block index is
             // updated, etc.
+            if (status == READ_STATUS_OK) {
+                // However, only update the prefill candidates cache if CheckBlock succeeded
+                // TODO: If any received transactions helped us to reconstruct the block, store their txids/index's
+                // to be able to prefill them in compact block annoucements we sent.
+                compact_block_prefill_candidates = std::make_pair(block_transactions.blockhash, partialBlock.PrefillCandidates());
+            }
             RemoveBlockRequest(block_transactions.blockhash, pfrom.GetId()); // it is now an empty pointer
             fBlockRead = true;
             // mapBlockSource is used for potentially punishing peers and
@@ -3366,7 +3371,6 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
             // out to be invalid.
             mapBlockSource.emplace(block_transactions.blockhash, std::make_pair(pfrom.GetId(), false));
         }
-        prefill_candidates = partialBlock.PrefillCandidates();
     } // Don't hold cs_main when we call into ProcessNewBlock
     if (fBlockRead) {
         // Since we requested this block (it was in mapBlocksInFlight), force it to be processed,
@@ -3377,13 +3381,6 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
         // in compact block optimistic reconstruction handling.
         ProcessBlock(pfrom, pblock, /*force_processing=*/true, /*min_pow_checked=*/true);
     }
-    // TODO: If any received transactions helped us to reconstruct the block, store their txids/index's
-    // to be able to prefill them in compact block annoucements we sent.
-    // Also need to make sure this block is actually at the tip.
-    if (block_transactions.blockhash == m_chainman.ActiveChain().Tip()->GetBlockHash()) {
-        compact_block_prefill_candidates = std::make_pair(block_transactions.blockhash, prefill_candidates);
-    }
-
     return;
 }
 
@@ -5622,7 +5619,7 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         CBlock block;
                         const bool ret{m_chainman.m_blockman.ReadBlock(block, *pBestIndex)};
                         assert(ret);
-                        CBlockHeaderAndShortTxIDs cmpctblock{block, m_rng.rand64()};
+                        CBlockHeaderAndShortTxIDs cmpctblock{block, m_rng.rand64(), compact_block_prefill_candidates};
                         MakeAndPushMessage(*pto, NetMsgType::CMPCTBLOCK, cmpctblock);
                     }
                     state.pindexBestHeaderSent = pBestIndex;

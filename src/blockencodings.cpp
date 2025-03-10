@@ -17,16 +17,27 @@
 
 #include <unordered_map>
 
-CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs(const CBlock& block, const uint64_t nonce) :
-        nonce(nonce),
-        shorttxids(block.vtx.size() - 1), prefilledtxn(1), header(block) {
-    FillShortTxIDSelector();
-    //TODO: Use our mempool prior to block acceptance to predictively fill more than just the coinbase
-    prefilledtxn[0] = {0, block.vtx[0]};
-    for (size_t i = 1; i < block.vtx.size(); i++) {
-        const CTransaction& tx = *block.vtx[i];
-        shorttxids[i - 1] = GetShortID(tx.GetWitnessHash());
+CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs(const CBlock& block, const uint64_t nonce, const std::optional<std::pair<uint256, std::unordered_set<uint32_t>>>& prefill_candidates_cache) :
+        nonce(nonce), header(block) {
+    std::unordered_set<uint32_t> prefill_candidates = { /* coinbase =*/ 0u };
+    if (prefill_candidates_cache.has_value() && prefill_candidates_cache.value().first == block.GetHash()) {
+        prefill_candidates = prefill_candidates_cache.value().second;
+        LogDebug(BCLog::CMPCTBLOCK, "Using prefill candidates cache to prefill txns %d for block %s\n", prefill_candidates.size(), block.GetHash().ToString());
     }
+
+    prefilledtxn.reserve(prefill_candidates.size());
+    shorttxids.reserve(block.vtx.size() - prefill_candidates.size());
+    FillShortTxIDSelector();
+
+    for (uint16_t i = 0; i < block.vtx.size(); i++) {
+        if(prefill_candidates.contains(i)) {
+            prefilledtxn.push_back({i, block.vtx[i]});
+        } else {
+            const CTransaction& tx = *block.vtx[i];
+            shorttxids.push_back(GetShortID(tx.GetWitnessHash()));
+        }
+    }
+    LogDebug(BCLog::CMPCTBLOCK, "CBlockHeaderAndShortTxIDs prefilled_candidates.size()=%d prefilledtxn.size()=%d, shorttxids.size()=%d\n", prefill_candidates.size(), prefilledtxn.size(), shorttxids.size());
 }
 
 void CBlockHeaderAndShortTxIDs::FillShortTxIDSelector() const {
@@ -57,7 +68,6 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
 
     header = cmpctblock.header;
     txn_available.resize(cmpctblock.BlockTxCount());
-    prefill_candidates.resize(cmpctblock.BlockTxCount());
 
     int32_t lastprefilledindex = -1;
     for (size_t i = 0; i < cmpctblock.prefilledtxn.size(); i++) {
@@ -80,7 +90,7 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
         // TODO lock cs_main?
         // LOCK(pool->cs);
         if (!pool->exists(GenTxid::Wtxid(cmpctblock.prefilledtxn[i].tx->GetWitnessHash()))) {
-            prefill_candidates[i] = true;
+            prefill_candidates.insert(i);
         }
     }
     prefilled_count = cmpctblock.prefilledtxn.size();
@@ -151,7 +161,7 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
         if (idit != shorttxids.end()) {
             if (!have_txn[idit->second]) {
                 txn_available[idit->second] = extra_txn[i];
-                prefill_candidates[idit->second] = true;
+                prefill_candidates.insert(idit->second);
                 have_txn[idit->second]  = true;
                 mempool_count++;
                 extra_count++;
@@ -176,7 +186,6 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
         if (mempool_count == shorttxids.size())
             break;
     }
-
     LogDebug(BCLog::CMPCTBLOCK, "Initialized PartiallyDownloadedBlock for block %s using a cmpctblock of size %lu\n", cmpctblock.header.GetHash().ToString(), GetSerializeSize(cmpctblock));
 
     return READ_STATUS_OK;
@@ -190,7 +199,7 @@ bool PartiallyDownloadedBlock::IsTxAvailable(size_t index) const
     return txn_available[index] != nullptr;
 }
 
-std::vector<bool> PartiallyDownloadedBlock::PrefillCandidates() const
+std::unordered_set<uint32_t> PartiallyDownloadedBlock::PrefillCandidates() const
 {
     return prefill_candidates;
 }
@@ -209,11 +218,12 @@ ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<
             if (vtx_missing.size() <= tx_missing_offset) {
                 return READ_STATUS_INVALID;
             }
-            prefill_candidates[i] = true;
+            prefill_candidates.insert(i);
             block.vtx[i] = vtx_missing[tx_missing_offset++];
         } else
             block.vtx[i] = std::move(txn_available[i]);
     }
+    LogDebug(BCLog::CMPCTBLOCK, "[compact block processing] %d new prefill_candidates (total %d) from requested transacitons\n", vtx_missing.size(), prefill_candidates.size());
 
     // Make sure we can't call FillBlock again.
     header.SetNull();
