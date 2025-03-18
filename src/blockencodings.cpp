@@ -29,12 +29,15 @@ CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs(const CBlock& block, const 
     shorttxids.reserve(block.vtx.size() - prefill_candidates.size());
     FillShortTxIDSelector();
 
+    uint16_t prefill_index = 0;
     for (uint16_t i = 0; i < block.vtx.size(); i++) {
         if(prefill_candidates.contains(i)) {
-            prefilledtxn.push_back({i, block.vtx[i]});
+            prefilledtxn.push_back({prefill_index, block.vtx[i]});
+            prefill_index = 0;
         } else {
             const CTransaction& tx = *block.vtx[i];
             shorttxids.push_back(GetShortID(tx.GetWitnessHash()));
+            prefill_index++;
         }
     }
     LogDebug(BCLog::CMPCTBLOCK, "CBlockHeaderAndShortTxIDs prefilled_candidates.size()=%d prefilledtxn.size()=%d, shorttxids.size()=%d\n", prefill_candidates.size(), prefilledtxn.size(), shorttxids.size());
