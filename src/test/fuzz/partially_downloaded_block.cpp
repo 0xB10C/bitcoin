@@ -14,6 +14,8 @@
 #include <util/time.h>
 #include <util/translation.h>
 
+// TODO:  remove
+//#include <stdio>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -55,12 +57,26 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         return;
     }
 
-    CBlockHeaderAndShortTxIDs cmpctblock{*block, fuzzed_data_provider.ConsumeIntegral<uint64_t>(), std::nullopt};
+
+    bool use_prefill_cache{fuzzed_data_provider.ConsumeBool()};
+    std::optional<std::pair<uint256, std::unordered_set<uint32_t>>> prefill_cache = std::nullopt;
+    std::unordered_set<uint32_t> prefill = {};
+    if (use_prefill_cache) {
+        size_t prefilled_txns{fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, block->vtx.size())};
+        for (size_t i = 1; i < prefilled_txns; i++) {
+            uint16_t index = fuzzed_data_provider.ConsumeIntegralInRange<uint16_t>(0, block->vtx.size());
+            prefill.insert(index);
+        }
+        prefill_cache = std::make_pair(block->GetHash(), prefill);
+    }
+
+    CBlockHeaderAndShortTxIDs cmpctblock{*block, fuzzed_data_provider.ConsumeIntegral<uint64_t>(), prefill_cache};
 
     bilingual_str error;
     CTxMemPool pool{MemPoolOptionsForTest(g_setup->m_node), error};
     Assert(error.empty());
     PartiallyDownloadedBlock pdb{&pool};
+
 
     // Set of available transactions (mempool or extra_txn)
     std::set<uint16_t> available;
@@ -69,6 +85,10 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
 
     std::vector<CTransactionRef> extra_txn;
     for (size_t i = 1; i < block->vtx.size(); ++i) {
+        if(prefill.contains(i)) {
+            available.insert(i);
+        }
+
         auto tx{block->vtx[i]};
 
         bool add_to_extra_txn{fuzzed_data_provider.ConsumeBool()};
