@@ -116,7 +116,7 @@ public:
      * @param[in]  nonce  This should be randomly generated, and is used for the siphash secret key
      * TODO: param prefill_candidate_cache
      */
-    CBlockHeaderAndShortTxIDs(const CBlock& block, const uint64_t nonce, const std::optional<std::pair<uint256, std::unordered_set<uint32_t>>>& prefill_candidates_cache);
+    CBlockHeaderAndShortTxIDs(const CBlock& block, const uint64_t nonce, const std::pair<uint256, std::set<uint32_t>>& prefill_candidates_cache);
 
     uint64_t GetShortID(const Wtxid& wtxid) const;
 
@@ -146,7 +146,7 @@ protected:
     // - were prefilled by the cmpctblock announcer and we didn't know about
     // - transactions we found in our extrapool (but not mempool)
     // - transactions we had to request from the announcer
-    std::unordered_set<uint32_t> prefill_candidates { /*coinbase=*/0 };
+    std::set<uint32_t> prefill_candidates { /*coinbase=*/0 };
 public:
     CBlockHeader header;
 
@@ -162,7 +162,7 @@ public:
     ReadStatus InitData(const CBlockHeaderAndShortTxIDs& cmpctblock, const std::vector<CTransactionRef>& extra_txn);
     bool IsTxAvailable(size_t index) const;
     ReadStatus FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing);
-    std::unordered_set<uint32_t> PrefillCandidates() const;
+    std::set<uint32_t> PrefillCandidates() const;
 };
 
 #endif // BITCOIN_BLOCKENCODINGS_H

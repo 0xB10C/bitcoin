@@ -17,13 +17,15 @@
 
 #include <unordered_map>
 
-CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs(const CBlock& block, const uint64_t nonce, const std::optional<std::pair<uint256, std::unordered_set<uint32_t>>>& prefill_candidates_cache) :
+CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs(const CBlock& block, const uint64_t nonce, const std::pair<uint256, std::set<uint32_t>>& prefill_candidates_cache) :
         nonce(nonce), header(block) {
-    std::unordered_set<uint32_t> prefill_candidates = { /* coinbase =*/ 0u };
-    if (prefill_candidates_cache.has_value() && prefill_candidates_cache.value().first == block.GetHash()) {
-        prefill_candidates = prefill_candidates_cache.value().second;
+    std::set<uint32_t> prefill_candidates = { /* coinbase =*/ 0u };
+    if (prefill_candidates_cache.first == block.GetHash()) {
+        prefill_candidates = prefill_candidates_cache.second;
         LogDebug(BCLog::CMPCTBLOCK, "Using prefill candidates cache to prefill txns %d for block %s\n", prefill_candidates.size(), block.GetHash().ToString());
     }
+    // Always prefill the coinbase transaction
+    prefill_candidates.insert(0);
 
     prefilledtxn.reserve(prefill_candidates.size());
     shorttxids.reserve(block.vtx.size() - prefill_candidates.size());
@@ -201,7 +203,7 @@ bool PartiallyDownloadedBlock::IsTxAvailable(size_t index) const
     return txn_available[index] != nullptr;
 }
 
-std::unordered_set<uint32_t> PartiallyDownloadedBlock::PrefillCandidates() const
+std::set<uint32_t> PartiallyDownloadedBlock::PrefillCandidates() const
 {
     return prefill_candidates;
 }

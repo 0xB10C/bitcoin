@@ -796,7 +796,7 @@ private:
      * candidate to prefill for compact block annoucements related to the block
      * hash. TODO: lock?
      */
-    std::optional<std::pair<uint256, std::unordered_set<uint32_t>>> compact_block_prefill_candidates{std::nullopt};
+    std::pair<uint256, std::set<uint32_t>> compact_block_prefill_candidates{uint256::ZERO, {}};
 
     /**
      * Sources of received blocks, saved to be able punish them when processing

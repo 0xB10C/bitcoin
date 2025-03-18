@@ -72,7 +72,8 @@ BOOST_AUTO_TEST_CASE(SimpleRoundTripTest)
 
     // Do a simple ShortTxIDs RT
     {
-        CBlockHeaderAndShortTxIDs shortIDs{block, rand_ctx.rand64(), std::nullopt};
+        const std::pair<uint256, std::set<uint32_t>> cache{uint256::ZERO, {}};
+        const CBlockHeaderAndShortTxIDs shortIDs{block, rand_ctx.rand64(), cache};
 
         DataStream stream{};
         stream << shortIDs;
@@ -130,7 +131,7 @@ public:
         stream >> *this;
     }
     explicit TestHeaderAndShortIDs(const CBlock& block, FastRandomContext& ctx) :
-        TestHeaderAndShortIDs(CBlockHeaderAndShortTxIDs{block, ctx.rand64(), std::nullopt}) {}
+        TestHeaderAndShortIDs(CBlockHeaderAndShortTxIDs{block, ctx.rand64(), {uint256::ZERO, {}}}) {}
 
     uint64_t GetShortID(const Wtxid& txhash) const {
         DataStream stream{};
@@ -281,11 +282,11 @@ BOOST_AUTO_TEST_CASE(CachePrefillRTTest)
 
     // Test with prefilling coinbase + tx 2 with tx 1 in mempool
     {
-        std::unordered_set<uint32_t> prefilled = {};
+        std::set<uint32_t> prefilled = {};
         prefilled.insert(0);
         prefilled.insert(2);
-        std::optional<std::pair<uint256, std::unordered_set<uint32_t>>> cache = std::make_pair(block.GetHash(), prefilled);
-        CBlockHeaderAndShortTxIDs shortIDs{block, rand_ctx.rand64(), cache};
+        const std::pair<uint256, std::set<uint32_t>> cache{block.GetHash(), prefilled};
+        const CBlockHeaderAndShortTxIDs shortIDs{block, rand_ctx.rand64(), cache};
 
         DataStream stream{};
         stream << shortIDs;
@@ -337,7 +338,8 @@ BOOST_AUTO_TEST_CASE(EmptyBlockRoundTripTest)
 
     // Test simple header round-trip with only coinbase
     {
-        CBlockHeaderAndShortTxIDs shortIDs{block, rand_ctx.rand64(), std::nullopt};
+        const std::pair<uint256, std::set<uint32_t>> cache{block.GetHash(), {}};
+        const CBlockHeaderAndShortTxIDs shortIDs{block, rand_ctx.rand64(), cache};
 
         DataStream stream{};
         stream << shortIDs;
@@ -383,7 +385,8 @@ BOOST_AUTO_TEST_CASE(ReceiveWithExtraTransactions) {
     BOOST_CHECK_EQUAL(pool.get(block.vtx[1]->GetHash()), nullptr);
 
     {
-        const CBlockHeaderAndShortTxIDs cmpctblock{block, rand_ctx.rand64(), std::nullopt};
+        const std::pair<uint256, std::set<uint32_t>> cache{uint256::ZERO, {}};
+        const CBlockHeaderAndShortTxIDs cmpctblock{block, rand_ctx.rand64(), cache};
         PartiallyDownloadedBlock partial_block(&pool);
         PartiallyDownloadedBlock partial_block_with_extra(&pool);
 
