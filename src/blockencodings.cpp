@@ -40,7 +40,6 @@ CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs(const CBlock& block, const 
             prefill_index++;
         }
     }
-    LogDebug(BCLog::CMPCTBLOCK, "CBlockHeaderAndShortTxIDs prefilled_candidates.size()=%d prefilledtxn.size()=%d, shorttxids.size()=%d\n", prefill_candidates.size(), prefilledtxn.size(), shorttxids.size());
 }
 
 void CBlockHeaderAndShortTxIDs::FillShortTxIDSelector() const {
@@ -93,7 +92,7 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
         // TODO lock cs_main?
         // LOCK(pool->cs);
         if (!pool->exists(GenTxid::Wtxid(cmpctblock.prefilledtxn[i].tx->GetWitnessHash()))) {
-            prefill_candidates.insert(i);
+            prefill_candidates.insert(lastprefilledindex);
         }
     }
     prefilled_count = cmpctblock.prefilledtxn.size();
