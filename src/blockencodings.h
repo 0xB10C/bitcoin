@@ -113,8 +113,9 @@ public:
 
     /**
      * @param[in]  nonce  This should be randomly generated, and is used for the siphash secret key
+     * @param[in]  prefill_candidates  A set of transaction candidate indexes that should be prefilled for compact block annoucements
      */
-    CBlockHeaderAndShortTxIDs(const CBlock& block, const uint64_t nonce);
+    CBlockHeaderAndShortTxIDs(const CBlock& block, const uint64_t nonce, const std::set<uint32_t>& prefill_candidates);
 
     uint64_t GetShortID(const Wtxid& wtxid) const;
 
@@ -137,6 +138,14 @@ protected:
     std::vector<CTransactionRef> txn_available;
     size_t prefilled_count = 0, mempool_count = 0, extra_count = 0;
     const CTxMemPool* pool;
+    // Keep track of the block position of transactions that we didn't have in
+    // our mempool while reconstructing this compact block. We can use these to
+    // predictively prefill transactions in our compact block annoucements.
+    // This includes transactions that:
+    // - were prefilled by the cmpctblock announcer and were not in our mempool
+    // - transactions we found in our extra_pool (but not mempool)
+    // - transactions we had to request from the announcer
+    std::set<uint32_t> prefill_candidates{ /*coinbase=*/0 };
 public:
     CBlockHeader header;
 
@@ -150,6 +159,7 @@ public:
     ReadStatus InitData(const CBlockHeaderAndShortTxIDs& cmpctblock, const std::vector<CTransactionRef>& extra_txn);
     bool IsTxAvailable(size_t index) const;
     ReadStatus FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing);
+    std::set<uint32_t> PrefillCandidates() const;
 };
 
 #endif // BITCOIN_BLOCKENCODINGS_H
