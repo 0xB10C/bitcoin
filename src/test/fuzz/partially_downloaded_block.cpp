@@ -57,20 +57,17 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         return;
     }
 
-
-    bool use_prefill_cache{fuzzed_data_provider.ConsumeBool()};
-    std::pair<uint256, std::set<uint32_t>> prefill_cache{uint256::ZERO, {}};
-    std::set<uint32_t> prefill = {};
-    if (use_prefill_cache) {
+    bool prefill{fuzzed_data_provider.ConsumeBool()};
+    std::set<uint32_t> prefill_candidates = { /* coinbase */ 0u };
+    if (prefill) {
         size_t prefilled_txns{fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, block->vtx.size())};
         for (size_t i = 1; i < prefilled_txns; i++) {
             uint16_t index = fuzzed_data_provider.ConsumeIntegralInRange<uint16_t>(0, block->vtx.size());
-            prefill.insert(index);
+            prefill_candidates.insert(index);
         }
-        prefill_cache = {block->GetHash(), prefill};
     }
 
-    CBlockHeaderAndShortTxIDs cmpctblock{*block, fuzzed_data_provider.ConsumeIntegral<uint64_t>(), prefill_cache};
+    CBlockHeaderAndShortTxIDs cmpctblock{*block, fuzzed_data_provider.ConsumeIntegral<uint64_t>(), prefill_candidates};
 
     bilingual_str error;
     CTxMemPool pool{MemPoolOptionsForTest(g_setup->m_node), error};
@@ -85,7 +82,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
 
     std::vector<CTransactionRef> extra_txn;
     for (size_t i = 1; i < block->vtx.size(); ++i) {
-        if(prefill.contains(i)) {
+        if(prefill_candidates.contains(i)) {
             available.insert(i);
         }
 

@@ -17,15 +17,10 @@
 
 #include <unordered_map>
 
-CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs(const CBlock& block, const uint64_t nonce, const std::pair<uint256, std::set<uint32_t>>& prefill_candidates_cache) :
+CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs(const CBlock& block, const uint64_t nonce, const std::set<uint32_t>& prefill_candidates) :
         nonce(nonce), header(block) {
-    std::set<uint32_t> prefill_candidates = { /* coinbase =*/ 0u };
-    if (prefill_candidates_cache.first == block.GetHash()) {
-        prefill_candidates = prefill_candidates_cache.second;
-        LogDebug(BCLog::CMPCTBLOCK, "Using prefill candidates cache to prefill txns %d for block %s\n", prefill_candidates.size(), block.GetHash().ToString());
-    }
-    // Always prefill the coinbase transaction
-    prefill_candidates.insert(0);
+    Assume(prefill_candidates.contains(0));
+    LogDebug(BCLog::CMPCTBLOCK, "Using %d prefill candidates to prefill the cmpctblock %s\n", prefill_candidates.size(), block.GetHash().ToString());
 
     prefilledtxn.reserve(prefill_candidates.size());
     shorttxids.reserve(block.vtx.size() - prefill_candidates.size());
@@ -33,7 +28,8 @@ CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs(const CBlock& block, const 
 
     uint16_t prefill_index = 0;
     for (uint16_t i = 0; i < block.vtx.size(); i++) {
-        if(prefill_candidates.contains(i)) {
+        // Always prefill the coinbase, even if the caller didn't include it as a candidate.
+        if(prefill_candidates.contains(i) || i == 0) {
             prefilledtxn.push_back({prefill_index, block.vtx[i]});
             prefill_index = 0;
         } else {
