@@ -432,23 +432,23 @@ class CompactBlocksTest(BitcoinTestFramework):
         block.solve()
         return block
 
+    def test_getblocktxn_response(self, compact_block, peer, expected_result):
+        msg = msg_cmpctblock(compact_block.to_p2p())
+        peer.send_and_ping(msg)
+        with p2p_lock:
+            assert "getblocktxn" in peer.last_message
+            absolute_indexes = peer.last_message["getblocktxn"].block_txn_request.to_absolute()
+        assert_equal(absolute_indexes, expected_result)
+
+    def test_tip_after_message(self, node, peer, msg, tip):
+        peer.send_and_ping(msg)
+        assert_equal(int(node.getbestblockhash(), 16), tip)
+
     # Test that we only receive getblocktxn requests for transactions that the
     # node needs, and that responding to them causes the block to be
     # reconstructed.
     def test_getblocktxn_requests(self, test_node):
         node = self.nodes[0]
-
-        def test_getblocktxn_response(compact_block, peer, expected_result):
-            msg = msg_cmpctblock(compact_block.to_p2p())
-            peer.send_and_ping(msg)
-            with p2p_lock:
-                assert "getblocktxn" in peer.last_message
-                absolute_indexes = peer.last_message["getblocktxn"].block_txn_request.to_absolute()
-            assert_equal(absolute_indexes, expected_result)
-
-        def test_tip_after_message(node, peer, msg, tip):
-            peer.send_and_ping(msg)
-            assert_equal(int(node.getbestblockhash(), 16), tip)
 
         # First try announcing compactblocks that won't reconstruct, and verify
         # that we receive getblocktxn messages back.
@@ -459,12 +459,12 @@ class CompactBlocksTest(BitcoinTestFramework):
         comp_block = HeaderAndShortIDs()
         comp_block.initialize_from_block(block, use_witness=True)
 
-        test_getblocktxn_response(comp_block, test_node, [1, 2, 3, 4, 5])
+        self.test_getblocktxn_response(comp_block, test_node, [1, 2, 3, 4, 5])
 
         msg_bt = msg_no_witness_blocktxn()
         msg_bt = msg_blocktxn()  # serialize with witnesses
         msg_bt.block_transactions = BlockTransactions(block.sha256, block.vtx[1:])
-        test_tip_after_message(node, test_node, msg_bt, block.sha256)
+        self.test_tip_after_message(node, test_node, msg_bt, block.sha256)
 
         utxo = self.utxos.pop(0)
         block = self.build_block_with_transactions(node, utxo, 5)
@@ -472,9 +472,9 @@ class CompactBlocksTest(BitcoinTestFramework):
 
         # Now try interspersing the prefilled transactions
         comp_block.initialize_from_block(block, prefill_list=[0, 1, 5], use_witness=True)
-        test_getblocktxn_response(comp_block, test_node, [2, 3, 4])
+        self.test_getblocktxn_response(comp_block, test_node, [2, 3, 4])
         msg_bt.block_transactions = BlockTransactions(block.sha256, block.vtx[2:5])
-        test_tip_after_message(node, test_node, msg_bt, block.sha256)
+        self.test_tip_after_message(node, test_node, msg_bt, block.sha256)
 
         # Now try giving one transaction ahead of time.
         utxo = self.utxos.pop(0)
@@ -486,10 +486,10 @@ class CompactBlocksTest(BitcoinTestFramework):
         # Prefill 4 out of the 6 transactions, and verify that only the one
         # that was not in the mempool is requested.
         comp_block.initialize_from_block(block, prefill_list=[0, 2, 3, 4], use_witness=True)
-        test_getblocktxn_response(comp_block, test_node, [5])
+        self.test_getblocktxn_response(comp_block, test_node, [5])
 
         msg_bt.block_transactions = BlockTransactions(block.sha256, [block.vtx[5]])
-        test_tip_after_message(node, test_node, msg_bt, block.sha256)
+        self.test_tip_after_message(node, test_node, msg_bt, block.sha256)
 
         # Now provide all transactions to the node before the block is
         # announced and verify reconstruction happens immediately.
@@ -510,7 +510,7 @@ class CompactBlocksTest(BitcoinTestFramework):
 
         # Send compact block
         comp_block.initialize_from_block(block, prefill_list=[0], use_witness=True)
-        test_tip_after_message(node, test_node, msg_cmpctblock(comp_block.to_p2p()), block.sha256)
+        self.test_tip_after_message(node, test_node, msg_cmpctblock(comp_block.to_p2p()), block.sha256)
         with p2p_lock:
             # Shouldn't have gotten a request for any transaction
             assert "getblocktxn" not in test_node.last_message
@@ -714,6 +714,69 @@ class CompactBlocksTest(BitcoinTestFramework):
             for l in listeners:
                 l.last_message["cmpctblock"].header_and_shortids.header.calc_sha256()
                 assert_equal(l.last_message["cmpctblock"].header_and_shortids.header.sha256, block.sha256)
+
+    # Test that Bitcoin Core (only) prefills transactions into a compact block
+    # annoucement, that:
+    # - were prefilled by a previous announcer AND were unknown to the node (not in mempool)
+    # - were requested with a getblocktxn message from the previous announcer
+    # - were in the extra pool and used during reconstruction
+    def test_compactblock_prefill(self, test_node1, test_node2):
+        # This test uses two test_nodes and a bitcoind node. The test_nodes aren't directly
+        # connected: test_node1 --- node --- test_node2
+        # The 'test_node1' announces a cmpctblock with some transactions prefilled
+        # to 'node' and the after reconstructing the block, 'node' announces it to its
+        # high-bandwidth peer 'test_node2'. We check that the announcement from 'node' to
+        # 'test_node2' has (only) the transactions prefilled that it didn't know about.
+        node = self.nodes[0]
+        utxo = self.utxos.pop(0)
+
+        block = self.build_block_with_transactions(node, utxo, 5)
+        self.utxos.append([block.vtx[-1].sha256, 0, block.vtx[-1].vout[0].nValue])
+
+        # Make sure we will receive a fast-announce compact block on test_node2
+        self.request_cb_announcements(test_node2)
+        test_node2.clear_block_announcement()
+
+        # Let the 'node' know about the transactions at index=1 and index=2
+        # and ensure these are added to the mempool
+        test_node1.send_and_ping(msg_tx(block.vtx[1]))
+        assert block.vtx[1].hash in node.getrawmempool()
+        test_node1.send_and_ping(msg_tx(block.vtx[2]))
+        assert block.vtx[2].hash in node.getrawmempool()
+
+        # Let the 'node' know about the transaction at index=4, but ensure it's NOT
+        # added to the mempool. The transaction spends a TXO by the transaction at
+        # index=3, which is not known to the node. The index=4 transaction is an
+        # orphan to the node and added to the extra pool.
+        test_node1.send_and_ping(msg_tx(block.vtx[4]))
+        assert block.vtx[4].hash not in node.getrawmempool()
+
+        # Send an annoucement with the transactions at index 0, 1, and 5 prefilled
+        comp_block = HeaderAndShortIDs()
+        comp_block.initialize_from_block(block, prefill_list=[0, 1, 5], use_witness=True)
+
+        # Check that the node requests transaction at index=3 and send it. The node should
+        # now be able to successfully reconstruct the block.
+        self.test_getblocktxn_response(comp_block, test_node1, [3])
+        msg_bt = msg_blocktxn()
+        msg_bt.block_transactions = BlockTransactions(block.sha256,  [block.vtx[3]])
+        self.test_tip_after_message(node, test_node1, msg_bt, block.sha256)
+
+        # The node should now high-bandwidth annouce a cmpctblock with some transactions prefilled
+        test_node2.wait_until(lambda: "cmpctblock" in test_node2.last_message, timeout=30)
+        # Only these four transactions should be prefilled:
+        # tx 0: prefilled       - unknown to the node (coinbase)
+        # tx 1: not prefilled   - known to the node (mempool; but also prefilled by test_node1)
+        # tx 2: not prefilled   - known to the node (mempool)
+        # tx 3: prefilled       - requested in getblocktxn
+        # tx 4: prefilled       - known to the node via extra pool, but not in mempool
+        # tx 5: prefilled       - unknown to the node but was prefilled by test_node1
+        # This results in the following differentially encoded indexes:
+        expected_prefilled = [0, 2, 0, 0]
+        header_and_shortids = test_node2.last_message["cmpctblock"].header_and_shortids
+        assert_equal(header_and_shortids.prefilled_txn_length, len(expected_prefilled))
+        for expected_index, prefilled in zip(expected_prefilled, header_and_shortids.prefilled_txn):
+            assert_equal(expected_index, prefilled.index)
 
     # Test that we don't get disconnected if we relay a compact block with valid header,
     # but invalid transactions.
@@ -953,6 +1016,10 @@ class CompactBlocksTest(BitcoinTestFramework):
         self.request_cb_announcements(self.segwit_node)
         self.request_cb_announcements(self.additional_segwit_node)
         self.test_end_to_end_block_relay([self.segwit_node, self.additional_segwit_node])
+
+        # TODO
+        self.log.info("Testing compact block prefilling...")
+        self.test_compactblock_prefill(self.segwit_node, self.additional_segwit_node)
 
         self.log.info("Testing handling of invalid compact blocks...")
         self.test_invalid_tx_in_compactblock(self.segwit_node)
