@@ -55,7 +55,17 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         return;
     }
 
-    CBlockHeaderAndShortTxIDs cmpctblock{*block, fuzzed_data_provider.ConsumeIntegral<uint64_t>()};
+    std::set<uint32_t> prefill_candidates{};
+    bool prefill{fuzzed_data_provider.ConsumeBool()};
+    if (prefill) {
+        size_t prefilled_txns{fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, block->vtx.size())};
+        for (size_t i = 1; i < prefilled_txns; i++) {
+            uint16_t index = fuzzed_data_provider.ConsumeIntegralInRange<uint16_t>(0, block->vtx.size());
+            prefill_candidates.insert(index);
+        }
+    }
+
+    CBlockHeaderAndShortTxIDs cmpctblock{*block, fuzzed_data_provider.ConsumeIntegral<uint64_t>(), prefill_candidates};
 
     bilingual_str error;
     CTxMemPool pool{MemPoolOptionsForTest(g_setup->m_node), error};
@@ -69,6 +79,10 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
 
     std::vector<CTransactionRef> extra_txn;
     for (size_t i = 1; i < block->vtx.size(); ++i) {
+        if(prefill_candidates.contains(i)) {
+            available.insert(i);
+        }
+
         auto tx{block->vtx[i]};
 
         bool add_to_extra_txn{fuzzed_data_provider.ConsumeBool()};
