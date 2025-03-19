@@ -91,10 +91,11 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
 
         // TODO: check if a prefilled is in our mempool, if it is:
         // count size and numbers for logging
-        // TODO lock cs_main?
-        // LOCK(pool->cs);
-        if (!pool->exists(GenTxid::Wtxid(cmpctblock.prefilledtxn[i].tx->GetWitnessHash()))) {
-            prefill_candidates.insert(lastprefilledindex);
+        {
+            LOCK(pool->cs); // TODO: locking in a tight loop?
+            if (!pool->exists(GenTxid::Wtxid(cmpctblock.prefilledtxn[i].tx->GetWitnessHash()))) {
+                prefill_candidates.insert(lastprefilledindex);
+            }
         }
     }
     prefilled_count = cmpctblock.prefilledtxn.size();
