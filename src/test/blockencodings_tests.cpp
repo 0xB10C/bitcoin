@@ -267,6 +267,54 @@ BOOST_AUTO_TEST_CASE(SufficientPreforwardRTTest)
     BOOST_CHECK_EQUAL(pool.get(txhash).use_count(), SHARED_TX_OFFSET - 1); // -1 because of block
 }
 
+BOOST_AUTO_TEST_CASE(PrefillRTTest)
+{
+    CTxMemPool& pool = *Assert(m_node.mempool);
+    TestMemPoolEntryHelper entry;
+    auto rand_ctx(FastRandomContext(uint256{42}));
+    CBlock block(BuildBlockTestCase(rand_ctx));
+
+    LOCK2(cs_main, pool.cs);
+    AddToMempool(pool, entry.FromTx(block.vtx[1]));
+    BOOST_CHECK_EQUAL(pool.get(block.vtx[1]->GetHash()).use_count(), SHARED_TX_OFFSET + 0);
+
+    uint256 txhash;
+
+    // Test with prefilling coinbase + tx 2 with tx 1 in mempool
+    {
+        std::set<uint32_t> prefill_candidates = {0u, 2u};
+        const CBlockHeaderAndShortTxIDs shortIDs{block, rand_ctx.rand64(), prefill_candidates};
+
+        DataStream stream{};
+        stream << shortIDs;
+
+        CBlockHeaderAndShortTxIDs shortIDs2;
+        stream >> shortIDs2;
+
+        PartiallyDownloadedBlock partialBlock(&pool);
+        BOOST_CHECK(partialBlock.InitData(shortIDs2, empty_extra_txn) == READ_STATUS_OK);
+        BOOST_CHECK( partialBlock.IsTxAvailable(0));
+        BOOST_CHECK( partialBlock.IsTxAvailable(1));
+        BOOST_CHECK( partialBlock.IsTxAvailable(2));
+
+        BOOST_CHECK_EQUAL(pool.get(block.vtx[1]->GetHash()).use_count(), SHARED_TX_OFFSET + 1);
+
+        CBlock block2;
+        PartiallyDownloadedBlock partialBlockCopy = partialBlock;
+        BOOST_CHECK(partialBlock.FillBlock(block2, {}) == READ_STATUS_OK);
+        BOOST_CHECK_EQUAL(block.GetHash().ToString(), block2.GetHash().ToString());
+        bool mutated;
+        BOOST_CHECK_EQUAL(block.hashMerkleRoot.ToString(), BlockMerkleRoot(block2, &mutated).ToString());
+        BOOST_CHECK(!mutated);
+
+        txhash = block.vtx[1]->GetHash();
+        block.vtx.clear();
+        block2.vtx.clear();
+        BOOST_CHECK_EQUAL(pool.get(txhash).use_count(), SHARED_TX_OFFSET + 1 - 1); // + 1 because of partialBlock; -1 because of block.
+    }
+    BOOST_CHECK_EQUAL(pool.get(txhash).use_count(), SHARED_TX_OFFSET - 1); // -1 because of block
+}
+
 BOOST_AUTO_TEST_CASE(EmptyBlockRoundTripTest)
 {
     CTxMemPool& pool = *Assert(m_node.mempool);
