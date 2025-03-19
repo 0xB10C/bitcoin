@@ -55,7 +55,17 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         return;
     }
 
-    CBlockHeaderAndShortTxIDs cmpctblock{*block, fuzzed_data_provider.ConsumeIntegral<uint64_t>()};
+    std::set<uint32_t> prefill_candidates{};
+    bool prefill{fuzzed_data_provider.ConsumeBool()};
+    if (prefill) {
+        size_t prefilled_txns{fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, block->vtx.size())};
+        for (size_t i = 1; i < prefilled_txns; i++) {
+            uint16_t index = fuzzed_data_provider.ConsumeIntegralInRange<uint16_t>(0, block->vtx.size());
+            prefill_candidates.insert(index);
+        }
+    }
+
+    CBlockHeaderAndShortTxIDs cmpctblock{*block, fuzzed_data_provider.ConsumeIntegral<uint64_t>(), prefill_candidates};
 
     bilingual_str error;
     CTxMemPool pool{MemPoolOptionsForTest(g_setup->m_node), error};
@@ -74,6 +84,10 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         bool add_to_extra_txn{fuzzed_data_provider.ConsumeBool()};
         bool add_to_mempool{fuzzed_data_provider.ConsumeBool()};
 
+        if(prefill_candidates.contains(i)) {
+            available.insert(i);
+        }
+
         if (add_to_extra_txn) {
             extra_txn.emplace_back(tx);
             available.insert(i);
@@ -82,6 +96,12 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         if (add_to_mempool && !pool.exists(GenTxid::Txid(tx->GetHash()))) {
             LOCK2(cs_main, pool.cs);
             AddToMempool(pool, ConsumeTxMemPoolEntry(fuzzed_data_provider, *tx));
+            available.insert(i);
+        }
+
+        // The fuzz data provider can generate blocks with duplicate transactions.
+        // Consider all occurences of a transaction as available.
+        if (pool.exists(GenTxid::Txid(tx->GetHash())) || pool.exists(GenTxid::Txid(tx->GetWitnessHash()))) {
             available.insert(i);
         }
     }

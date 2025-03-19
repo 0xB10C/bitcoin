@@ -17,15 +17,23 @@
 
 #include <unordered_map>
 
-CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs(const CBlock& block, const uint64_t nonce) :
-        nonce(nonce),
-        shorttxids(block.vtx.size() - 1), prefilledtxn(1), header(block) {
+CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs(const CBlock& block, const uint64_t nonce, const std::set<uint32_t>& prefill_candidates) :
+        nonce(nonce), header(block) {
+    prefilledtxn.reserve(prefill_candidates.size());
+    shorttxids.reserve(block.vtx.size() - prefill_candidates.size());
     FillShortTxIDSelector();
-    //TODO: Use our mempool prior to block acceptance to predictively fill more than just the coinbase
-    prefilledtxn[0] = {0, block.vtx[0]};
-    for (size_t i = 1; i < block.vtx.size(); i++) {
-        const CTransaction& tx = *block.vtx[i];
-        shorttxids[i - 1] = GetShortID(tx.GetWitnessHash());
+
+    uint16_t prefill_index = 0;
+    for (uint16_t i = 0; i < block.vtx.size(); i++) {
+        // Always prefill the coinbase transaction.
+        if(prefill_candidates.contains(i) || i == 0) {
+            prefilledtxn.push_back({prefill_index, block.vtx[i]});
+            prefill_index = 0;
+        } else {
+            const CTransaction& tx = *block.vtx[i];
+            shorttxids.push_back(GetShortID(tx.GetWitnessHash()));
+            prefill_index++;
+        }
     }
 }
 
