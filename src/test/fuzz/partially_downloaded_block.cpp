@@ -79,14 +79,18 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
 
     std::vector<CTransactionRef> extra_txn;
     for (size_t i = 1; i < block->vtx.size(); ++i) {
-        if(prefill_candidates.contains(i)) {
-            available.insert(i);
-        }
 
         auto tx{block->vtx[i]};
 
         bool add_to_extra_txn{fuzzed_data_provider.ConsumeBool()};
         bool add_to_mempool{fuzzed_data_provider.ConsumeBool()};
+
+
+        std::cout << std::boolalpha << "txn =  " << i << "\t mempool = " << add_to_mempool << "\t extrapool = " << add_to_extra_txn << "\t prefilled = " << prefill_candidates.contains(i) << "  txid=" << tx->GetHash().ToString() << "  wtxid="  << tx->GetWitnessHash().ToString() << std::endl;
+
+        if(prefill_candidates.contains(i)) {
+            available.insert(i);
+        }
 
         if (add_to_extra_txn) {
             extra_txn.emplace_back(tx);
@@ -114,6 +118,10 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         // collisions (i.e. available.count(i) > 0 does not imply
         // IsTxAvailable(i) == true).
         if (init_status == READ_STATUS_OK) {
+            std::cout << std::boolalpha;
+            std::cout << i << " tx? " << (pdb.IsTxAvailable(i) ?  "available" : "missing");
+            std::cout << "    available.count(i)=" << (available.count(i));
+            std::cout << "    assert(" << (!pdb.IsTxAvailable(i) || available.count(i) > 0) << ")" << std::endl;
             assert(!pdb.IsTxAvailable(i) || available.count(i) > 0);
         }
 

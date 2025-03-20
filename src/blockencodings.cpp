@@ -81,6 +81,7 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
             return READ_STATUS_INVALID;
         }
         txn_available[lastprefilledindex] = cmpctblock.prefilledtxn[i].tx;
+        std::cout << "tx " << lastprefilledindex << " is available as it was prefilled" << std::endl;
 
         {
             // Only consider prefilled transactions that were NOT in our mempool as candidates
@@ -130,14 +131,17 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
         if (idit != shorttxids.end()) {
             if (!have_txn[idit->second]) {
                 txn_available[idit->second] = tx;
+                std::cout << "tx " << idit->second << " is available as it was in our mempool (txid=" << tx->GetHash().ToString() << " wtxid = " << tx->GetWitnessHash().ToString() << std::endl;
                 have_txn[idit->second]  = true;
                 mempool_count++;
             } else {
+                std::cout << "tx " << idit->second << " (mempool) reset" << std::endl;
                 // If we find two mempool txn that match the short id, just request it.
                 // This should be rare enough that the extra bandwidth doesn't matter,
                 // but eating a round-trip due to FillBlock failure would be annoying
                 if (txn_available[idit->second]) {
                     txn_available[idit->second].reset();
+                    std::cout << "tx " << idit->second << " (mempool) reset" << std::endl;
                     mempool_count--;
                 }
             }
@@ -159,6 +163,7 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
         if (idit != shorttxids.end()) {
             if (!have_txn[idit->second]) {
                 txn_available[idit->second] = extra_txn[i];
+                std::cout << "tx " << idit->second << " is available as it was in our extra pool" << std::endl;
                 prefill_candidates.insert(idit->second);
                 have_txn[idit->second]  = true;
                 mempool_count++;
@@ -173,6 +178,7 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
                 if (txn_available[idit->second] &&
                         txn_available[idit->second]->GetWitnessHash() != extra_txn[i]->GetWitnessHash()) {
                     txn_available[idit->second].reset();
+                    std::cout << "tx " << idit->second << " (extra pool) reset" << std::endl;
                     mempool_count--;
                     extra_count--;
                 }
