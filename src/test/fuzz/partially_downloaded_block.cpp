@@ -55,6 +55,20 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         return;
     }
 
+    std::set<uint256> txids{};
+    std::set<size_t> dups{};
+    for (size_t i = 0; i < block->vtx.size(); i++) {
+        if (txids.contains(block->vtx[i]->GetHash())) {
+            dups.insert(i);
+        } else {
+            txids.insert(block->vtx[i]->GetHash());
+        }
+    }
+    // only care about blocks that have duplicate txids for this reproducer
+    if (dups.size() == 0) {
+        return;
+    }
+
     CBlockHeaderAndShortTxIDs cmpctblock{*block, fuzzed_data_provider.ConsumeIntegral<uint64_t>()};
 
     bilingual_str error;
@@ -66,6 +80,8 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
     std::set<uint16_t> available;
     // The coinbase is always available
     available.insert(0);
+
+    bool in_mempool_before_processed = false;
 
     std::vector<CTransactionRef> extra_txn;
     for (size_t i = 1; i < block->vtx.size(); ++i) {
@@ -79,6 +95,10 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
             available.insert(i);
         }
 
+        if (!add_to_extra_txn && !add_to_mempool && pool.exists(GenTxid::Txid(tx->GetHash()))) {
+            in_mempool_before_processed = true;
+        }
+
         if (add_to_mempool && !pool.exists(GenTxid::Txid(tx->GetHash()))) {
             LOCK2(cs_main, pool.cs);
             AddToMempool(pool, ConsumeTxMemPoolEntry(fuzzed_data_provider, *tx));
@@ -86,7 +106,19 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         }
     }
 
+    if (!in_mempool_before_processed) {
+        //std::cout << "add_to_mempool && in_mempool_before_processed" << std::endl;
+        return;
+    }
+    //std::cout << "in_mempool_before_processed" << std::endl;
+
     auto init_status{pdb.InitData(cmpctblock, extra_txn)};
+
+    // only care about READ_STATUS_OK compact blocks
+    if (init_status != READ_STATUS_OK) {
+        return;
+    }
+    std::cout << "dups && READ_STATUS_OK" << std::endl;
 
     std::vector<CTransactionRef> missing;
     // Whether we skipped a transaction that should be included in `missing`.
@@ -111,6 +143,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         skipped_missing |= (!pdb.IsTxAvailable(i) && skip);
     }
 
+    return;
     // Mock CheckBlock
     bool fail_check_block{fuzzed_data_provider.ConsumeBool()};
     auto validation_result =
