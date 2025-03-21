@@ -80,8 +80,7 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
             // have neither a prefilled txn or a shorttxid!
             return READ_STATUS_INVALID;
         }
-        txn_available[lastprefilledindex] = cmpctblock.prefilledtxn[i].tx;
-        std::cout << "tx " << lastprefilledindex << " is available as it was prefilled" << std::endl;
+        SetAvailable(lastprefilledindex, cmpctblock.prefilledtxn[i].tx, "prefilled");
 
         {
             // Only consider prefilled transactions that were NOT in our mempool as candidates
@@ -130,8 +129,7 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
         std::unordered_map<uint64_t, uint16_t>::iterator idit = shorttxids.find(shortid);
         if (idit != shorttxids.end()) {
             if (!have_txn[idit->second]) {
-                txn_available[idit->second] = tx;
-                std::cout << "tx " << idit->second << " is available as it was in our mempool (txid=" << tx->GetHash().ToString() << " wtxid = " << tx->GetWitnessHash().ToString() << std::endl;
+                SetAvailable(idit->second, tx, "mempool");
                 have_txn[idit->second]  = true;
                 mempool_count++;
             } else {
@@ -162,8 +160,7 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
         std::unordered_map<uint64_t, uint16_t>::iterator idit = shorttxids.find(shortid);
         if (idit != shorttxids.end()) {
             if (!have_txn[idit->second]) {
-                txn_available[idit->second] = extra_txn[i];
-                std::cout << "tx " << idit->second << " is available as it was in our extra pool" << std::endl;
+                SetAvailable(idit->second, extra_txn[i], "extra pool");
                 prefill_candidates.insert(idit->second);
                 have_txn[idit->second]  = true;
                 mempool_count++;
@@ -193,6 +190,11 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
     LogDebug(BCLog::CMPCTBLOCK, "Initialized PartiallyDownloadedBlock for block %s using a cmpctblock of size %lu\n", cmpctblock.header.GetHash().ToString(), GetSerializeSize(cmpctblock));
 
     return READ_STATUS_OK;
+}
+
+void PartiallyDownloadedBlock::SetAvailable(size_t index, CTransactionRef tx, std::string reason) {
+    std::cout << "tx " << index << " is available (" << reason << ") (txid=" << tx->GetHash().ToString() << " wtxid = " << tx->GetWitnessHash().ToString()  << std::endl;
+    txn_available[index] = tx;
 }
 
 bool PartiallyDownloadedBlock::IsTxAvailable(size_t index) const

@@ -155,6 +155,8 @@ public:
 
     explicit PartiallyDownloadedBlock(CTxMemPool* poolIn) : pool(poolIn) {}
 
+    void SetAvailable(size_t index, CTransactionRef tx, std::string reason);
+
     // extra_txn is a list of extra orphan/conflicted/etc transactions to look at
     ReadStatus InitData(const CBlockHeaderAndShortTxIDs& cmpctblock, const std::vector<CTransactionRef>& extra_txn);
     bool IsTxAvailable(size_t index) const;

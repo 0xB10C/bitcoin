@@ -54,6 +54,19 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         block->vtx.size() >= std::numeric_limits<uint16_t>::max()) {
         return;
     }
+    std::set<uint256> txids{};
+    std::set<size_t> dups{};
+    for (size_t i = 0; i < block->vtx.size(); i++) {
+        if (txids.contains(block->vtx[i]->GetHash())) {
+            dups.insert(i);
+        } else {
+            txids.insert(block->vtx[i]->GetHash());
+        }
+    }
+    // only care about blocks that have duplicate txids for this reproducer
+    if (dups.size() == 0) {
+        return;
+    }
 
     std::set<uint32_t> prefill_candidates{};
     bool prefill{fuzzed_data_provider.ConsumeBool()};
@@ -105,6 +118,9 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
     }
 
     auto init_status{pdb.InitData(cmpctblock, extra_txn)};
+    if (init_status != READ_STATUS_OK) {
+        return;
+    }
 
     std::vector<CTransactionRef> missing;
     // Whether we skipped a transaction that should be included in `missing`.
