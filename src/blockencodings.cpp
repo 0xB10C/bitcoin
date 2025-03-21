@@ -193,7 +193,7 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
 }
 
 void PartiallyDownloadedBlock::SetAvailable(size_t index, CTransactionRef tx, std::string reason) {
-    std::cout << "tx " << index << " is available (" << reason << ") (txid=" << tx->GetHash().ToString() << " wtxid = " << tx->GetWitnessHash().ToString()  << std::endl;
+    //std::cout << "tx " << index << " is available (" << reason << ") (txid=" << tx->GetHash().ToString() << " wtxid = " << tx->GetWitnessHash().ToString()  << std::endl;
     txn_available[index] = tx;
 }
 

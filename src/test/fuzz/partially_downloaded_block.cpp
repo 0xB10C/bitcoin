@@ -78,6 +78,9 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         }
     }
 
+    // TODO:
+    prefill_candidates = {0};
+
     CBlockHeaderAndShortTxIDs cmpctblock{*block, fuzzed_data_provider.ConsumeIntegral<uint64_t>(), prefill_candidates};
 
     bilingual_str error;
@@ -90,6 +93,8 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
     // The coinbase is always available
     available.insert(0);
 
+
+    std::set<uint32_t> extra{};
     std::vector<CTransactionRef> extra_txn;
     for (size_t i = 1; i < block->vtx.size(); ++i) {
 
@@ -98,8 +103,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         bool add_to_extra_txn{fuzzed_data_provider.ConsumeBool()};
         bool add_to_mempool{fuzzed_data_provider.ConsumeBool()};
 
-
-        std::cout << std::boolalpha << "txn =  " << i << "\t mempool = " << add_to_mempool << "\t extrapool = " << add_to_extra_txn << "\t prefilled = " << prefill_candidates.contains(i) << "  txid=" << tx->GetHash().ToString() << "  wtxid="  << tx->GetWitnessHash().ToString() << std::endl;
+        //std::cout << std::boolalpha << "txn =  " << i << "\t" << (add_to_mempool ? " [m] ":" [ ] ") << (add_to_extra_txn?" [e] ":" [ ] ") << (prefill_candidates.contains(i) ? " [p] " : " [ ] ") << " txid = " << tx->GetHash().ToString() << "  wtxid="  << tx->GetWitnessHash().ToString() << std::endl;
 
         if(prefill_candidates.contains(i)) {
             available.insert(i);
@@ -107,6 +111,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
 
         if (add_to_extra_txn) {
             extra_txn.emplace_back(tx);
+            extra.insert(i);
             available.insert(i);
         }
 
@@ -127,6 +132,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
     // FillBlock should never return READ_STATUS_OK if that is the case.
     bool skipped_missing{false};
     for (size_t i = 0; i < cmpctblock.BlockTxCount(); i++) {
+        auto tx{block->vtx[i]};
         // If init_status == READ_STATUS_OK then a available transaction in the
         // compact block (i.e. IsTxAvailable(i) == true) implies that we marked
         // that transaction as available above (i.e. available.count(i) > 0).
@@ -134,10 +140,18 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         // collisions (i.e. available.count(i) > 0 does not imply
         // IsTxAvailable(i) == true).
         if (init_status == READ_STATUS_OK) {
-            std::cout << std::boolalpha;
-            std::cout << i << " tx? " << (pdb.IsTxAvailable(i) ?  "available" : "missing");
-            std::cout << "    available.count(i)=" << (available.count(i));
-            std::cout << "    assert(" << (!pdb.IsTxAvailable(i) || available.count(i) > 0) << ")" << std::endl;
+            std::cout << std::boolalpha << " " << i << "\t";
+            std::cout << (pool.exists(GenTxid::Txid(tx->GetHash())) ? " [m] ":" [ ] ");
+            std::cout << (extra.contains(i)?" [e] ":" [ ] ");
+            std::cout << (prefill_candidates.contains(i) ? " [p] " : " [ ] ");
+            std::cout << (available.contains(i) ? " [a] " : " [ ] ");
+            std::cout << (pdb.IsTxAvailable(i) ? " [A] " : " [ ] ");
+            std::cout << " txid = " << tx->GetHash().ToString() << "  wtxid="  << tx->GetWitnessHash().ToString();
+            std::cout << std::endl;
+            //std::cout << std::boolalpha;
+            //std::cout << i << " tx? " << (pdb.IsTxAvailable(i) ?  "available" : "missing");
+            //std::cout << "    available.count(i)=" << (available.count(i));
+            //std::cout << "    assert(" << (!pdb.IsTxAvailable(i) || available.count(i) > 0) << ")" << std::endl;
             assert(!pdb.IsTxAvailable(i) || available.count(i) > 0);
         }
 
