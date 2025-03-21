@@ -50,7 +50,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
     SetMockTime(ConsumeTime(fuzzed_data_provider));
 
     auto block{ConsumeDeserializable<CBlock>(fuzzed_data_provider, TX_WITH_WITNESS)};
-    if (!block || block->vtx.size() == 0 ||
+    if (!block || block->vtx.size() == 0 || block->vtx.size() > 5 ||
         block->vtx.size() >= std::numeric_limits<uint16_t>::max()) {
         return;
     }
@@ -65,7 +65,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         }
     }
     // only care about blocks that have duplicate txids for this reproducer
-    if (dups.size() == 0) {
+    if (dups.size() != 1) {
         return;
     }
 
@@ -80,9 +80,12 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
     std::set<uint16_t> available;
     // The coinbase is always available
     available.insert(0);
+    available.insert(1);
 
     bool in_mempool_before_processed = false;
 
+
+    std::set<uint16_t> extra;
     std::vector<CTransactionRef> extra_txn;
     for (size_t i = 1; i < block->vtx.size(); ++i) {
         auto tx{block->vtx[i]};
@@ -93,6 +96,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         if (add_to_extra_txn) {
             extra_txn.emplace_back(tx);
             available.insert(i);
+            extra.insert(i);
         }
 
         if (!add_to_extra_txn && !add_to_mempool && pool.exists(GenTxid::Txid(tx->GetHash()))) {
@@ -107,9 +111,21 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
     }
 
     if (!in_mempool_before_processed) {
-        //std::cout << "add_to_mempool && in_mempool_before_processed" << std::endl;
         return;
     }
+
+
+    for (size_t i = 0; i < block->vtx.size(); i++) {
+        auto tx{block->vtx[i]};
+        std::cout << std::boolalpha << " " << i << "\t";
+        std::cout << (pool.exists(GenTxid::Txid(tx->GetHash())) ? " [m] ":" [ ] ");
+        std::cout << (extra.contains(i)?" [e] ":" [ ] ");
+        std::cout << (available.contains(i) ? " [a] " : " [ ] ");
+        //std::cout << (pdb.IsTxAvailable(i) ? " [A] " : " [ ] ");
+        std::cout << " txid = " << tx->GetHash().ToString() << "  wtxid="  << tx->GetWitnessHash().ToString();
+        std::cout << std::endl;
+    }
+
     //std::cout << "in_mempool_before_processed" << std::endl;
 
     auto init_status{pdb.InitData(cmpctblock, extra_txn)};

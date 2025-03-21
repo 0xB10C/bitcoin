@@ -48,10 +48,14 @@ uint64_t CBlockHeaderAndShortTxIDs::GetShortID(const Wtxid& wtxid) const {
 
 
 ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& cmpctblock, const std::vector<CTransactionRef>& extra_txn) {
-    if (cmpctblock.header.IsNull() || (cmpctblock.shorttxids.empty() && cmpctblock.prefilledtxn.empty()))
+    if (cmpctblock.header.IsNull() || (cmpctblock.shorttxids.empty() && cmpctblock.prefilledtxn.empty())) {
+        std::cout << "1. something is empty: READ_STATUS_INVALID" << std::endl;
         return READ_STATUS_INVALID;
-    if (cmpctblock.shorttxids.size() + cmpctblock.prefilledtxn.size() > MAX_BLOCK_WEIGHT / MIN_SERIALIZABLE_TRANSACTION_WEIGHT)
+    }
+    if (cmpctblock.shorttxids.size() + cmpctblock.prefilledtxn.size() > MAX_BLOCK_WEIGHT / MIN_SERIALIZABLE_TRANSACTION_WEIGHT) {
+        std::cout << "2. too large: READ_STATUS_INVALID" << std::endl;
         return READ_STATUS_INVALID;
+    }
 
     if (!header.IsNull() || !txn_available.empty()) return READ_STATUS_INVALID;
 
@@ -60,8 +64,10 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
 
     int32_t lastprefilledindex = -1;
     for (size_t i = 0; i < cmpctblock.prefilledtxn.size(); i++) {
-        if (cmpctblock.prefilledtxn[i].tx->IsNull())
+        if (cmpctblock.prefilledtxn[i].tx->IsNull()) {
+            std::cout << "3. prefilled tx " << i << " is NULL: READ_STATUS_INVALID" << std::endl;
             return READ_STATUS_INVALID;
+        };
 
         lastprefilledindex += cmpctblock.prefilledtxn[i].index + 1; //index is a uint16_t, so can't overflow here
         if (lastprefilledindex > std::numeric_limits<uint16_t>::max())
@@ -96,13 +102,17 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
         // Thus: P(max_elements_per_bucket > N) <= S * (1 - cdf(binomial(n=S,p=1/S), N)).
         // If we assume blocks of up to 16000, allowing 12 elements per bucket should
         // only fail once per ~1 million block transfers (per peer and connection).
-        if (shorttxids.bucket_size(shorttxids.bucket(cmpctblock.shorttxids[i])) > 12)
+        if (shorttxids.bucket_size(shorttxids.bucket(cmpctblock.shorttxids[i])) > 12) {
+            std::cout << "4. bucket_size too big: READ_STATUS_FAILED" << std::endl;
             return READ_STATUS_FAILED;
+        }
     }
     // TODO: in the shortid-collision case, we should instead request both transactions
     // which collided. Falling back to full-block-request here is overkill.
-    if (shorttxids.size() != cmpctblock.shorttxids.size())
+    if (shorttxids.size() != cmpctblock.shorttxids.size()) {
+        std::cout << "5. short id collision: READ_STATUS_FAILED" << std::endl;
         return READ_STATUS_FAILED; // Short ID collision
+    }
 
     std::vector<bool> have_txn(txn_available.size());
     {
