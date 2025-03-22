@@ -74,6 +74,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
 
     // Set of available transactions (mempool or extra_txn)
     std::set<uint16_t> available;
+    std::set<uint16_t> extra;
     // The coinbase is always available
     available.insert(0);
 
@@ -91,6 +92,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         if (add_to_extra_txn) {
             extra_txn.emplace_back(tx);
             available.insert(i);
+            extra.insert(i);
         }
 
         if (add_to_mempool && !pool.exists(GenTxid::Txid(tx->GetHash()))) {
@@ -107,7 +109,24 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         }
     }
 
+
+
     auto init_status{pdb.InitData(cmpctblock, extra_txn)};
+
+    if (init_status != READ_STATUS_OK) {
+        return;
+    }
+
+    bool will_assert{false};
+    for (size_t i = 0; i < cmpctblock.BlockTxCount(); i++) {
+        bool ok = (!pdb.IsTxAvailable(i) || available.count(i) > 0);
+        if (!ok) {
+            will_assert = true;
+        }
+    }
+    if (!will_assert) {
+        return;
+    }
 
     std::vector<CTransactionRef> missing;
     // Whether we skipped a transaction that should be included in `missing`.
@@ -121,6 +140,16 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         // collisions (i.e. available.count(i) > 0 does not imply
         // IsTxAvailable(i) == true).
         if (init_status == READ_STATUS_OK) {
+            auto tx{block->vtx[i]};
+            std::cout << std::boolalpha << " " << i << "\t";
+            std::cout << (pool.exists(GenTxid::Txid(tx->GetHash())) ? " [mT] ":" [  ] ");
+            std::cout << (pool.exists(GenTxid::Wtxid(tx->GetWitnessHash())) ? " [mW] ":" [  ] ");
+            std::cout << (extra.contains(i)?" [e] ":" [ ] ");
+            std::cout << (prefill_candidates.contains(i) ? " [p] " : " [ ] ");
+            std::cout << (available.contains(i) ? " [a] " : " [ ] ");
+            std::cout << (pdb.IsTxAvailable(i) ? " [A] " : " [ ] ");
+            std::cout << " txid = " << tx->GetHash().ToString() << "  wtxid="  << tx->GetWitnessHash().ToString();
+            std::cout << std::endl;
             assert(!pdb.IsTxAvailable(i) || available.count(i) > 0);
         }
 
