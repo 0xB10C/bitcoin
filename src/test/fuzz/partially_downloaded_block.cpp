@@ -77,8 +77,10 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
     // The coinbase is always available
     available.insert(0);
 
-    // Set of extra pool txids
-    std::set<uint256> extra_pool_txids;
+    // Set of available wtxids
+    std::set<uint256> available2;
+    available2.insert(block->vtx[0]->GetWitnessHash());
+    std::cout << "c: 0 " << block->vtx[0]->GetWitnessHash().ToString() << std::endl;
 
     std::vector<CTransactionRef> extra_txn;
     for (size_t i = 1; i < block->vtx.size(); ++i) {
@@ -89,44 +91,36 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
 
         if(prefill_candidates.contains(i)) {
             available.insert(i);
+            available2.insert(tx->GetWitnessHash());
+            std::cout << "p: " << i << " " << tx->GetWitnessHash().ToString() << std::endl;
         }
 
         // The fuzz data provider can generate blocks with duplicate transactions.
         // Consider all occurences of a transaction as available.
-        if (pool.exists(GenTxid::Txid(tx->GetHash())) || extra_pool_txids.contains(tx->GetHash())) {
+        //if (pool.exists(GenTxid::Txid(tx->GetHash())) || extra_pool_txids.contains(tx->GetHash())) {
             // TODO: || pool.exists(GenTxid::Wtxid(tx->GetWitnessHash()))) {
-            available.insert(i);
-        }
+        //    available.insert(i);
+        //}
 
         if (add_to_extra_txn) {
             extra_txn.emplace_back(tx);
             available.insert(i);
-            extra_pool_txids.insert(tx->GetHash());
+            available2.insert(tx->GetWitnessHash());
+            std::cout << "e: " << i << " " << tx->GetWitnessHash().ToString() << std::endl;
         }
 
         if (add_to_mempool && !pool.exists(GenTxid::Txid(tx->GetHash()))) {
             LOCK2(cs_main, pool.cs);
             AddToMempool(pool, ConsumeTxMemPoolEntry(fuzzed_data_provider, *tx));
             available.insert(i);
+            std::cout << "m: " << i << " " << tx->GetWitnessHash().ToString() << std::endl;
+            available2.insert(tx->GetWitnessHash());
         }
     }
-
-
 
     auto init_status{pdb.InitData(cmpctblock, extra_txn)};
 
     if (init_status != READ_STATUS_OK) {
-        return;
-    }
-
-    bool will_assert{false};
-    for (size_t i = 0; i < cmpctblock.BlockTxCount(); i++) {
-        bool ok = (!pdb.IsTxAvailable(i) || available.count(i) > 0);
-        if (!ok) {
-            will_assert = true;
-        }
-    }
-    if (!will_assert) {
         return;
     }
 
@@ -146,13 +140,13 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
             std::cout << std::boolalpha << " " << i << "\t";
             std::cout << (pool.exists(GenTxid::Txid(tx->GetHash())) ? " [mT] ":" [  ] ");
             std::cout << (pool.exists(GenTxid::Wtxid(tx->GetWitnessHash())) ? " [mW] ":" [  ] ");
-            std::cout << (extra_pool_txids.contains(tx->GetHash())?" [e] ":" [ ] ");
             std::cout << (prefill_candidates.contains(i) ? " [p] " : " [ ] ");
             std::cout << (available.contains(i) ? " [a] " : " [ ] ");
+            std::cout << (available2.contains(tx->GetWitnessHash()) ? " [a2] " : " [  ] ");
             std::cout << (pdb.IsTxAvailable(i) ? " [A] " : " [ ] ");
             std::cout << " txid = " << tx->GetHash().ToString() << "  wtxid="  << tx->GetWitnessHash().ToString();
             std::cout << std::endl;
-            assert(!pdb.IsTxAvailable(i) || available.count(i) > 0);
+            assert(!pdb.IsTxAvailable(i) || available2.contains(tx->GetWitnessHash()));
         }
 
         bool skip{fuzzed_data_provider.ConsumeBool()};
