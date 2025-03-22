@@ -74,9 +74,11 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
 
     // Set of available transactions (mempool or extra_txn)
     std::set<uint16_t> available;
-    std::set<uint16_t> extra;
     // The coinbase is always available
     available.insert(0);
+
+    // Set of extra pool txids
+    std::set<uint256> extra_pool_txids;
 
     std::vector<CTransactionRef> extra_txn;
     for (size_t i = 1; i < block->vtx.size(); ++i) {
@@ -89,22 +91,22 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
             available.insert(i);
         }
 
+        // The fuzz data provider can generate blocks with duplicate transactions.
+        // Consider all occurences of a transaction as available.
+        if (pool.exists(GenTxid::Txid(tx->GetHash())) || extra_pool_txids.contains(tx->GetHash())) {
+            // TODO: || pool.exists(GenTxid::Wtxid(tx->GetWitnessHash()))) {
+            available.insert(i);
+        }
+
         if (add_to_extra_txn) {
             extra_txn.emplace_back(tx);
             available.insert(i);
-            extra.insert(i);
+            extra_pool_txids.insert(tx->GetHash());
         }
 
         if (add_to_mempool && !pool.exists(GenTxid::Txid(tx->GetHash()))) {
             LOCK2(cs_main, pool.cs);
             AddToMempool(pool, ConsumeTxMemPoolEntry(fuzzed_data_provider, *tx));
-            available.insert(i);
-        }
-
-        // The fuzz data provider can generate blocks with duplicate transactions.
-        // Consider all occurences of a transaction as available.
-        if (pool.exists(GenTxid::Txid(tx->GetHash()))) {
-            // TODO: || pool.exists(GenTxid::Wtxid(tx->GetWitnessHash()))) {
             available.insert(i);
         }
     }
@@ -144,7 +146,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
             std::cout << std::boolalpha << " " << i << "\t";
             std::cout << (pool.exists(GenTxid::Txid(tx->GetHash())) ? " [mT] ":" [  ] ");
             std::cout << (pool.exists(GenTxid::Wtxid(tx->GetWitnessHash())) ? " [mW] ":" [  ] ");
-            std::cout << (extra.contains(i)?" [e] ":" [ ] ");
+            std::cout << (extra_pool_txids.contains(tx->GetHash())?" [e] ":" [ ] ");
             std::cout << (prefill_candidates.contains(i) ? " [p] " : " [ ] ");
             std::cout << (available.contains(i) ? " [a] " : " [ ] ");
             std::cout << (pdb.IsTxAvailable(i) ? " [A] " : " [ ] ");
