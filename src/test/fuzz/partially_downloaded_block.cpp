@@ -101,7 +101,8 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
 
         // The fuzz data provider can generate blocks with duplicate transactions.
         // Consider all occurences of a transaction as available.
-        if (pool.exists(GenTxid::Txid(tx->GetHash())) || pool.exists(GenTxid::Txid(tx->GetWitnessHash()))) {
+        if (pool.exists(GenTxid::Txid(tx->GetHash()))) {
+            // TODO: || pool.exists(GenTxid::Wtxid(tx->GetWitnessHash()))) {
             available.insert(i);
         }
     }
