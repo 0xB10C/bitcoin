@@ -55,17 +55,27 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         return;
     }
 
-    CBlockHeaderAndShortTxIDs cmpctblock{*block, fuzzed_data_provider.ConsumeIntegral<uint64_t>(), {}};
+    std::set<uint32_t> prefill_txns{};
+    bool prefill{fuzzed_data_provider.ConsumeBool()};
+    if (prefill) {
+        size_t count{fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, block->vtx.size())};
+        for (size_t i = 0; i < count; i++) {
+            uint16_t index = fuzzed_data_provider.ConsumeIntegralInRange<uint16_t>(1, block->vtx.size());
+            prefill_txns.insert(index);
+        }
+    }
+
+    CBlockHeaderAndShortTxIDs cmpctblock{*block, fuzzed_data_provider.ConsumeIntegral<uint64_t>(), prefill_txns};
 
     bilingual_str error;
     CTxMemPool pool{MemPoolOptionsForTest(g_setup->m_node), error};
     Assert(error.empty());
     PartiallyDownloadedBlock pdb{&pool};
 
-    // Set of available transactions (mempool or extra_txn)
-    std::set<uint16_t> available;
+    // Set of available transactions (mempool, extra_txn, or prefilled)
+    std::set<GenTxid> available;
     // The coinbase is always available
-    available.insert(0);
+    available.insert(GenTxid::Wtxid(block->vtx[0]->GetWitnessHash()));
 
     std::vector<CTransactionRef> extra_txn;
     for (size_t i = 1; i < block->vtx.size(); ++i) {
@@ -74,15 +84,19 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         bool add_to_extra_txn{fuzzed_data_provider.ConsumeBool()};
         bool add_to_mempool{fuzzed_data_provider.ConsumeBool()};
 
+        if(prefill_txns.contains(i)) {
+            available.insert(GenTxid::Wtxid(block->vtx[i]->GetWitnessHash()));
+        }
+
         if (add_to_extra_txn) {
             extra_txn.emplace_back(tx);
-            available.insert(i);
+            available.insert(GenTxid::Wtxid(block->vtx[i]->GetWitnessHash()));
         }
 
         if (add_to_mempool && !pool.exists(GenTxid::Txid(tx->GetHash()))) {
             LOCK2(cs_main, pool.cs);
             AddToMempool(pool, ConsumeTxMemPoolEntry(fuzzed_data_provider, *tx));
-            available.insert(i);
+            available.insert(GenTxid::Wtxid(block->vtx[i]->GetWitnessHash()));
         }
     }
 
@@ -93,6 +107,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
     // FillBlock should never return READ_STATUS_OK if that is the case.
     bool skipped_missing{false};
     for (size_t i = 0; i < cmpctblock.BlockTxCount(); i++) {
+        // TODO: update docs
         // If init_status == READ_STATUS_OK then a available transaction in the
         // compact block (i.e. IsTxAvailable(i) == true) implies that we marked
         // that transaction as available above (i.e. available.count(i) > 0).
@@ -100,7 +115,7 @@ FUZZ_TARGET(partially_downloaded_block, .init = initialize_pdb)
         // collisions (i.e. available.count(i) > 0 does not imply
         // IsTxAvailable(i) == true).
         if (init_status == READ_STATUS_OK) {
-            assert(!pdb.IsTxAvailable(i) || available.count(i) > 0);
+            assert(!pdb.IsTxAvailable(i) || available.contains(GenTxid::Wtxid(block->vtx[i]->GetWitnessHash())));
         }
 
         bool skip{fuzzed_data_provider.ConsumeBool()};
