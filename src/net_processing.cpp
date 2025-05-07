@@ -857,6 +857,11 @@ private:
     std::shared_ptr<const CBlockHeaderAndShortTxIDs> m_most_recent_compact_block GUARDED_BY(m_most_recent_block_mutex);
     uint256 m_most_recent_block_hash GUARDED_BY(m_most_recent_block_mutex);
     std::unique_ptr<const std::map<uint256, CTransactionRef>> m_most_recent_block_txs GUARDED_BY(m_most_recent_block_mutex);
+    /** A best-effort pair of block hash and prefill candidates for compact block
+     * annoucements where a transaction index inclusion in the set indicates that
+     * the transaction is likely a good candidate to prefill for compact block
+     * annoucements related to the block hash. TODO: lock? */
+    std::pair<uint256, std::set<uint32_t>> m_compact_block_prefill_candidates GUARDED_BY(m_most_recent_block_mutex);
 
     // Data about the low-work headers synchronization, aggregated from all peers' HeadersSyncStates.
     /** Mutex guarding the other m_headers_presync_* variables. */
@@ -2012,7 +2017,15 @@ void PeerManagerImpl::BlockDisconnected(const std::shared_ptr<const CBlock> &blo
  */
 void PeerManagerImpl::NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock>& pblock)
 {
-    auto pcmpctblock = std::make_shared<const CBlockHeaderAndShortTxIDs>(*pblock, FastRandomContext().rand64());
+
+    std::set<uint32_t> prefill_candidates;
+    {
+        LOCK(m_most_recent_block_mutex);
+        if (pblock->GetHash() == m_compact_block_prefill_candidates.first) {
+            prefill_candidates = m_compact_block_prefill_candidates.second;
+        }
+    }
+    auto pcmpctblock = std::make_shared<const CBlockHeaderAndShortTxIDs>(*pblock, FastRandomContext().rand64(), prefill_candidates);
 
     LOCK(cs_main);
 
@@ -2367,7 +2380,15 @@ void PeerManagerImpl::ProcessGetBlockData(CNode& pfrom, Peer& peer, const CInv& 
                 if (a_recent_compact_block && a_recent_compact_block->header.GetHash() == pindex->GetBlockHash()) {
                     MakeAndPushMessage(pfrom, NetMsgType::CMPCTBLOCK, *a_recent_compact_block);
                 } else {
-                    CBlockHeaderAndShortTxIDs cmpctblock{*pblock, m_rng.rand64()};
+                    // TODO: by reference requires holding mutex 'm_most_recent_block_mutex'
+                    std::set<uint32_t> prefill_candidates{};
+                    {
+                        LOCK(m_most_recent_block_mutex);
+                        if (pblock->GetHash() == m_compact_block_prefill_candidates.first) {
+                            prefill_candidates = m_compact_block_prefill_candidates.second;
+                        }
+                    }
+                    CBlockHeaderAndShortTxIDs cmpctblock{*pblock, m_rng.rand64(), prefill_candidates};
                     MakeAndPushMessage(pfrom, NetMsgType::CMPCTBLOCK, cmpctblock);
                 }
             } else {
@@ -3391,6 +3412,13 @@ void PeerManagerImpl::ProcessCompactBlockTxns(CNode& pfrom, Peer& peer, const Bl
             // though the block was successfully read, and rely on the
             // handling in ProcessNewBlock to ensure the block index is
             // updated, etc.
+            if (status == READ_STATUS_OK) {
+                // However, only update the prefill candidates cache if CheckBlock succeeded
+                // TODO: If any received transactions helped us to reconstruct the block, store their txids/index's
+                // to be able to prefill them in compact block annoucements we sent.
+                LOCK(m_most_recent_block_mutex);
+                m_compact_block_prefill_candidates = std::make_pair(block_transactions.blockhash, partialBlock.PrefillCandidates());
+            }
             RemoveBlockRequest(block_transactions.blockhash, pfrom.GetId()); // it is now an empty pointer
             fBlockRead = true;
             // mapBlockSource is used for potentially punishing peers and
@@ -5670,7 +5698,15 @@ bool PeerManagerImpl::SendMessages(CNode* pto)
                         CBlock block;
                         const bool ret{m_chainman.m_blockman.ReadBlock(block, *pBestIndex)};
                         assert(ret);
-                        CBlockHeaderAndShortTxIDs cmpctblock{block, m_rng.rand64()};
+
+                        std::set<uint32_t> prefill_candidates{};
+                        {
+                            LOCK(m_most_recent_block_mutex);
+                            if (block.GetHash() == m_compact_block_prefill_candidates.first) {
+                                prefill_candidates = m_compact_block_prefill_candidates.second;
+                            }
+                        }
+                        CBlockHeaderAndShortTxIDs cmpctblock{block, m_rng.rand64(), prefill_candidates};
                         MakeAndPushMessage(*pto, NetMsgType::CMPCTBLOCK, cmpctblock);
                     }
                     state.pindexBestHeaderSent = pBestIndex;

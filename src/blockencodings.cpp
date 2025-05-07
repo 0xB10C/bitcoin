@@ -17,15 +17,26 @@
 
 #include <unordered_map>
 
-CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs(const CBlock& block, const uint64_t nonce) :
-        nonce(nonce),
-        shorttxids(block.vtx.size() - 1), prefilledtxn(1), header(block) {
+CBlockHeaderAndShortTxIDs::CBlockHeaderAndShortTxIDs(const CBlock& block, const uint64_t nonce, const std::set<uint32_t>& prefill_candidates) :
+        nonce(nonce), header(block) {
+    Assume(prefill_candidates.contains(0));
+    LogDebug(BCLog::CMPCTBLOCK, "Using %d prefill candidates to prefill the cmpctblock %s\n", prefill_candidates.size(), block.GetHash().ToString());
+
+    prefilledtxn.reserve(prefill_candidates.size());
+    shorttxids.reserve(block.vtx.size() - prefill_candidates.size());
     FillShortTxIDSelector();
-    //TODO: Use our mempool prior to block acceptance to predictively fill more than just the coinbase
-    prefilledtxn[0] = {0, block.vtx[0]};
-    for (size_t i = 1; i < block.vtx.size(); i++) {
-        const CTransaction& tx = *block.vtx[i];
-        shorttxids[i - 1] = GetShortID(tx.GetWitnessHash());
+
+    uint16_t prefill_index = 0;
+    for (uint16_t i = 0; i < block.vtx.size(); i++) {
+        // Always prefill the coinbase, even if the caller didn't include it as a candidate.
+        if(prefill_candidates.contains(i) || i == 0) {
+            prefilledtxn.push_back({prefill_index, block.vtx[i]});
+            prefill_index = 0;
+        } else {
+            const CTransaction& tx = *block.vtx[i];
+            shorttxids.push_back(GetShortID(tx.GetWitnessHash()));
+            prefill_index++;
+        }
     }
 }
 
@@ -73,6 +84,15 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
             return READ_STATUS_INVALID;
         }
         txn_available[lastprefilledindex] = cmpctblock.prefilledtxn[i].tx;
+
+        // TODO: check if a prefilled is in our mempool, if it is:
+        // count size and numbers for logging
+        {
+            LOCK(pool->cs); // TODO: locking in a tight loop?
+            if (!pool->exists(GenTxid::Wtxid(cmpctblock.prefilledtxn[i].tx->GetWitnessHash()))) {
+                prefill_candidates.insert(lastprefilledindex);
+            }
+        }
     }
     prefilled_count = cmpctblock.prefilledtxn.size();
 
@@ -142,6 +162,7 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
         if (idit != shorttxids.end()) {
             if (!have_txn[idit->second]) {
                 txn_available[idit->second] = extra_txn[i];
+                prefill_candidates.insert(idit->second);
                 have_txn[idit->second]  = true;
                 mempool_count++;
                 extra_count++;
@@ -166,7 +187,6 @@ ReadStatus PartiallyDownloadedBlock::InitData(const CBlockHeaderAndShortTxIDs& c
         if (mempool_count == shorttxids.size())
             break;
     }
-
     LogDebug(BCLog::CMPCTBLOCK, "Initialized PartiallyDownloadedBlock for block %s using a cmpctblock of size %lu\n", cmpctblock.header.GetHash().ToString(), GetSerializeSize(cmpctblock));
 
     return READ_STATUS_OK;
@@ -180,6 +200,11 @@ bool PartiallyDownloadedBlock::IsTxAvailable(size_t index) const
     return txn_available[index] != nullptr;
 }
 
+std::set<uint32_t> PartiallyDownloadedBlock::PrefillCandidates() const
+{
+    return prefill_candidates;
+}
+
 ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<CTransactionRef>& vtx_missing)
 {
     if (header.IsNull()) return READ_STATUS_INVALID;
@@ -191,12 +216,15 @@ ReadStatus PartiallyDownloadedBlock::FillBlock(CBlock& block, const std::vector<
     size_t tx_missing_offset = 0;
     for (size_t i = 0; i < txn_available.size(); i++) {
         if (!txn_available[i]) {
-            if (vtx_missing.size() <= tx_missing_offset)
+            if (vtx_missing.size() <= tx_missing_offset) {
                 return READ_STATUS_INVALID;
+            }
+            prefill_candidates.insert(i);
             block.vtx[i] = vtx_missing[tx_missing_offset++];
         } else
             block.vtx[i] = std::move(txn_available[i]);
     }
+    LogDebug(BCLog::CMPCTBLOCK, "[compact block processing] %d new prefill_candidates (total %d) from requested transacitons\n", vtx_missing.size(), prefill_candidates.size());
 
     // Make sure we can't call FillBlock again.
     header.SetNull();
