@@ -505,3 +505,31 @@ jobs:
 
       - name: Save caches
         uses: ./.github/actions/save-caches
+
+  multiprocess-i686-debug:
+    name: 'multiprocess, i686, DEBUG'
+    runs-on: ${{ vars.USE_CIRRUS_RUNNERS == 'true' && 'ghcr.io/cirruslabs/ubuntu-runner-amd64:24.04-xl' || 'ubuntu-24.04' }}
+
+    if: ${{ vars.SKIP_BRANCH_PUSH != 'true' || github.event_name == 'pull_request' }}
+    timeout-minutes: 120
+    env:
+      FILE_ENV: "./ci/test/00_setup_env_i686_multiprocess.sh"
+      DANGER_CI_ON_HOST_FOLDERS: 1
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set CI directories
+        run: |
+          echo "BASE_ROOT_DIR=${{ runner.temp }}" >> "$GITHUB_ENV"
+          echo "BASE_BUILD_DIR=${{ runner.temp }}/build-multiprocess" >> "$GITHUB_ENV"
+
+      - name: Restore caches
+        id: restore-caches
+        uses: ./.github/actions/restore-caches
+
+      - name: CI script
+        run: ./ci/test_run_all.sh
+
+      - name: Save caches
+        uses: ./.github/actions/save-caches
