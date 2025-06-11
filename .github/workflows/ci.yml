@@ -20,6 +20,8 @@ concurrency:
 env:
   CI_FAILFAST_TEST_LEAVE_DANGLING: 1  # GHA does not care about dangling processes and setting this variable avoids killing the CI script itself on error
   CCACHE_MAXSIZE: 5G # We get 10GB x num_runners on Cirrus, so use up to 5G per job x 12 jobs = 60GB maximum used
+  DOCKERHUB_ORG: will8clark
+  DOCKERHUB_REPO: core-testing
 
 defaults:
   run:
@@ -308,6 +310,11 @@ jobs:
         # TODO: previously this also hashed "ci/test/00_setup_env_win64.sh"
         uses: ./.github/actions/restore-caches
 
+      - name: Set up docker build environment
+        uses: ./.github/actions/docker-build
+        with:
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: CI script
         run: ./ci/test_run_all.sh
 
@@ -419,6 +426,11 @@ jobs:
         # so any settings will need to be written to the settings env file:
         run: sed -i "s|\${INSTALL_BCC_TRACING_TOOLS}|true|g" ./ci/test/00_setup_env_native_asan.sh
 
+      - name: Set up docker build environment
+        uses: ./.github/actions/docker-build
+        with:
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: CI script
         run: ./ci/test_run_all.sh
 
@@ -447,6 +459,11 @@ jobs:
         id: restore-caches
         uses: ./.github/actions/restore-caches
 
+      - name: Set up docker build environment
+        uses: ./.github/actions/docker-build
+        with:
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: CI script
         run: ./ci/test_run_all.sh
 
@@ -474,6 +491,11 @@ jobs:
       - name: Restore caches
         id: restore-caches
         uses: ./.github/actions/restore-caches
+
+      - name: Set up docker build environment
+        uses: ./.github/actions/docker-build
+        with:
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: CI script
         run: ./ci/test_run_all.sh
@@ -504,6 +526,11 @@ jobs:
         id: restore-caches
         uses: ./.github/actions/restore-caches
 
+      - name: Set up docker build environment
+        uses: ./.github/actions/docker-build
+        with:
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: CI script
         run: ./ci/test_run_all.sh
 
@@ -532,6 +559,11 @@ jobs:
         id: restore-caches
         uses: ./.github/actions/restore-caches
 
+      - name: Set up docker build environment
+        uses: ./.github/actions/docker-build
+        with:
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: CI script
         run: ./ci/test_run_all.sh
 
@@ -559,6 +591,11 @@ jobs:
       - name: Restore caches
         id: restore-caches
         uses: ./.github/actions/restore-caches
+
+      - name: Set up docker build environment
+        uses: ./.github/actions/docker-build
+        with:
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: CI script
         run: ./ci/test_run_all.sh
@@ -592,6 +629,11 @@ jobs:
         id: restore-caches
         uses: ./.github/actions/restore-caches
 
+      - name: Set up docker build environment
+        uses: ./.github/actions/docker-build
+        with:
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: CI script
         run: ./ci/test_run_all.sh
 
@@ -624,6 +666,11 @@ jobs:
         id: restore-caches
         uses: ./.github/actions/restore-caches
 
+      - name: Set up docker build environment
+        uses: ./.github/actions/docker-build
+        with:
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: CI script
         run: ./ci/test_run_all.sh
 
@@ -651,6 +698,11 @@ jobs:
       - name: Restore caches
         id: restore-caches
         uses: ./.github/actions/restore-caches
+
+      - name: Set up docker build environment
+        uses: ./.github/actions/docker-build
+        with:
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: CI script
         run: ./ci/test_run_all.sh
@@ -680,6 +732,11 @@ jobs:
         id: restore-caches
         uses: ./.github/actions/restore-caches
 
+      - name: Set up docker build environment
+        uses: ./.github/actions/docker-build
+        with:
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: CI script
         run: ./ci/test_run_all.sh
 
@@ -707,6 +764,11 @@ jobs:
       - name: Restore caches
         id: restore-caches
         uses: ./.github/actions/restore-caches
+
+      - name: Set up docker build environment
+        uses: ./.github/actions/docker-build
+        with:
+          dockerhub-token: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: CI script
         run: ./ci/test_run_all.sh
