@@ -19,6 +19,7 @@ concurrency:
 
 env:
   CI_FAILFAST_TEST_LEAVE_DANGLING: 1  # GHA does not care about dangling processes and setting this variable avoids killing the CI script itself on error
+  CCACHE_MAXSIZE: 5G # We get 10GB x num_runners on Cirrus, so use up to 5G per job x 12 jobs = 60GB maximum used
 
 defaults:
   run:
@@ -34,6 +35,7 @@ jobs:
     timeout-minutes: 360  # Use maximum time, see https://docs.github.com/en/actions/writing-workflows/workflow-syntax-for-github-actions#jobsjob_idtimeout-minutes. Assuming a worst case time of 1 hour per commit, this leads to a --max-count=6 below.
     env:
       MAX_COUNT: 6
+      CCACHE_MAXSIZE: 500M
     steps:
       - name: Determine fetch depth
         run: echo "FETCH_DEPTH=$((${{ github.event.pull_request.commits }} + 2))" >> "$GITHUB_ENV"
@@ -110,8 +112,9 @@ jobs:
             job-name: 'macOS 14 native, arm64, fuzz'
 
     env:
-      DANGER_RUN_CI_ON_HOST: 1
       BASE_ROOT_DIR: ${{ github.workspace }}
+      CCACHE_MAXSIZE: 500M
+      DANGER_RUN_CI_ON_HOST: 1
 
     steps:
       - name: Checkout
@@ -165,6 +168,7 @@ jobs:
     if: ${{ vars.SKIP_BRANCH_PUSH != 'true' || github.event_name == 'pull_request' }}
 
     env:
+      CCACHE_MAXSIZE: 500M
       PYTHONUTF8: 1
       TEST_RUNNER_TIMEOUT_FACTOR: 40
 
@@ -326,6 +330,7 @@ jobs:
     needs: windows-cross
 
     env:
+      CCACHE_MAXSIZE: 500M
       PYTHONUTF8: 1
       TEST_RUNNER_TIMEOUT_FACTOR: 40
 
