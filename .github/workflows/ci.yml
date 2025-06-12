@@ -22,6 +22,7 @@ env:
   CCACHE_MAXSIZE: 5G # We get 10GB x num_runners on Cirrus, so use up to 5G per job x 12 jobs = 60GB maximum used
   DOCKERHUB_ORG: will8clark
   DOCKERHUB_REPO: core-testing
+  USE_BUILDX: 1
 
 defaults:
   run:
