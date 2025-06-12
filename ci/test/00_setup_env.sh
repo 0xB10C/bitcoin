@@ -34,8 +34,10 @@ if [ -n "${FILE_ENV}" ]; then
 fi
 
 echo "Fallback to default values in env (if not yet set)"
-# The number of parallel jobs to pass down to make and test_runner.py
+# The number of parallel jobs to pass down to make
 export MAKEJOBS=${MAKEJOBS:--j$(nproc)}
+# The number of parallel jobs to pass down to make
+export TESTJOBS=${TESTJOBS:--j$(( $(nproc) * 2 ))}
 # Whether to prefer BusyBox over GNU utilities
 export USE_BUSY_BOX=${USE_BUSY_BOX:-false}
 
