@@ -119,6 +119,12 @@ if [ -z "$DANGER_RUN_CI_ON_HOST" ]; then
   # When detecting podman-docker, `--external` should be added.
   docker image prune --force --filter "label=$CI_IMAGE_LABEL"
 
+  # In Linux CI runs, use a ramdisk to speed up execution
+  MAYBE_USE_TMPFS=""
+  if [ -n "$CI" ] && [ "$(uname -s)" = "Linux" ]; then
+      MAYBE_USE_TMPFS="--tmpfs /mnt/tmp:size=6g"
+  fi
+
   # Append $USER to /tmp/env to support multi-user systems and $CONTAINER_NAME
   # to allow support starting multiple runs simultaneously by the same user.
   # shellcheck disable=SC2086
@@ -128,6 +134,7 @@ if [ -z "$DANGER_RUN_CI_ON_HOST" ]; then
                   --mount "${CI_DEPENDS_MOUNT}" \
                   --mount "${CI_DEPENDS_SOURCES_MOUNT}" \
                   --mount "${CI_PREVIOUS_RELEASES_MOUNT}" \
+                  $MAYBE_USE_TMPFS \
                   ${CI_BUILD_MOUNT} \
                   --env-file /tmp/env-$USER-$CONTAINER_NAME \
                   --name "$CONTAINER_NAME" \

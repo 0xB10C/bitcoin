@@ -155,9 +155,18 @@ if [ "$RUN_UNIT_TESTS_SEQUENTIAL" = "true" ]; then
 fi
 
 if [ "$RUN_FUNCTIONAL_TESTS" = "true" ]; then
-  # parses TEST_RUNNER_EXTRA as an array which allows for multiple arguments such as TEST_RUNNER_EXTRA='--exclude "rpc_bind.py --ipv6"'
-  eval "TEST_RUNNER_EXTRA=($TEST_RUNNER_EXTRA)"
-  LD_LIBRARY_PATH="${DEPENDS_DIR}/${HOST}/lib" test/functional/test_runner.py --ci "${TESTJOBS}" --tmpdirprefix "${BASE_SCRATCH_DIR}"/test_runner/ --ansi --combinedlogslen=99999999 --timeout-factor="${TEST_RUNNER_TIMEOUT_FACTOR}" "${TEST_RUNNER_EXTRA[@]}" --quiet --failfast
+  # Convert TEST_RUNNER_EXTRA to array safely so we can append to it
+  IFS=' ' read -r -a TEST_RUNNER_EXTRA <<< "$TEST_RUNNER_EXTRA"
+  # In Linux CI runs, check for tmpfs at /mnt/tmp
+  if [ -n "$CI" ] && [ "$(uname -s)" = "Linux" ] && [ -d /mnt/tmp ]; then
+    # Verify tmpfs is mounted
+    if mountpoint -q /mnt/tmp; then
+      TEST_RUNNER_EXTRA+=("--cachedir=/mnt/tmp/cache" "--tmpdir=/mnt/tmp")
+    else
+      echo "::warning title=$GITHUB_JOB ramdisk failure::WARNING: creation or mounting of a ramdisk for functional tests failed"
+    fi
+  fi
+  LD_LIBRARY_PATH="${DEPENDS_DIR}/${HOST}/lib" test/functional/test_runner.py --ci "${TESTJOBS}" --tmpdirprefix "${BASE_SCRATCH_DIR}/test_runner/" --ansi --combinedlogslen=99999999 --timeout-factor="${TEST_RUNNER_TIMEOUT_FACTOR}" "${TEST_RUNNER_EXTRA[@]}" --quiet --failfast
 fi
 
 if [ "${RUN_TIDY}" = "true" ]; then
