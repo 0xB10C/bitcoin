@@ -3887,6 +3887,14 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             if (peer->m_addr_token_bucket < 1.0) {
                 if (rate_limited) {
                     ++num_rate_limit;
+                    LOCK(pfrom.m_subver_mutex);
+                    bool match = addr.ToStringAddr() == pfrom.addr.ToStringAddr();
+                    LogDebug(BCLog::NET, "Rate-limited addr %s%s from peer=%d addr=%s ua=%s processed=%d rate-limited=%d age=%dms type=%s\n",
+                             addr.ToStringAddrPort(), match ? " SELF-ANNOUNCEMENT!?" : "", pfrom.GetId(), pfrom.m_addr_name, pfrom.cleanSubVer,
+                             peer->m_addr_processed + num_proc, peer->m_addr_rate_limited + num_rate_limit,
+                             Ticks<std::chrono::milliseconds>(current_time - pfrom.m_connected),
+                             pfrom.ConnectionTypeAsString()
+                    );
                     continue;
                 }
             } else {
