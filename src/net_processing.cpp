@@ -3886,6 +3886,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // Apply rate limiting.
             if (peer->m_addr_token_bucket < 1.0) {
                 if (rate_limited) {
+                    LOCK(pfrom.m_subver_mutex);
+                    LogDebug(BCLog::NET, "Rate-limited addr %s from peer=%d (addr=%s; ua=%s)\n", addr.ToStringAddrPort(), pfrom.GetId(), pfrom.m_addr_name, pfrom.cleanSubVer);
                     ++num_rate_limit;
                     continue;
                 }
