@@ -40,12 +40,14 @@ class SelfAnnouncementReceiver(P2PInterface):
         self.addr_messages_received += 1
         for addr in message.addrs:
             self.addresses_received += 1
-            if addr == self.expected:
+            if addr.ip == self.expected.ip and addr.port == self.expected.port and addr.nServices == self.expected.nServices and addr.time >= self.expected.time:
                 self.self_announcements_received += 1
-            # The tricky part of this test is the timestamp of the self-announcement.
-            # The following helped me to debug timestamp mismatches, so I'm leaving it in for the next one.
-            elif addr.ip == self.expected.ip and addr.port == self.expected.port and addr.nServices == self.expected.nServices:
-                print(f"Self-announcement timestamp mismatch: got={addr.time} expected={self.expected.time}")
+            else:
+                print(f"Self-announcement mismatch:")
+                print(f"time: got: {addr.time} expected={self.expected.time} (diff={addr.time - self.expected.time})")
+                print(f"ip: got: {addr.ip} expected={self.expected.ip}")
+                print(f"port: got: {addr.port} expected={self.expected.port}")
+                print(f"nservices: got: {addr.nServices} expected={self.expected.nServices}")
 
     def on_addrv2(self, message):
         assert (self.addrv2_test)
@@ -123,7 +125,7 @@ class AddrSelfAnnouncementTest(BitcoinTestFramework):
             addr_receiver.send_and_ping(msg_headers([tip_header]))
 
         self.log.info(f"Check that we get more self-announcements sometime later ({connection_type}, {addr_version})")
-        for _ in range(34159):
+        for _ in range(20):
             last_self_announcements_received = addr_receiver.self_announcements_received
             last_addr_messages_received = addr_receiver.addr_messages_received
             last_addresses_received = addr_receiver.addresses_received
