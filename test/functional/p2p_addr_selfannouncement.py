@@ -119,7 +119,7 @@ class AddrSelfAnnouncementTest(BitcoinTestFramework):
             addr_receiver.send_and_ping(msg_headers([tip_header]))
 
         self.log.info(f"Check that we get more self-announcements sometime later ({connection_type}, {addr_version})")
-        for _ in range(5):
+        for _ in range(500):
             last_self_announcements_received = addr_receiver.self_announcements_received
             last_addr_messages_received = addr_receiver.addr_messages_received
             last_addresses_received = addr_receiver.addresses_received
