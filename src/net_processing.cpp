@@ -3149,6 +3149,8 @@ void PeerManagerImpl::ProcessPackageResult(const node::PackageToValidate& packag
     const auto& package = package_to_validate.m_txns;
     const auto& senders = package_to_validate.m_senders;
 
+    LogDebug(BCLog::TXPACKAGES, "in ProcessPackageResult ######## pkg_size=%d", package.size());
+
     if (package_result.m_state.IsInvalid()) {
         m_txdownloadman.MempoolRejectedPackage(package);
     }
@@ -3176,6 +3178,7 @@ void PeerManagerImpl::ProcessPackageResult(const node::PackageToValidate& packag
                 case MempoolAcceptResult::ResultType::INVALID:
                 case MempoolAcceptResult::ResultType::DIFFERENT_WITNESS:
                 {
+                    LogDebug(BCLog::TXPACKAGES, "INVALID ########");
                     // Don't add to vExtraTxnForCompact, as these transactions should have already been
                     // added there when added to the orphanage or rejected for TX_RECONSIDERABLE.
                     // This should be updated if package submission is ever used for transactions
@@ -4495,7 +4498,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
             if (package_to_validate) {
                 const auto package_result{ProcessNewPackage(m_chainman.ActiveChainstate(), m_mempool, package_to_validate->m_txns, /*test_accept=*/false, /*client_maxfeerate=*/std::nullopt)};
-                LogDebug(BCLog::TXPACKAGES, "package evaluation for %s: %s\n", package_to_validate->ToString(),
+                LogDebug(BCLog::TXPACKAGES, "package evaluation for (package_to_validate ################) %s: %s\n", package_to_validate->ToString(),
                          package_result.m_state.IsValid() ? "package accepted" : "package rejected");
                 ProcessPackageResult(package_to_validate.value(), package_result);
             }
@@ -4515,7 +4518,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         if (state.IsInvalid()) {
             if (auto package_to_validate{ProcessInvalidTx(pfrom.GetId(), ptx, state, /*first_time_failure=*/true)}) {
                 const auto package_result{ProcessNewPackage(m_chainman.ActiveChainstate(), m_mempool, package_to_validate->m_txns, /*test_accept=*/false, /*client_maxfeerate=*/std::nullopt)};
-                LogDebug(BCLog::TXPACKAGES, "package evaluation for %s: %s\n", package_to_validate->ToString(),
+                LogDebug(BCLog::TXPACKAGES, "package evaluation for (IsInvalid###################) %s: %s\n", package_to_validate->ToString(),
                          package_result.m_state.IsValid() ? "package accepted" : "package rejected");
                 ProcessPackageResult(package_to_validate.value(), package_result);
             }

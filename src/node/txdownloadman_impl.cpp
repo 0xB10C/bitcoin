@@ -358,7 +358,12 @@ node::RejectedTxTodo TxDownloadManagerImpl::MempoolRejectedTx(const CTransaction
     // Populated if failure is reconsiderable and eligible package is found.
     std::optional<node::PackageToValidate> package_to_validate;
 
+    LogDebug(BCLog::MEMPOOL, "############## first_time_failure=%f, result=%s, %s (wtxid=%s)\n", first_time_failure, state.ToString(), tx.GetHash().ToString(), tx.GetWitnessHash().ToString());
+
     if (state.GetResult() == TxValidationResult::TX_MISSING_INPUTS) {
+
+        LogDebug(BCLog::MEMPOOL, "########## TxValidationResult::TX_MISSING_INPUTS \n");
+
         // Only process a new orphan if this is a first time failure, as otherwise it must be either
         // already in orphanage or from 1p1c processing.
         if (first_time_failure && !RecentRejectsFilter().contains(ptx->GetWitnessHash().ToUint256())) {
@@ -387,6 +392,8 @@ node::RejectedTxTodo TxDownloadManagerImpl::MempoolRejectedTx(const CTransaction
                     rejected_parent_reconsiderable = parent_txid;
                 }
             }
+
+            LogDebug(BCLog::MEMPOOL, "@@@@@@@@@@@@@@@@ fRejectedParents: %d \n", fRejectedParents);
             if (!fRejectedParents) {
                 // Filter parents that we already have.
                 // Exclude m_lazy_recent_rejects_reconsiderable: the missing parent may have been
@@ -436,6 +443,7 @@ node::RejectedTxTodo TxDownloadManagerImpl::MempoolRejectedTx(const CTransaction
             }
         }
     } else if (state.GetResult() == TxValidationResult::TX_WITNESS_STRIPPED) {
+        LogDebug(BCLog::MEMPOOL, "########## TxValidationResult::TX_WITNESS_STRIPPED \n");
         add_extra_compact_tx = false;
     } else {
         // We can add the wtxid of this transaction to our reject filter.
