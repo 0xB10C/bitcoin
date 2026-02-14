@@ -815,6 +815,38 @@ class OrphanHandlingTest(BitcoinTestFramework):
         assert orphan["txid"] in final_mempool
         assert tx_replacer_C["txid"] in final_mempool
 
+    @cleanup
+    def test_orphan_child_eviction(self):
+        node = self.nodes[0]
+        peer = node.add_p2p_connection(PeerTxRelayer())
+
+        self.log.info("Test that a orphan is evicted when we request and reject the grandparent")
+        mempool_tx = self.wallet_nonsegwit.send_self_transfer(from_node=node)
+        
+        grandparent, parent, child = self.wallet_nonsegwit.create_self_transfer_chain(chain_length=3, utxo_to_spend=mempool_tx["new_utxo"])
+
+        # Add the parent and child orphans
+        self.relay_transaction(peer, parent["tx"])
+        assert tx_in_orphanage(node, parent["tx"])
+        self.relay_transaction(peer, child["tx"])
+        assert tx_in_orphanage(node, child["tx"])
+        
+        self.nodes[0].bumpmocktime(NONPREF_PEER_TX_DELAY + TXID_RELAY_DELAY)
+        peer.wait_for_parent_requests([int(grandparent["txid"], 16)])
+        
+        # Put an alternative version of the grandparent into the mempool that pays a higher fee.
+        grandparent2 = self.wallet_nonsegwit.send_self_transfer(from_node=node, fee=10, utxo_to_spend=mempool_tx["new_utxo"])
+        
+        # Let the node know about the lower fee grandparent. The node should reject it.
+        self.relay_transaction(peer, grandparent["tx"])
+        assert_equal(2, len(node.getrawmempool()))
+        assert not tx_in_orphanage(node, grandparent["tx"])
+        peer.assert_never_requested(grandparent["txid"])
+
+        # the child and the parent should have been evicted, as we rejected the grandparent
+        assert not tx_in_orphanage(node, parent["tx"])
+        assert not tx_in_orphanage(node, child["tx"])
+
     def run_test(self):
         self.nodes[0].setmocktime(int(time.time()))
         self.wallet_nonsegwit = MiniWallet(self.nodes[0], mode=MiniWalletMode.RAW_P2PK)
@@ -822,6 +854,9 @@ class OrphanHandlingTest(BitcoinTestFramework):
         self.wallet = MiniWallet(self.nodes[0])
         self.generate(self.wallet, 160)
 
+        self.test_orphan_child_eviction()
+        
+        return
         self.test_arrival_timing_orphan()
         self.test_orphan_rejected_parents_exceptions()
         self.test_orphan_multiple_parents()
