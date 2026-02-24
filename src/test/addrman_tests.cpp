@@ -27,6 +27,8 @@ using util::ToString;
 
 static auto EMPTY_NETGROUPMAN{NetGroupManager::NoAsmap()};
 static const bool DETERMINISTIC{true};
+static const uint32_t TEST_ASN = 1245;
+static const uint32_t TEST_SOURCE_ASN = 2345;
 
 static int32_t GetCheckRatio(const NodeContext& node_ctx)
 {
@@ -505,7 +507,7 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_tried_bucket_legacy)
     CNetAddr source1 = ResolveIP("250.1.1.1");
 
 
-    AddrInfo info1 = AddrInfo(addr1, source1);
+    AddrInfo info1 = AddrInfo(addr1, TEST_ASN, source1, TEST_SOURCE_ASN);
 
     uint256 nKey1 = (HashWriter{} << 1).GetHash();
     uint256 nKey2 = (HashWriter{} << 2).GetHash();
@@ -518,7 +520,7 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_tried_bucket_legacy)
 
     // Test: Two addresses with same IP but different ports can map to
     //  different buckets because they have different keys.
-    AddrInfo info2 = AddrInfo(addr2, source1);
+    AddrInfo info2 = AddrInfo(addr2, TEST_ASN, source1, TEST_SOURCE_ASN);
 
     BOOST_CHECK(info1.GetKey() != info2.GetKey());
     BOOST_CHECK(info1.GetTriedBucket(nKey1, EMPTY_NETGROUPMAN) != info2.GetTriedBucket(nKey1, EMPTY_NETGROUPMAN));
@@ -527,7 +529,10 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_tried_bucket_legacy)
     for (int i = 0; i < 255; i++) {
         AddrInfo infoi = AddrInfo(
             CAddress(ResolveService("250.1.1." + ToString(i)), NODE_NONE),
-            ResolveIP("250.1.1." + ToString(i)));
+            TEST_ASN,
+            ResolveIP("250.1.1." + ToString(i)),
+            TEST_SOURCE_ASN
+        );
         int bucket = infoi.GetTriedBucket(nKey1, EMPTY_NETGROUPMAN);
         buckets.insert(bucket);
     }
@@ -539,7 +544,10 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_tried_bucket_legacy)
     for (int j = 0; j < 255; j++) {
         AddrInfo infoj = AddrInfo(
             CAddress(ResolveService("250." + ToString(j) + ".1.1"), NODE_NONE),
-            ResolveIP("250." + ToString(j) + ".1.1"));
+            TEST_ASN,
+            ResolveIP("250." + ToString(j) + ".1.1"),
+            TEST_SOURCE_ASN
+        );
         int bucket = infoj.GetTriedBucket(nKey1, EMPTY_NETGROUPMAN);
         buckets.insert(bucket);
     }
@@ -555,7 +563,7 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_new_bucket_legacy)
 
     CNetAddr source1 = ResolveIP("250.1.2.1");
 
-    AddrInfo info1 = AddrInfo(addr1, source1);
+    AddrInfo info1 = AddrInfo(addr1, TEST_ASN, source1, TEST_SOURCE_ASN);
 
     uint256 nKey1 = (HashWriter{} << 1).GetHash();
     uint256 nKey2 = (HashWriter{} << 2).GetHash();
@@ -569,7 +577,7 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_new_bucket_legacy)
     BOOST_CHECK(info1.GetNewBucket(nKey1, EMPTY_NETGROUPMAN) != info1.GetNewBucket(nKey2, EMPTY_NETGROUPMAN));
 
     // Test: Ports should not affect bucket placement in the addr
-    AddrInfo info2 = AddrInfo(addr2, source1);
+    AddrInfo info2 = AddrInfo(addr2, TEST_ASN, source1, TEST_SOURCE_ASN);
     BOOST_CHECK(info1.GetKey() != info2.GetKey());
     BOOST_CHECK_EQUAL(info1.GetNewBucket(nKey1, EMPTY_NETGROUPMAN), info2.GetNewBucket(nKey1, EMPTY_NETGROUPMAN));
 
@@ -577,7 +585,10 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_new_bucket_legacy)
     for (int i = 0; i < 255; i++) {
         AddrInfo infoi = AddrInfo(
             CAddress(ResolveService("250.1.1." + ToString(i)), NODE_NONE),
-            ResolveIP("250.1.1." + ToString(i)));
+            TEST_ASN,
+            ResolveIP("250.1.1." + ToString(i)),
+            TEST_SOURCE_ASN
+        );
         int bucket = infoi.GetNewBucket(nKey1, EMPTY_NETGROUPMAN);
         buckets.insert(bucket);
     }
@@ -590,7 +601,10 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_new_bucket_legacy)
         AddrInfo infoj = AddrInfo(CAddress(
                                         ResolveService(
                                             ToString(250 + (j / 255)) + "." + ToString(j % 256) + ".1.1"), NODE_NONE),
-            ResolveIP("251.4.1.1"));
+            TEST_ASN,
+            ResolveIP("251.4.1.1"),
+            TEST_SOURCE_ASN
+        );
         int bucket = infoj.GetNewBucket(nKey1, EMPTY_NETGROUPMAN);
         buckets.insert(bucket);
     }
@@ -602,7 +616,10 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_new_bucket_legacy)
     for (int p = 0; p < 255; p++) {
         AddrInfo infoj = AddrInfo(
             CAddress(ResolveService("250.1.1.1"), NODE_NONE),
-            ResolveIP("250." + ToString(p) + ".1.1"));
+            TEST_ASN,
+            ResolveIP("250." + ToString(p) + ".1.1"),
+            TEST_SOURCE_ASN
+        );
         int bucket = infoj.GetNewBucket(nKey1, EMPTY_NETGROUPMAN);
         buckets.insert(bucket);
     }
@@ -632,7 +649,7 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_tried_bucket)
     CNetAddr source1 = ResolveIP("250.1.1.1");
 
 
-    AddrInfo info1 = AddrInfo(addr1, source1);
+    AddrInfo info1 = AddrInfo(addr1, TEST_ASN, source1, TEST_SOURCE_ASN);
 
     uint256 nKey1 = (HashWriter{} << 1).GetHash();
     uint256 nKey2 = (HashWriter{} << 2).GetHash();
@@ -645,7 +662,7 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_tried_bucket)
 
     // Test: Two addresses with same IP but different ports can map to
     //  different buckets because they have different keys.
-    AddrInfo info2 = AddrInfo(addr2, source1);
+    AddrInfo info2 = AddrInfo(addr2, TEST_ASN, source1, TEST_SOURCE_ASN);
 
     BOOST_CHECK(info1.GetKey() != info2.GetKey());
     BOOST_CHECK(info1.GetTriedBucket(nKey1, ngm_asmap) != info2.GetTriedBucket(nKey1, ngm_asmap));
@@ -654,7 +671,10 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_tried_bucket)
     for (int j = 0; j < 255; j++) {
         AddrInfo infoj = AddrInfo(
             CAddress(ResolveService("101." + ToString(j) + ".1.1"), NODE_NONE),
-            ResolveIP("101." + ToString(j) + ".1.1"));
+            TEST_ASN,
+            ResolveIP("101." + ToString(j) + ".1.1"),
+            TEST_SOURCE_ASN
+        );
         int bucket = infoj.GetTriedBucket(nKey1, ngm_asmap);
         buckets.insert(bucket);
     }
@@ -666,7 +686,10 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_tried_bucket)
     for (int j = 0; j < 255; j++) {
         AddrInfo infoj = AddrInfo(
             CAddress(ResolveService("250." + ToString(j) + ".1.1"), NODE_NONE),
-            ResolveIP("250." + ToString(j) + ".1.1"));
+            TEST_ASN,
+            ResolveIP("250." + ToString(j) + ".1.1"),
+            TEST_SOURCE_ASN
+        );
         int bucket = infoj.GetTriedBucket(nKey1, ngm_asmap);
         buckets.insert(bucket);
     }
@@ -684,7 +707,7 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_new_bucket)
 
     CNetAddr source1 = ResolveIP("250.1.2.1");
 
-    AddrInfo info1 = AddrInfo(addr1, source1);
+    AddrInfo info1 = AddrInfo(addr1, TEST_ASN, source1, TEST_SOURCE_ASN);
 
     uint256 nKey1 = (HashWriter{} << 1).GetHash();
     uint256 nKey2 = (HashWriter{} << 2).GetHash();
@@ -698,7 +721,7 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_new_bucket)
     BOOST_CHECK(info1.GetNewBucket(nKey1, ngm_asmap) != info1.GetNewBucket(nKey2, ngm_asmap));
 
     // Test: Ports should not affect bucket placement in the addr
-    AddrInfo info2 = AddrInfo(addr2, source1);
+    AddrInfo info2 = AddrInfo(addr2, TEST_ASN, source1, TEST_SOURCE_ASN);
     BOOST_CHECK(info1.GetKey() != info2.GetKey());
     BOOST_CHECK_EQUAL(info1.GetNewBucket(nKey1, ngm_asmap), info2.GetNewBucket(nKey1, ngm_asmap));
 
@@ -706,7 +729,10 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_new_bucket)
     for (int i = 0; i < 255; i++) {
         AddrInfo infoi = AddrInfo(
             CAddress(ResolveService("250.1.1." + ToString(i)), NODE_NONE),
-            ResolveIP("250.1.1." + ToString(i)));
+            TEST_ASN,
+            ResolveIP("250.1.1." + ToString(i)),
+            TEST_SOURCE_ASN
+        );
         int bucket = infoi.GetNewBucket(nKey1, ngm_asmap);
         buckets.insert(bucket);
     }
@@ -719,7 +745,10 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_new_bucket)
         AddrInfo infoj = AddrInfo(CAddress(
                                         ResolveService(
                                             ToString(250 + (j / 255)) + "." + ToString(j % 256) + ".1.1"), NODE_NONE),
-            ResolveIP("251.4.1.1"));
+            TEST_ASN,
+            ResolveIP("251.4.1.1"),
+            TEST_SOURCE_ASN
+        );
         int bucket = infoj.GetNewBucket(nKey1, ngm_asmap);
         buckets.insert(bucket);
     }
@@ -731,7 +760,10 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_new_bucket)
     for (int p = 0; p < 255; p++) {
         AddrInfo infoj = AddrInfo(
             CAddress(ResolveService("250.1.1.1"), NODE_NONE),
-            ResolveIP("101." + ToString(p) + ".1.1"));
+            TEST_ASN,
+            ResolveIP("101." + ToString(p) + ".1.1"),
+            TEST_SOURCE_ASN
+        );
         int bucket = infoj.GetNewBucket(nKey1, ngm_asmap);
         buckets.insert(bucket);
     }
@@ -743,7 +775,10 @@ BOOST_AUTO_TEST_CASE(caddrinfo_get_new_bucket)
     for (int p = 0; p < 255; p++) {
         AddrInfo infoj = AddrInfo(
             CAddress(ResolveService("250.1.1.1"), NODE_NONE),
-            ResolveIP("250." + ToString(p) + ".1.1"));
+            TEST_ASN,
+            ResolveIP("250." + ToString(p) + ".1.1"),
+            TEST_SOURCE_ASN
+        );
         int bucket = infoj.GetNewBucket(nKey1, ngm_asmap);
         buckets.insert(bucket);
     }
@@ -763,10 +798,12 @@ BOOST_AUTO_TEST_CASE(addrman_serialization)
 
     DataStream stream{};
 
-    CAddress addr = CAddress(ResolveService("250.1.1.1"), NODE_NONE);
-    CNetAddr default_source;
+    CAddress addr = CAddress(ResolveService("250.1.1.1"), NODE_NONE); // ASN 1000 in test asmap
+    const int32_t EXPECTED_ASN = 1000;
+    CNetAddr source = ResolveIP("101.3.0.0"); // ASN 3 in test asmap
+    const int32_t EXPECTED_SOURCE_ASN = 3;
 
-    addrman_asmap1->Add({addr}, default_source);
+    addrman_asmap1->Add({addr}, source);
 
     stream << *addrman_asmap1;
     // serizalizing/deserializing addrman with the same asmap
@@ -779,6 +816,20 @@ BOOST_AUTO_TEST_CASE(addrman_serialization)
 
     BOOST_CHECK(addr_pos1 == addr_pos2);
 
+    const auto entries1 = addrman_asmap1->GetEntries(false);
+    BOOST_CHECK(entries1.size() == 1);
+    const AddrInfo info1 = entries1.front().first;
+    BOOST_CHECK(info1.mapped_as == EXPECTED_ASN);
+    BOOST_CHECK(info1.source_mapped_as == EXPECTED_SOURCE_ASN);
+
+    const auto entries1_dup = addrman_asmap1_dup->GetEntries(false);
+    BOOST_CHECK(entries1_dup.size() == 1);
+    const AddrInfo info1_dup = entries1_dup.front().first;
+    BOOST_CHECK(info1_dup.mapped_as == EXPECTED_ASN);
+    BOOST_CHECK(info1_dup.source_mapped_as == EXPECTED_SOURCE_ASN);
+
+    BOOST_CHECK(info1 == info1_dup);
+
     // deserializing asmaped peers.dat to non-asmaped addrman
     stream << *addrman_asmap1;
     stream >> *addrman_noasmap;
@@ -790,7 +841,7 @@ BOOST_AUTO_TEST_CASE(addrman_serialization)
     // deserializing non-asmaped peers.dat to asmaped addrman
     addrman_asmap1 = std::make_unique<AddrMan>(netgroupman, DETERMINISTIC, ratio);
     addrman_noasmap = std::make_unique<AddrMan>(EMPTY_NETGROUPMAN, DETERMINISTIC, ratio);
-    addrman_noasmap->Add({addr}, default_source);
+    addrman_noasmap->Add({addr}, source);
     stream << *addrman_noasmap;
     stream >> *addrman_asmap1;
 
@@ -804,7 +855,7 @@ BOOST_AUTO_TEST_CASE(addrman_serialization)
     addrman_noasmap = std::make_unique<AddrMan>(EMPTY_NETGROUPMAN, DETERMINISTIC, ratio);
     CAddress addr1 = CAddress(ResolveService("250.1.1.1"), NODE_NONE);
     CAddress addr2 = CAddress(ResolveService("250.2.1.1"), NODE_NONE);
-    addrman_noasmap->Add({addr, addr2}, default_source);
+    addrman_noasmap->Add({addr, addr2}, source);
     AddressPosition addr_pos5 = addrman_noasmap->FindAddressEntry(addr1).value();
     AddressPosition addr_pos6 = addrman_noasmap->FindAddressEntry(addr2).value();
     BOOST_CHECK(addr_pos5.bucket != addr_pos6.bucket);
@@ -1082,7 +1133,7 @@ static auto MakeCorruptPeersDat()
     CAddress addr = CAddress(serv.value(), NODE_NONE);
     std::optional<CNetAddr> resolved{LookupHost("252.2.2.2", false)};
     BOOST_REQUIRE(resolved.has_value());
-    AddrInfo info = AddrInfo(addr, resolved.value());
+    AddrInfo info = AddrInfo(addr, TEST_ASN, resolved.value(), TEST_SOURCE_ASN);
     s << CAddress::V1_DISK(info);
 
     return s;

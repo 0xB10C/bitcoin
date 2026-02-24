@@ -283,6 +283,8 @@ void AddrManImpl::Unserialize(Stream& s_)
     for (int n = 0; n < nNew; n++) {
         AddrInfo& info = mapInfo[n];
         s >> info;
+        info.mapped_as = m_netgroupman.GetMappedAS(info);
+        info.source_mapped_as = m_netgroupman.GetMappedAS(info.source);
         mapAddr[info] = n;
         info.nRandomPos = vRandom.size();
         vRandom.push_back(n);
@@ -295,6 +297,8 @@ void AddrManImpl::Unserialize(Stream& s_)
     for (int n = 0; n < nTried; n++) {
         AddrInfo info;
         s >> info;
+        info.mapped_as = m_netgroupman.GetMappedAS(info);
+        info.source_mapped_as = m_netgroupman.GetMappedAS(info.source);
         int nKBucket = info.GetTriedBucket(nKey, m_netgroupman);
         int nKBucketPos = info.GetBucketPosition(nKey, false, nKBucket);
         if (info.IsValid()
@@ -418,7 +422,7 @@ AddrInfo* AddrManImpl::Create(const CAddress& addr, const CNetAddr& addrSource, 
     AssertLockHeld(cs);
 
     nid_type nId = nIdCount++;
-    mapInfo[nId] = AddrInfo(addr, addrSource);
+    mapInfo[nId] = AddrInfo(addr, m_netgroupman.GetMappedAS(addr), addrSource, m_netgroupman.GetMappedAS(addrSource));
     mapAddr[addr] = nId;
     mapInfo[nId].nRandomPos = vRandom.size();
     vRandom.push_back(nId);
@@ -611,9 +615,8 @@ bool AddrManImpl::AddSingle(const CAddress& addr, const CNetAddr& source, std::c
             ClearNew(nUBucket, nUBucketPos);
             pinfo->nRefCount++;
             vvNew[nUBucket][nUBucketPos] = nId;
-            const auto mapped_as{m_netgroupman.GetMappedAS(addr)};
             LogDebug(BCLog::ADDRMAN, "Added %s%s to new[%i][%i]\n",
-                     addr.ToStringAddrPort(), (mapped_as ? strprintf(" mapped to AS%i", mapped_as) : ""), nUBucket, nUBucketPos);
+                     addr.ToStringAddrPort(), (pinfo->mapped_as ? strprintf(" mapped to AS%i", pinfo->mapped_as) : ""), nUBucket, nUBucketPos);
         } else {
             if (pinfo->nRefCount == 0) {
                 Delete(nId);
@@ -671,9 +674,8 @@ bool AddrManImpl::Good_(const CService& addr, bool test_before_evict, NodeSecond
     } else {
         // move nId to the tried tables
         MakeTried(info, nId);
-        const auto mapped_as{m_netgroupman.GetMappedAS(addr)};
         LogDebug(BCLog::ADDRMAN, "Moved %s%s to tried[%i][%i]\n",
-                 addr.ToStringAddrPort(), (mapped_as ? strprintf(" mapped to AS%i", mapped_as) : ""), tried_bucket, tried_bucket_pos);
+                 addr.ToStringAddrPort(), (info.mapped_as ? strprintf(" mapped to AS%i", info.mapped_as) : ""), tried_bucket, tried_bucket_pos);
         return true;
     }
 }
