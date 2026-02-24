@@ -51,8 +51,14 @@ public:
     //! last counted attempt (memory only)
     NodeSeconds m_last_count_attempt{0s};
 
+    //! The ASN of the address.
+    uint32_t mapped_as;
+
     //! where knowledge about this address first came from
     CNetAddr source;
+
+    //! The ASN of the source address.
+    uint32_t source_mapped_as;
 
     //! last successful connection by us
     NodeSeconds m_last_success{0s};
@@ -74,11 +80,12 @@ public:
         READWRITE(AsBase<CAddress>(obj), obj.source, Using<ChronoFormatter<int64_t>>(obj.m_last_success), obj.nAttempts);
     }
 
-    AddrInfo(const CAddress &addrIn, const CNetAddr &addrSource) : CAddress(addrIn), source(addrSource)
+    AddrInfo(const CAddress &addrIn, const uint32_t mapped_as, const CNetAddr &addrSource, const uint32_t source_mapped_as) :
+        CAddress(addrIn), mapped_as(mapped_as), source(addrSource), source_mapped_as(source_mapped_as)
     {
     }
 
-    AddrInfo() : CAddress(), source()
+    AddrInfo() : CAddress(), mapped_as(), source(), source_mapped_as()
     {
     }
 
