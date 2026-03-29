@@ -1116,13 +1116,12 @@ static RPCHelpMan getaddrmaninfo()
     };
 }
 
-UniValue AddrmanEntryToJSON(const AddrInfo& info, const CConnman& connman)
+UniValue AddrmanEntryToJSON(const AddrInfo& info)
 {
     UniValue ret(UniValue::VOBJ);
     ret.pushKV("address", info.ToStringAddr());
-    const uint32_t mapped_as{connman.GetMappedAS(info)};
-    if (mapped_as) {
-        ret.pushKV("mapped_as", mapped_as);
+    if (info.mapped_as) {
+        ret.pushKV("mapped_as", info.mapped_as);
     }
     ret.pushKV("port", info.GetPort());
     ret.pushKV("services", static_cast<std::underlying_type_t<decltype(info.nServices)>>(info.nServices));
@@ -1130,14 +1129,13 @@ UniValue AddrmanEntryToJSON(const AddrInfo& info, const CConnman& connman)
     ret.pushKV("network", GetNetworkName(info.GetNetClass()));
     ret.pushKV("source", info.source.ToStringAddr());
     ret.pushKV("source_network", GetNetworkName(info.source.GetNetClass()));
-    const uint32_t source_mapped_as{connman.GetMappedAS(info.source)};
-    if (source_mapped_as) {
-        ret.pushKV("source_mapped_as", source_mapped_as);
+    if (info.source_mapped_as) {
+        ret.pushKV("source_mapped_as", info.source_mapped_as);
     }
     return ret;
 }
 
-UniValue AddrmanTableToJSON(const std::vector<std::pair<AddrInfo, AddressPosition>>& tableInfos, const CConnman& connman)
+UniValue AddrmanTableToJSON(const std::vector<std::pair<AddrInfo, AddressPosition>>& tableInfos)
 {
     UniValue table(UniValue::VOBJ);
     for (const auto& e : tableInfos) {
@@ -1148,7 +1146,7 @@ UniValue AddrmanTableToJSON(const std::vector<std::pair<AddrInfo, AddressPositio
         // Address manager tables have unique entries so there is no advantage
         // in using UniValue::pushKV, which checks if the key already exists
         // in O(N). UniValue::pushKVEnd is used instead which currently is O(1).
-        table.pushKVEnd(key.str(), AddrmanEntryToJSON(info, connman));
+        table.pushKVEnd(key.str(), AddrmanEntryToJSON(info));
     }
     return table;
 }
@@ -1182,12 +1180,10 @@ static RPCHelpMan getrawaddrman()
         },
         [&](const RPCHelpMan& self, const JSONRPCRequest& request) -> UniValue {
             AddrMan& addrman = EnsureAnyAddrman(request.context);
-            NodeContext& node_context = EnsureAnyNodeContext(request.context);
-            CConnman& connman = EnsureConnman(node_context);
 
             UniValue ret(UniValue::VOBJ);
-            ret.pushKV("new", AddrmanTableToJSON(addrman.GetEntries(false), connman));
-            ret.pushKV("tried", AddrmanTableToJSON(addrman.GetEntries(true), connman));
+            ret.pushKV("new", AddrmanTableToJSON(addrman.GetEntries(false)));
+            ret.pushKV("tried", AddrmanTableToJSON(addrman.GetEntries(true)));
             return ret;
         },
     };

@@ -9,6 +9,7 @@ Tests correspond to code in rpc/net.cpp.
 
 from decimal import Decimal
 from itertools import product
+import os
 import platform
 import time
 
@@ -27,6 +28,7 @@ from test_framework.util import (
 )
 from test_framework.wallet import MiniWallet
 
+TEST_ASN = 3
 
 def assert_net_servicesnames(servicesflag, servicenames):
     """Utility that checks if all flags are correctly decoded in
@@ -57,7 +59,8 @@ def seed_addrman(node):
     assert_equal(node.addpeeraddress(address="pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion", tried=True, port=8333), success)
     assert_equal(node.addpeeraddress(address="nrfj6inpyf73gpkyool35hcmne5zwfmse3jl3aw23vk7chdemalyaqad.onion", port=45324, tried=True), success)
     assert_equal(node.addpeeraddress(address="c4gfnttsuwqomiygupdqqqyy5y5emnk5c73hrfvatri67prd7vyq.b32.i2p", port=8333), success)
-
+    # Add one address that is mapped in the test asmap file.
+    assert_equal(node.addpeeraddress(address=f"101.{TEST_ASN}.0.0", tried=True, port=8333), success)
 
 class NetTest(BitcoinTestFramework):
     def set_test_params(self):
@@ -451,8 +454,8 @@ class NetTest(BitcoinTestFramework):
         seed_addrman(node)
 
         expected_network_count = {
-            'all_networks': {'new': 4, 'tried': 4, 'total': 8},
-            'ipv4': {'new': 1, 'tried': 1, 'total': 2},
+            'all_networks': {'new': 4, 'tried': 5, 'total': 9},
+            'ipv4': {'new': 1, 'tried': 2, 'total': 3},
             'ipv6': {'new': 1, 'tried': 1, 'total': 2},
             'onion': {'new': 0, 'tried': 2, 'total': 2},
             'i2p': {'new': 1, 'tried': 0, 'total': 1},
@@ -468,7 +471,8 @@ class NetTest(BitcoinTestFramework):
 
     def test_getrawaddrman(self):
         self.log.info("Test getrawaddrman")
-        self.restart_node(1, extra_args=["-cjdnsreachable", "-test=addrman"], clear_addrman=True)
+        asmap_file = os.path.join(self.config["environment"]["SRCDIR"], 'src/test/data/asmap.raw')
+        self.restart_node(1, extra_args=["-cjdnsreachable", "-test=addrman", f"-asmap={asmap_file}"], clear_addrman=True)
         node = self.nodes[1]
         self.addr_time = int(time.time())
         node.setmocktime(self.addr_time)
@@ -488,6 +492,12 @@ class NetTest(BitcoinTestFramework):
             assert_equal(result["source"], expected["source"])
             assert_equal(result["source_network"], expected["source_network"])
             assert_equal(result["time"], self.addr_time)
+            if "mapped_as" in expected:
+                assert_equal(result["mapped_as"], expected["mapped_as"])
+                assert_equal(result["source_mapped_as"], expected["source_mapped_as"])
+            else:
+                assert("mapped_as" not in result)
+                assert("source_mapped_as" not in result)
 
         def check_getrawaddrman_entries(expected):
             """Utility to compare a getrawaddrman result with expected addrman contents"""
@@ -503,7 +513,7 @@ class NetTest(BitcoinTestFramework):
                     assert bucket_position == expected_entry["bucket_position"]
                     check_addr_information(entry, expected_entry)
 
-        # we expect 4 new and 4 tried table entries in the addrman which were added using seed_addrman()
+        # we expect 4 new and 5 tried table entries in the addrman which were added using seed_addrman()
         expected = {
             "new": [
                     {
@@ -579,6 +589,17 @@ class NetTest(BitcoinTestFramework):
                         "source": "nrfj6inpyf73gpkyool35hcmne5zwfmse3jl3aw23vk7chdemalyaqad.onion",
                         "source_network": "onion",
                         "port": 45324,
+                    },
+                    {
+                        "bucket_position": "65/21",
+                        "address": "101.3.0.0",
+                        "services": 9,
+                        "network": "ipv4",
+                        "source": "101.3.0.0",
+                        "source_network": "ipv4",
+                        "port": 8333,
+                        "mapped_as": TEST_ASN,
+                        "source_mapped_as": TEST_ASN,
                     }
             ]
         }
