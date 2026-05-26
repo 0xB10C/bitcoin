@@ -305,7 +305,6 @@ struct CRecipient
     bool fSubtractFeeFromAmount;
 };
 
-class WalletRescanReserver;
 
 /**
  * A CWallet maintains a set of transactions and balances, and provides the ability to create new transactions.
@@ -317,7 +316,6 @@ private:
 
     bool Unlock(const CKeyingMaterial& vMasterKeyIn);
 
-    friend class WalletRescanReserver;
     friend class ChainScanner;
 
     /** The next scheduled rebroadcast of wallet transactions. */
@@ -1086,27 +1084,6 @@ public:
  */
 void MaybeResendWalletTxs(WalletContext& context);
 
-/** RAII object to check and reserve a wallet rescan */
-class WalletRescanReserver
-{
-private:
-    using Clock = std::chrono::steady_clock;
-    using NowFn = std::function<Clock::time_point()>;
-    CWallet& m_wallet;
-    bool m_could_reserve{false};
-    NowFn m_now;
-public:
-    explicit WalletRescanReserver(CWallet& w) : m_wallet(w) {}
-
-    bool reserve(bool with_passphrase = false);
-    bool isReserved() const;
-
-    Clock::time_point now() const { return m_now ? m_now() : Clock::now(); };
-
-    void setNow(NowFn now) { m_now = std::move(now); }
-
-    ~WalletRescanReserver();
-};
 
 //! Add wallet name to persistent configuration so it will be loaded on startup.
 bool AddWalletSetting(interfaces::Chain& chain, const std::string& wallet_name);
