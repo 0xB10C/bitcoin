@@ -51,6 +51,9 @@ public:
 /** Returns an error string on failure */
 util::Result<std::unique_ptr<AddrMan>> LoadAddrman(const NetGroupManager& netgroupman, const ArgsManager& args);
 
+/** TEST ONLY HACK: Read an addrman db file from a path */
+std::unique_ptr<AddrMan> LoadAddrmanFromPath(const fs::path& path, const NetGroupManager& netgroupman);
+
 /**
  * Dump the anchor IP address database (anchors.dat)
  *

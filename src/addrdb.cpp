@@ -225,6 +225,25 @@ util::Result<std::unique_ptr<AddrMan>> LoadAddrman(const NetGroupManager& netgro
     return addrman;
 }
 
+std::unique_ptr<AddrMan> LoadAddrmanFromPath(const fs::path& path, const NetGroupManager& netgroupman)
+{
+<<<<<<< HEAD
+    auto addrman{std::make_unique<AddrMan>(netgroupman, /*deterministic=*/true, 999999)};
+=======
+    auto addrman{std::make_unique<AddrMan>(netgroupman, /*deterministic=*/true, 0)};
+>>>>>>> da1b5f87dc (fixup! add: bitprojects simulation)
+
+    try {
+        DeserializeFileDB(path, *addrman);
+        LogInfo("Loaded %i addresses from %s", addrman->Size(), fs::quoted(fs::PathToString(path)));
+    } catch (...) {
+        LogError("Not found, invalid, or corrupt addrman database file: %s", fs::quoted(fs::PathToString(path)));
+        assert(0); // TODO
+    }
+
+    return addrman;
+}
+
 void DumpAnchors(const fs::path& anchors_db_path, const std::vector<CAddress>& anchors)
 {
     LOG_TIME_SECONDS(strprintf("Flush %d outbound block-relay-only peer addresses to anchors.dat", anchors.size()));
