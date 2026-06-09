@@ -1318,6 +1318,17 @@ public:
      */
     std::vector<CAddress> GetAddresses(CNode& requestor, size_t max_addresses, size_t max_pct);
 
+    /**
+     * TODO:
+     */
+    std::optional<CAddress> TryPickOutboundAddress(
+        bool anchor,
+        ConnectionType conn_type,
+        bool fFeeler,
+        const std::set<std::vector<unsigned char>>& outbound_ipv46_peer_netgroups,
+        std::optional<Network> preferred_net
+    ) EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_added_nodes_mutex);
+
     // This allows temporarily exceeding m_max_outbound_full_relay, with the goal of finding
     // a peer that is better than all our current peers.
     void SetTryNewOutboundPeer(bool flag);
