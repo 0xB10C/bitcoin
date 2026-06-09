@@ -338,6 +338,28 @@ bool CNetAddr::IsRFC5737() const
                         HasPrefix(m_addr, std::array<uint8_t, 3>{203, 0, 113}));
 }
 
+bool CNetAddr::IsBitprojects() const
+{
+    // as per https://bnoc.xyz/t/increase-in-the-number-of-reachable-ipv4-nodes-bitprojects-io/45/11
+    return IsIPv4() && (
+        // AS12029
+        HasPrefix(m_addr, std::array<uint8_t, 3>{45, 40, 98}) ||
+        HasPrefix(m_addr, std::array<uint8_t, 3>{103, 47, 56}) ||
+        HasPrefix(m_addr, std::array<uint8_t, 3>{173, 46, 87}) ||
+        HasPrefix(m_addr, std::array<uint8_t, 3>{206, 206, 109}) ||
+        // AS29798
+        HasPrefix(m_addr, std::array<uint8_t, 3>{89, 106, 27}) ||
+        HasPrefix(m_addr, std::array<uint8_t, 3>{174, 140, 231}) ||
+        HasPrefix(m_addr, std::array<uint8_t, 3>{184, 174, 95}) ||
+        HasPrefix(m_addr, std::array<uint8_t, 3>{216, 107, 135}) ||
+        // AS401199
+        HasPrefix(m_addr, std::array<uint8_t, 3>{66, 163, 223}) ||
+        HasPrefix(m_addr, std::array<uint8_t, 3>{103, 246, 186}) ||
+        HasPrefix(m_addr, std::array<uint8_t, 3>{123, 100, 246}) ||
+        HasPrefix(m_addr, std::array<uint8_t, 3>{203, 11, 72})
+    );
+}
+
 bool CNetAddr::IsRFC3849() const
 {
     return IsIPv6() && HasPrefix(m_addr, std::array<uint8_t, 4>{0x20, 0x01, 0x0D, 0xB8});

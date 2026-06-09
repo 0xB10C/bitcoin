@@ -167,6 +167,7 @@ BasicTestingSetup::BasicTestingSetup(const ChainType chainType, TestOpts opts)
             "-debug",
             "-debugexclude=libevent",
             "-debugexclude=leveldb",
+            "-debugexclude=addrman",
         },
         opts.extra_args);
     if (G_TEST_COMMAND_LINE_ARGUMENTS) {

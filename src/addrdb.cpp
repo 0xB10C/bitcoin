@@ -227,11 +227,7 @@ util::Result<std::unique_ptr<AddrMan>> LoadAddrman(const NetGroupManager& netgro
 
 std::unique_ptr<AddrMan> LoadAddrmanFromPath(const fs::path& path, const NetGroupManager& netgroupman)
 {
-<<<<<<< HEAD
-    auto addrman{std::make_unique<AddrMan>(netgroupman, /*deterministic=*/true, 999999)};
-=======
     auto addrman{std::make_unique<AddrMan>(netgroupman, /*deterministic=*/true, 0)};
->>>>>>> da1b5f87dc (fixup! add: bitprojects simulation)
 
     try {
         DeserializeFileDB(path, *addrman);
