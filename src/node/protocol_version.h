@@ -9,7 +9,7 @@
  * network protocol versioning
  */
 
-inline constexpr int PROTOCOL_VERSION = 70017;
+inline constexpr int PROTOCOL_VERSION = 70016;
 
 //! initial proto version, to be increased after version/verack negotiation
 inline constexpr int INIT_PROTO_VERSION = 209;
