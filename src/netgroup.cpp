@@ -16,20 +16,26 @@ uint256 NetGroupManager::GetAsmapVersion() const
     return AsmapVersion(m_asmap);
 }
 
-std::vector<unsigned char> NetGroupManager::GetGroup(const CNetAddr& address) const
+std::vector<unsigned char> NetGroupManager::GetGroupFromASN(uint32_t asn)
 {
     std::vector<unsigned char> vchRet;
+    vchRet.push_back(NET_IPV6); // IPv4 and IPv6 with same ASN should be in the same bucket
+    for (int i = 0; i < 4; i++) {
+        vchRet.push_back((asn >> (8 * i)) & 0xFF);
+    }
+    return vchRet;
+}
+
+std::vector<unsigned char> NetGroupManager::GetGroup(const CNetAddr& address) const
+{
     // If non-empty asmap is supplied and the address is IPv4/IPv6,
     // return ASN to be used for bucketing.
     uint32_t asn = GetMappedAS(address);
     if (asn != 0) { // Either asmap was empty, or address has non-asmappable net class (e.g. TOR).
-        vchRet.push_back(NET_IPV6); // IPv4 and IPv6 with same ASN should be in the same bucket
-        for (int i = 0; i < 4; i++) {
-            vchRet.push_back((asn >> (8 * i)) & 0xFF);
-        }
-        return vchRet;
+        return GetGroupFromASN(asn);
     }
 
+    std::vector<unsigned char> vchRet;
     vchRet.push_back(address.GetNetClass());
     int nStartByte{0};
     int nBits{0};
