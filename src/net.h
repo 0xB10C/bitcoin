@@ -674,6 +674,7 @@ struct CNodeOptions
     bool prefer_evict = false;
     size_t recv_flood_size{DEFAULT_MAXRECEIVEBUFFER * 1000};
     bool use_v2transport = false;
+    bool netgroup_randomized = false;
 };
 
 /** Information about a peer */
@@ -733,6 +734,9 @@ public:
      */
     std::string cleanSubVer GUARDED_BY(m_subver_mutex){};
     const bool m_prefer_evict{false}; // This peer is preferred for eviction.
+    /** Whether this peer was selected with netgroup-randomized selection
+     *  (AddrMan::SelectByNetgroup) in ThreadOpenConnections. */
+    const bool m_netgroup_randomized{false};
     bool HasPermission(NetPermissionFlags permission) const {
         return NetPermissions::HasFlag(m_permission_flags, permission);
     }
@@ -1189,6 +1193,7 @@ public:
      * @param[in] conn_type Type of the connection to open, must not be `ConnectionType::INBOUND`.
      * @param[in] use_v2transport Use P2P encryption, (aka V2 transport, BIP324).
      * @param[in] proxy_override Optional proxy to use and override normal proxy selection.
+     * @param[in] netgroup_randomized The address was selected with netgroup-randomized selection.
      * @retval true The connection was opened successfully.
      * @retval false The connection attempt failed.
      */
@@ -1198,7 +1203,8 @@ public:
                                const char* pszDest,
                                ConnectionType conn_type,
                                bool use_v2transport,
-                               const std::optional<Proxy>& proxy_override)
+                               const std::optional<Proxy>& proxy_override,
+                               bool netgroup_randomized = false)
         EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_unused_i2p_sessions_mutex);
 
     /// Group of private broadcast related members.
@@ -1551,6 +1557,7 @@ private:
      * @param[in] conn_type Type of the connection to open, must not be `ConnectionType::INBOUND`.
      * @param[in] use_v2transport Use P2P encryption, (aka V2 transport, BIP324).
      * @param[in] proxy_override Optional proxy to use and override normal proxy selection.
+     * @param[in] netgroup_randomized The address was selected with netgroup-randomized selection.
      * @return Newly created CNode object or nullptr if the connection failed.
      */
     CNode* ConnectNode(CAddress addrConnect,
@@ -1558,7 +1565,8 @@ private:
                        bool fCountFailure,
                        ConnectionType conn_type,
                        bool use_v2transport,
-                       const std::optional<Proxy>& proxy_override)
+                       const std::optional<Proxy>& proxy_override,
+                       bool netgroup_randomized = false)
         EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_unused_i2p_sessions_mutex);
 
     void AddWhitelistPermissionFlags(NetPermissionFlags& flags, std::optional<CNetAddr> addr, const std::vector<NetWhitelistPermissions>& ranges) const;
