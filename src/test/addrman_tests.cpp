@@ -349,6 +349,60 @@ BOOST_AUTO_TEST_CASE(addrman_select_special)
     BOOST_CHECK(addrman->Select(/*new_only=*/false, {NET_IPV4}).first == addr1);
 }
 
+BOOST_AUTO_TEST_CASE(addrman_select_by_netgroup)
+{
+    auto addrman = std::make_unique<AddrMan>(EMPTY_NETGROUPMAN, DETERMINISTIC, GetCheckRatio(m_node));
+
+    // Empty addrman: nothing is selected.
+    BOOST_CHECK(!addrman->SelectByNetgroup().first.IsValid());
+
+    CNetAddr source = ResolveIP("252.2.2.2");
+
+    // A netgroup (/16) with many addresses in the new table...
+    for (int i = 0; i < 32; ++i) {
+        addrman->Add({CAddress(ResolveService("250.1." + ToString(i) + ".1", 8333), NODE_NONE)}, source);
+    }
+    // ...and a netgroup with a single address.
+    const CService small_group_addr{ResolveService("251.1.1.1", 8333)};
+    BOOST_CHECK(addrman->Add({CAddress(small_group_addr, NODE_NONE)}, source));
+
+    // Non-IPv4/IPv6 addresses are never selected by netgroup: an I2P-only
+    // filter selects nothing even though an I2P address is known.
+    CAddress i2p_addr;
+    i2p_addr.SetSpecial("udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p");
+    BOOST_CHECK(addrman->Add({i2p_addr}, source));
+    BOOST_CHECK(!addrman->SelectByNetgroup({NET_I2P}).first.IsValid());
+
+    // With the sublinear weighting, the single-address netgroup is drawn
+    // against a weight of at most 32 for the large one, so both netgroups
+    // should be selected well within 512 draws. Only IPv4 addresses are
+    // ever selected.
+    bool small_group_selected{false};
+    bool large_group_selected{false};
+    int counter = 512;
+    while (--counter > 0 && (!small_group_selected || !large_group_selected)) {
+        const CAddress selected{addrman->SelectByNetgroup().first};
+        BOOST_REQUIRE(selected.IsValid());
+        BOOST_REQUIRE(selected.IsIPv4());
+        if (selected == small_group_addr) {
+            small_group_selected = true;
+        } else {
+            large_group_selected = true;
+        }
+    }
+    BOOST_CHECK(small_group_selected);
+    BOOST_CHECK(large_group_selected);
+
+    // Move the small-group address to the tried table; it remains selectable.
+    BOOST_CHECK(addrman->Good(small_group_addr));
+    small_group_selected = false;
+    counter = 512;
+    while (--counter > 0 && !small_group_selected) {
+        if (addrman->SelectByNetgroup().first == small_group_addr) small_group_selected = true;
+    }
+    BOOST_CHECK(small_group_selected);
+}
+
 BOOST_AUTO_TEST_CASE(addrman_new_collisions)
 {
     auto addrman = std::make_unique<AddrMan>(EMPTY_NETGROUPMAN, DETERMINISTIC, GetCheckRatio(m_node));
