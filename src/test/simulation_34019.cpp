@@ -121,10 +121,6 @@ static uint32_t simulate(ConnmanTestMsg *conman, NetGroupManager& netgroupmanage
         }
         const CAddress& address{*address_opt};
 
-        if (address.IsIPv4() || address.IsIPv6()) {
-            outbound_ipv46_peer_netgroups.insert(netgroupmanager.GetGroup(address));
-        }
-
         // We consider all connections to Bitprojects as successful, as that's what was
         // observed in the real world:
         // https://bnoc.xyz/t/outbound-connection-success-rates-of-a-bitcoin-node/142/5
@@ -133,6 +129,14 @@ static uint32_t simulate(ConnmanTestMsg *conman, NetGroupManager& netgroupmanage
             if (rng.randrange(100) >= CONNECTION_SUCCESS_RATE) {
                 continue;
             }
+        }
+
+        // Only successful connections exclude their netgroup from further
+        // selection. ThreadOpenConnections rebuilds outbound_ipv46_peer_netgroups
+        // from m_nodes on every iteration, so a failed connection attempt
+        // (which never creates a CNode) does not exclude anything.
+        if (address.IsIPv4() || address.IsIPv6()) {
+            outbound_ipv46_peer_netgroups.insert(netgroupmanager.GetGroup(address));
         }
 
         if(address.IsBitprojects()) {
