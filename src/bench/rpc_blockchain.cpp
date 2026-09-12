@@ -4,8 +4,10 @@
 
 #include <bench/bench.h>
 #include <bench/data/block413567.raw.h>
+#include <bench/data/block413567_undo.raw.h>
 #include <chain.h>
 #include <consensus/params.h>
+#include <consensus/validation.h>
 #include <core_io.h>
 #include <kernel/chainparams.h>
 #include <primitives/block.h>
@@ -13,9 +15,12 @@
 #include <rpc/blockchain.h>
 #include <serialize.h>
 #include <streams.h>
+#include <sync.h>
 #include <test/util/setup_common.h>
 #include <uint256.h>
+#include <undo.h>
 #include <univalue.h>
+#include <util/check.h>
 #include <validation.h>
 
 #include <memory>
@@ -28,6 +33,7 @@ struct TestBlockAndIndex {
     const std::unique_ptr<const TestingSetup> testing_setup{MakeNoLogFileContext<const TestingSetup>(ChainType::MAIN)};
     CBlock block{};
     uint256 blockHash{};
+    CBlockIndex prev_blockindex{};
     CBlockIndex blockindex{};
 
     TestBlockAndIndex()
@@ -38,6 +44,19 @@ struct TestBlockAndIndex {
         blockHash = block.GetHash();
         blockindex.phashBlock = &blockHash;
         blockindex.nBits = 403014710;
+        // The undo data checksum commits to the previous block's hash.
+        prev_blockindex.phashBlock = &block.hashPrevBlock;
+        blockindex.pprev = &prev_blockindex;
+
+        // Store the block's undo data so that blockToJSON can read it back.
+        // Without it, no fee or prevout is included in the output and
+        // TxVerbosity::SHOW_DETAILS_AND_PREVOUT does the same work as
+        // TxVerbosity::SHOW_DETAILS.
+        CBlockUndo block_undo;
+        SpanReader{benchmark::data::block413567_undo} >> block_undo;
+        BlockValidationState state;
+        LOCK(::cs_main);
+        Assert(testing_setup->m_node.chainman->m_blockman.WriteBlockUndo(block_undo, state, blockindex));
     }
 };
 
