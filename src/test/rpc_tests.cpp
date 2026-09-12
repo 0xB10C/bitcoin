@@ -2,21 +2,29 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <addresstype.h>
 #include <core_io.h>
 #include <interfaces/chain.h>
+#include <key_io.h>
 #include <node/context.h>
+#include <pubkey.h>
 #include <rpc/blockchain.h>
 #include <rpc/client.h>
 #include <rpc/server.h>
 #include <rpc/util.h>
+#include <script/descriptor.h>
+#include <script/signingprovider.h>
+#include <script/solver.h>
 #include <test/util/common.h>
 #include <test/util/setup_common.h>
 #include <test/util/time.h>
 #include <univalue.h>
+#include <util/strencodings.h>
 #include <util/time.h>
 
 #include <any>
 #include <string_view>
+#include <variant>
 
 #include <boost/test/unit_test.hpp>
 
@@ -258,6 +266,40 @@ BOOST_AUTO_TEST_CASE(rpc_createraw_op_return)
 
     // Data 81 bytes long
     BOOST_CHECK_NO_THROW(CallRPC("createrawtransaction [{\"txid\":\"a3b807410df0b60fcb9736768df5823938b2f838694939ba45f3c0a1bff150ed\",\"vout\":0}] {\"data\":\"010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081\"}"));
+}
+
+BOOST_AUTO_TEST_CASE(rpc_script_to_univ_desc)
+{
+    // ScriptToUniv builds the "desc" field without InferDescriptor() for
+    // scripts that have an address. Check that the result is identical for
+    // every standard script type and for scripts without an address.
+    const CPubKey pubkey{ParseHex("0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798")};
+    const CScript redeem_script{CScript() << OP_TRUE};
+    const std::vector<CScript> scripts{
+        GetScriptForDestination(PKHash(pubkey)),
+        GetScriptForDestination(ScriptHash(redeem_script)),
+        GetScriptForDestination(WitnessV0KeyHash(pubkey)),
+        GetScriptForDestination(WitnessV0ScriptHash(redeem_script)),
+        GetScriptForDestination(WitnessV1Taproot(XOnlyPubKey{pubkey})),
+        GetScriptForDestination(WitnessUnknown{2, std::vector<unsigned char>(32, 0x42)}),
+        GetScriptForDestination(PayToAnchor{}),
+        GetScriptForRawPubKey(pubkey),
+        GetScriptForMultisig(1, {pubkey}),
+        CScript() << OP_RETURN << std::vector<unsigned char>{1, 2, 3},
+        CScript() << OP_TRUE,
+        CScript() << OP_HASH160 << std::vector<unsigned char>(19, 0x00) << OP_EQUAL, // almost P2SH
+    };
+    for (const CScript& script : scripts) {
+        UniValue o(UniValue::VOBJ);
+        ScriptToUniv(script, o, /*include_hex=*/true, /*include_address=*/true);
+        BOOST_CHECK_EQUAL(o["desc"].get_str(), InferDescriptor(script, DUMMY_SIGNING_PROVIDER)->ToString());
+        CTxDestination dest;
+        if (ExtractDestination(script, dest) && !std::holds_alternative<PubKeyDestination>(dest)) {
+            BOOST_CHECK_EQUAL(o["address"].get_str(), EncodeDestination(dest));
+        } else {
+            BOOST_CHECK(!o.exists("address"));
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(rpc_format_monetary_values)

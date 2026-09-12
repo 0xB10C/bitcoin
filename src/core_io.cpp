@@ -410,21 +410,36 @@ std::string EncodeHexTx(const CTransaction& tx)
 
 void ScriptToUniv(const CScript& script, UniValue& out, bool include_hex, bool include_address, const SigningProvider* provider)
 {
-    CTxDestination address;
-
     out.pushKV("asm", ScriptToAsmStr(script));
-    if (include_address) {
-        out.pushKV("desc", InferDescriptor(script, provider ? *provider : DUMMY_SIGNING_PROVIDER)->ToString());
-    }
-    if (include_hex) {
-        out.pushKV("hex", HexStr(script));
-    }
 
     std::vector<std::vector<unsigned char>> solns;
     const TxoutType type{Solver(script, solns)};
 
-    if (include_address && ExtractDestination(script, address) && type != TxoutType::PUBKEY) {
-        out.pushKV("address", EncodeDestination(address));
+    CTxDestination dest;
+    const bool have_address{include_address && ExtractDestination(script, dest) && type != TxoutType::PUBKEY};
+    std::string address;
+    if (have_address) address = EncodeDestination(dest);
+
+    if (include_address) {
+        if (!provider && have_address && type != TxoutType::WITNESS_V1_TAPROOT) {
+            // Without a signing provider that could supply keys or scripts,
+            // InferDescriptor() yields an addr() descriptor for all scripts
+            // that have an address, except for P2TR (rawtr()). Build it from
+            // the address that was encoded above instead of encoding the
+            // destination a second time, which is the most expensive part of
+            // this function.
+            std::string desc{"addr(" + address + ")"};
+            desc += "#" + GetDescriptorChecksum(desc);
+            out.pushKV("desc", std::move(desc));
+        } else {
+            out.pushKV("desc", InferDescriptor(script, provider ? *provider : DUMMY_SIGNING_PROVIDER)->ToString());
+        }
+    }
+    if (include_hex) {
+        out.pushKV("hex", HexStr(script));
+    }
+    if (have_address) {
+        out.pushKV("address", std::move(address));
     }
     out.pushKV("type", GetTxnOutputType(type));
 }

@@ -6,7 +6,9 @@
 #include <consensus/consensus.h>
 #include <core_io.h>
 #include <policy/policy.h>
+#include <script/descriptor.h>
 #include <script/script.h>
+#include <script/signingprovider.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
 #include <test/fuzz/util.h>
@@ -33,4 +35,8 @@ FUZZ_TARGET(script_format, .init = initialize_script_format)
     auto include_hex = fuzzed_data_provider.ConsumeBool();
     auto include_address = fuzzed_data_provider.ConsumeBool();
     ScriptToUniv(script, /*out=*/o1, include_hex, include_address);
+    if (include_address) {
+        // ScriptToUniv may construct the descriptor without InferDescriptor().
+        assert(o1["desc"].get_str() == InferDescriptor(script, DUMMY_SIGNING_PROVIDER)->ToString());
+    }
 }
