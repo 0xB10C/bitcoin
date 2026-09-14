@@ -184,6 +184,24 @@ public:
     std::pair<CAddress, NodeSeconds> Select(bool new_only = false, const std::unordered_set<Network>& networks = {}) const;
 
     /**
+     * Choose an address to connect to, randomizing by netgroup: first draw a
+     * netgroup (weighted sublinearly by the number of addresses in it), then
+     * an address within that netgroup. This makes the selection resistant to
+     * an attacker inserting many addresses from few netgroups, see
+     * https://github.com/bitcoin/bitcoin/issues/34019.
+     *
+     * Only IPv4/IPv6 addresses are considered: for other networks the
+     * netgroup is derived from pseudo-random address bits (see
+     * NetGroupManager::GetGroup) and carries no topology information.
+     *
+     * @param[in] networks Select only addresses of these networks (empty = all).
+     * @return    CAddress The record for the selected peer, empty if no
+     *                     eligible address is known.
+     *            seconds  The last time we attempted to connect to that peer.
+     */
+    std::pair<CAddress, NodeSeconds> SelectByNetgroup(const std::unordered_set<Network>& networks = {}) const;
+
+    /**
      * Return all or many randomly selected addresses, optionally by network.
      *
      * @param[in] max_addresses  Maximum number of addresses to return (0 = all).

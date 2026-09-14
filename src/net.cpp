@@ -91,6 +91,12 @@ static constexpr auto FEELER_SLEEP_WINDOW{1s};
 /** Frequency to attempt extra connections to reachable networks we're not connected to yet **/
 static constexpr auto EXTRA_NETWORK_PEER_INTERVAL{5min};
 
+/** Number of automatic, persistent outbound connections (full- and block-relay)
+ *  opened with netgroup-randomized selection (AddrMan::SelectByNetgroup) instead
+ *  of the regular, roughly address-uniform selection (AddrMan::Select). See
+ *  https://github.com/bitcoin/bitcoin/issues/34019. */
+static constexpr int NUM_NETGROUP_RANDOMIZED_OUTBOUND{5};
+
 /** Used to pass flags to the Bind() function */
 enum BindFlags {
     BF_NONE         = 0,
@@ -380,7 +386,8 @@ CNode* CConnman::ConnectNode(CAddress addrConnect,
                              bool fCountFailure,
                              ConnectionType conn_type,
                              bool use_v2transport,
-                             const std::optional<Proxy>& proxy_override)
+                             const std::optional<Proxy>& proxy_override,
+                             bool netgroup_randomized)
 {
     AssertLockNotHeld(m_nodes_mutex);
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
@@ -547,6 +554,7 @@ CNode* CConnman::ConnectNode(CAddress addrConnect,
                                     .i2p_sam_session = std::move(i2p_transient_session),
                                     .recv_flood_size = nReceiveFloodSize,
                                     .use_v2transport = use_v2transport,
+                                    .netgroup_randomized = netgroup_randomized,
                                 });
         pnode->AddRef();
 
@@ -2722,6 +2730,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
         // Only connect out to one peer per ipv4/ipv6 network group (/16 for IPv4).
         int nOutboundFullRelay = 0;
         int nOutboundBlockRelay = 0;
+        int outbound_netgroup_randomized = 0;
         int outbound_privacy_network_peers = 0;
         std::set<std::vector<unsigned char>> outbound_ipv46_peer_netgroups;
 
@@ -2730,6 +2739,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
             for (const CNode* pnode : m_nodes) {
                 if (pnode->IsFullOutboundConn()) nOutboundFullRelay++;
                 if (pnode->IsBlockOnlyConn()) nOutboundBlockRelay++;
+                if (pnode->m_netgroup_randomized) outbound_netgroup_randomized++;
 
                 // Make sure our persistent outbound slots to ipv4/ipv6 peers belong to different netgroups.
                 switch (pnode->m_conn_type) {
@@ -2842,6 +2852,16 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
 
         addrman.get().ResolveCollisions();
 
+        // Use netgroup-randomized selection for automatic, persistent (full- and
+        // block-relay) outbound connections until NUM_NETGROUP_RANDOMIZED_OUTBOUND
+        // of the current ones were selected that way. Anchor and network-specific
+        // extra connections are not selected from addrman with the regular
+        // selection either and are left as-is.
+        const bool try_netgroup_randomized{!fFeeler && !anchor && !preferred_net.has_value() &&
+                                           outbound_netgroup_randomized < NUM_NETGROUP_RANDOMIZED_OUTBOUND};
+        // Whether the address selected below was netgroup-randomized.
+        bool netgroup_randomized{false};
+
         const auto current_time{NodeClock::now()};
         int nTries = 0;
         const auto reachable_nets{g_reachable_nets.All()};
@@ -2887,14 +2907,24 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
                     // Select a new table address for our feeler instead.
                     std::tie(addr, addr_last_try) = addrman.get().Select(true, reachable_nets);
                 }
-            } else {
+            } else if (preferred_net.has_value()) {
                 // Not a feeler
                 // If preferred_net has a value set, pick an extra outbound
                 // peer from that network. The eviction logic in net_processing
                 // ensures that a peer from another network will be evicted.
-                std::tie(addr, addr_last_try) = preferred_net.has_value()
-                    ? addrman.get().Select(false, {*preferred_net})
-                    : addrman.get().Select(false, reachable_nets);
+                std::tie(addr, addr_last_try) = addrman.get().Select(false, {*preferred_net});
+            } else {
+                // Not a feeler
+                if (try_netgroup_randomized) {
+                    std::tie(addr, addr_last_try) = addrman.get().SelectByNetgroup(reachable_nets);
+                }
+                netgroup_randomized = addr.IsValid();
+                if (!netgroup_randomized) {
+                    // Regular selection, also used as fallback if there are no
+                    // eligible (IPv4/IPv6) addresses for netgroup-randomized
+                    // selection.
+                    std::tie(addr, addr_last_try) = addrman.get().Select(false, reachable_nets);
+                }
             }
 
             // Require outbound IPv4/IPv6 connections, other than feelers, to be to distinct network groups
@@ -2969,7 +2999,8 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
                                   /*pszDest=*/nullptr,
                                   /*conn_type=*/conn_type,
                                   /*use_v2transport=*/use_v2transport,
-                                  /*proxy_override=*/std::nullopt);
+                                  /*proxy_override=*/std::nullopt,
+                                  /*netgroup_randomized=*/netgroup_randomized);
         }
     }
 }
@@ -3094,7 +3125,8 @@ bool CConnman::OpenNetworkConnection(const CAddress& addrConnect,
                                      const char* pszDest,
                                      ConnectionType conn_type,
                                      bool use_v2transport,
-                                     const std::optional<Proxy>& proxy_override)
+                                     const std::optional<Proxy>& proxy_override,
+                                     bool netgroup_randomized)
 {
     AssertLockNotHeld(m_nodes_mutex);
     AssertLockNotHeld(m_unused_i2p_sessions_mutex);
@@ -3118,7 +3150,7 @@ bool CConnman::OpenNetworkConnection(const CAddress& addrConnect,
         return false;
     }
 
-    CNode* pnode = ConnectNode(addrConnect, pszDest, fCountFailure, conn_type, use_v2transport, proxy_override);
+    CNode* pnode = ConnectNode(addrConnect, pszDest, fCountFailure, conn_type, use_v2transport, proxy_override, netgroup_randomized);
 
     if (!pnode)
         return false;
@@ -4092,6 +4124,7 @@ CNode::CNode(NodeId idIn,
       m_dest(addrNameIn),
       m_inbound_onion{inbound_onion},
       m_prefer_evict{node_opts.prefer_evict},
+      m_netgroup_randomized{node_opts.netgroup_randomized},
       nKeyedNetGroup{nKeyedNetGroupIn},
       m_network_key{network_key},
       m_conn_type{conn_type_in},

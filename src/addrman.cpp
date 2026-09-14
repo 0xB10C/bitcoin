@@ -23,6 +23,7 @@
 #include <util/time.h>
 
 #include <cmath>
+#include <map>
 #include <optional>
 
 
@@ -264,6 +265,8 @@ void AddrManImpl::Unserialize(Stream& s_)
     for (int n = 0; n < nNew; n++) {
         AddrInfo& info = mapInfo[n];
         s >> info;
+        info.mapped_as = m_netgroupman.GetMappedAS(info);
+        info.source_mapped_as = m_netgroupman.GetMappedAS(info.source);
         mapAddr[info] = n;
         info.nRandomPos = vRandom.size();
         vRandom.push_back(n);
@@ -276,6 +279,8 @@ void AddrManImpl::Unserialize(Stream& s_)
     for (int n = 0; n < nTried; n++) {
         AddrInfo info;
         s >> info;
+        info.mapped_as = m_netgroupman.GetMappedAS(info);
+        info.source_mapped_as = m_netgroupman.GetMappedAS(info.source);
         int nKBucket = info.GetTriedBucket(nKey, m_netgroupman);
         int nKBucketPos = info.GetBucketPosition(nKey, false, nKBucket);
         if (info.IsValid()
@@ -399,7 +404,7 @@ AddrInfo* AddrManImpl::Create(const CAddress& addr, const CNetAddr& addrSource, 
     AssertLockHeld(cs);
 
     nid_type nId = nIdCount++;
-    mapInfo[nId] = AddrInfo(addr, addrSource);
+    mapInfo[nId] = AddrInfo(addr, m_netgroupman.GetMappedAS(addr), addrSource, m_netgroupman.GetMappedAS(addrSource));
     mapAddr[addr] = nId;
     mapInfo[nId].nRandomPos = vRandom.size();
     vRandom.push_back(nId);
@@ -592,9 +597,8 @@ bool AddrManImpl::AddSingle(const CAddress& addr, const CNetAddr& source, std::c
             ClearNew(nUBucket, nUBucketPos);
             pinfo->nRefCount++;
             vvNew[nUBucket][nUBucketPos] = nId;
-            const auto mapped_as{m_netgroupman.GetMappedAS(addr)};
             LogDebug(BCLog::ADDRMAN, "Added %s%s to new[%i][%i]\n",
-                     addr.ToStringAddrPort(), (mapped_as ? strprintf(" mapped to AS%i", mapped_as) : ""), nUBucket, nUBucketPos);
+                     addr.ToStringAddrPort(), (pinfo->mapped_as ? strprintf(" mapped to AS%i", pinfo->mapped_as) : ""), nUBucket, nUBucketPos);
         } else {
             if (pinfo->nRefCount == 0) {
                 Delete(nId);
@@ -652,9 +656,8 @@ bool AddrManImpl::Good_(const CService& addr, bool test_before_evict, NodeSecond
     } else {
         // move nId to the tried tables
         MakeTried(info, nId);
-        const auto mapped_as{m_netgroupman.GetMappedAS(addr)};
         LogDebug(BCLog::ADDRMAN, "Moved %s%s to tried[%i][%i]\n",
-                 addr.ToStringAddrPort(), (mapped_as ? strprintf(" mapped to AS%i", mapped_as) : ""), tried_bucket, tried_bucket_pos);
+                 addr.ToStringAddrPort(), (info.mapped_as ? strprintf(" mapped to AS%i", info.mapped_as) : ""), tried_bucket, tried_bucket_pos);
         return true;
     }
 }
@@ -769,6 +772,92 @@ std::pair<CAddress, NodeSeconds> AddrManImpl::Select_(bool new_only, const std::
         }
 
         // Otherwise start over with a (likely) different bucket, and increased chance factor.
+        chance_factor *= 1.2;
+    }
+}
+
+/** Exponent with which a netgroup's address count is weighted when drawing a
+ *  netgroup in SelectByNetgroup_. 1.0 approximates the address-uniform
+ *  selection of Select_, 0.0 draws netgroups uniformly, values in between
+ *  bias the draw toward netgroups with more addresses sublinearly. */
+static constexpr double NETGROUP_WEIGHT_EXPONENT{0.5};
+
+std::pair<CAddress, NodeSeconds> AddrManImpl::SelectByNetgroup_(const std::unordered_set<Network>& networks) const
+{
+    AssertLockHeld(cs);
+
+    if (vRandom.empty()) return {};
+
+    // Only IPv4/IPv6 netgroups are meaningful, see SelectByNetgroup() in addrman.h.
+    std::unordered_set<Network> ipv46_networks;
+    for (const Network net : {NET_IPV4, NET_IPV6}) {
+        if (networks.empty() || networks.contains(net)) ipv46_networks.insert(net);
+    }
+
+    size_t new_count = 0;
+    size_t tried_count = 0;
+    for (const auto& network : ipv46_networks) {
+        auto it = m_network_counts.find(network);
+        if (it == m_network_counts.end()) {
+            continue;
+        }
+        new_count += it->second.n_new;
+        tried_count += it->second.n_tried;
+    }
+    if (new_count + tried_count == 0) return {};
+
+    // Decide if we are going to search the new or tried table
+    // If either option is viable, use a 50% chance to choose
+    bool search_tried;
+    if (tried_count == 0) {
+        search_tried = false;
+    } else if (new_count == 0) {
+        search_tried = true;
+    } else {
+        search_tried = insecure_rand.randbool();
+    }
+
+    // Group the eligible entries of the chosen table by netgroup. Use the
+    // ASN cached at entry creation to avoid an asmap lookup per entry.
+    std::map<std::vector<unsigned char>, std::vector<nid_type>> groups;
+    for (const auto& [nid, info] : mapInfo) {
+        if (info.fInTried != search_tried) continue;
+        if (!ipv46_networks.contains(info.GetNetwork())) continue;
+        auto group{info.mapped_as != 0 ? NetGroupManager::GetGroupFromASN(info.mapped_as) : m_netgroupman.GetGroup(info)};
+        groups[std::move(group)].push_back(nid);
+    }
+    if (!Assume(!groups.empty())) return {};
+
+    // Draw a netgroup, weighted by its address count.
+    double total_weight{0.0};
+    for (const auto& [group, nids] : groups) {
+        total_weight += std::pow(nids.size(), NETGROUP_WEIGHT_EXPONENT);
+    }
+    double target{total_weight * insecure_rand.randbits<53>() / static_cast<double>(uint64_t{1} << 53)};
+    // In case the loop below does not go under the target due to floating
+    // point rounding, use the last netgroup.
+    const std::vector<nid_type>* members{&std::prev(groups.end())->second};
+    for (const auto& [group, nids] : groups) {
+        target -= std::pow(nids.size(), NETGROUP_WEIGHT_EXPONENT);
+        if (target < 0.0) {
+            members = &nids;
+            break;
+        }
+    }
+
+    // Find the entry to return within the netgroup, with the same
+    // GetChance() acceptance as Select_.
+    double chance_factor = 1.0;
+    while (true) {
+        const nid_type node_id{(*members)[insecure_rand.randrange(members->size())]};
+        const auto it_found{mapInfo.find(node_id)};
+        assert(it_found != mapInfo.end());
+        const AddrInfo& info{it_found->second};
+
+        if (insecure_rand.randbits<30>() < chance_factor * info.GetChance() * (1 << 30)) {
+            LogDebug(BCLog::ADDRMAN, "Selected %s from %s (netgroup randomized)\n", info.ToStringAddrPort(), search_tried ? "tried" : "new");
+            return {info, info.m_last_try};
+        }
         chance_factor *= 1.2;
     }
 }
@@ -1208,6 +1297,15 @@ std::pair<CAddress, NodeSeconds> AddrManImpl::Select(bool new_only, const std::u
     return addrRet;
 }
 
+std::pair<CAddress, NodeSeconds> AddrManImpl::SelectByNetgroup(const std::unordered_set<Network>& networks) const
+{
+    LOCK(cs);
+    Check();
+    auto addrRet = SelectByNetgroup_(networks);
+    Check();
+    return addrRet;
+}
+
 std::vector<CAddress> AddrManImpl::GetAddr(size_t max_addresses, size_t max_pct, std::optional<Network> network, const bool filtered) const
 {
     LOCK(cs);
@@ -1309,6 +1407,11 @@ std::pair<CAddress, NodeSeconds> AddrMan::SelectTriedCollision()
 std::pair<CAddress, NodeSeconds> AddrMan::Select(bool new_only, const std::unordered_set<Network>& networks) const
 {
     return m_impl->Select(new_only, networks);
+}
+
+std::pair<CAddress, NodeSeconds> AddrMan::SelectByNetgroup(const std::unordered_set<Network>& networks) const
+{
+    return m_impl->SelectByNetgroup(networks);
 }
 
 std::vector<CAddress> AddrMan::GetAddr(size_t max_addresses, size_t max_pct, std::optional<Network> network, const bool filtered) const
