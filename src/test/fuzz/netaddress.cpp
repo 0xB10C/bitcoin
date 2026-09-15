@@ -51,6 +51,10 @@ FUZZ_TARGET(netaddress)
         assert(net_addr.GetNetwork() == Network::NET_IPV6 || net_addr.GetNetwork() == Network::NET_UNROUTABLE);
     }
     (void)net_addr.IsLocal();
+    if (net_addr.IsMulticast()) {
+        assert(net_addr.IsIPv4() || net_addr.IsIPv6());
+        assert(!net_addr.IsValid());
+    }
     if (net_addr.IsRFC1918() || net_addr.IsRFC2544() || net_addr.IsRFC6598() || net_addr.IsRFC5737() || net_addr.IsRFC3927() || net_addr.IsRFC1112()) {
         assert(net_addr.IsIPv4());
     }

@@ -401,6 +401,11 @@ bool CNetAddr::IsRFC7343() const
            (m_addr[3] & 0xF0) == 0x20;
 }
 
+bool CNetAddr::IsMulticast() const
+{
+    return (IsIPv4() && (m_addr[0] & 0xF0) == 0xE0) || (IsIPv6() && m_addr[0] == 0xFF);
+}
+
 bool CNetAddr::IsHeNet() const
 {
     return IsIPv6() && HasPrefix(m_addr, std::array<uint8_t, 4>{0x20, 0x01, 0x04, 0x70});
@@ -446,6 +451,10 @@ bool CNetAddr::IsValid() const
 
     // documentation IPv6 address
     if (IsRFC3849() || IsRFC9637())
+        return false;
+
+    // multicast addresses do not identify a single host
+    if (IsMulticast())
         return false;
 
     if (IsInternal())
