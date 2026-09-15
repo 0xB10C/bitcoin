@@ -73,6 +73,11 @@ BOOST_AUTO_TEST_CASE(netbase_properties)
     BOOST_CHECK(ResolveIP("2001:20::").IsRFC7343());
     BOOST_CHECK(ResolveIP("FE80::").IsRFC4862());
     BOOST_CHECK(ResolveIP("64:FF9B::").IsRFC6052());
+    BOOST_CHECK(ResolveIP("224.0.0.1").IsMulticast());
+    BOOST_CHECK(ResolveIP("239.255.255.255").IsMulticast());
+    BOOST_CHECK(!ResolveIP("223.255.255.255").IsMulticast());
+    BOOST_CHECK(ResolveIP("FF02::1").IsMulticast());
+    BOOST_CHECK(!ResolveIP("FE80::1").IsMulticast());
     BOOST_CHECK(ResolveIP("pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion").IsTor());
     BOOST_CHECK(ResolveIP("127.0.0.1").IsLocal());
     BOOST_CHECK(ResolveIP("::1").IsLocal());
@@ -81,6 +86,8 @@ BOOST_AUTO_TEST_CASE(netbase_properties)
     BOOST_CHECK(!ResolveIP("240.0.0.1").IsRoutable());
     BOOST_CHECK(ResolveIP("127.0.0.1").IsValid());
     BOOST_CHECK(!ResolveIP("3FFF::").IsValid());
+    BOOST_CHECK(!ResolveIP("224.0.0.1").IsValid());
+    BOOST_CHECK(!ResolveIP("FF02::1").IsValid());
     BOOST_CHECK(CreateInternal("FD6B:88C0:8724:edb1:8e4:3588:e546:35ca").IsInternal());
     BOOST_CHECK(CreateInternal("bar.com").IsInternal());
 
@@ -662,7 +669,7 @@ BOOST_AUTO_TEST_CASE(asmap_test_vectors)
     BOOST_CHECK_EQUAL(netgroup.GetMappedAS(*LookupHost("c49f:9cc6:86ad:ba08:4580:315e:dbd1:8a62", false)), 969411);
     BOOST_CHECK_EQUAL(netgroup.GetMappedAS(*LookupHost("dff5:8021:61d:b17d:406d:7888:fdac:4a20", false)), 969411);
     BOOST_CHECK_EQUAL(netgroup.GetMappedAS(*LookupHost("e888:6791:2960:d723:bcfd:47e1:2d8c:599f", false)), 824019);
-    BOOST_CHECK_EQUAL(netgroup.GetMappedAS(*LookupHost("ffff:d499:8c4b:4941:bc81:d5b9:b51e:85a8", false)), 824019);
+    BOOST_CHECK_EQUAL(netgroup.GetMappedAS(*LookupHost("feff:d499:8c4b:4941:bc81:d5b9:b51e:85a8", false)), 824019);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
