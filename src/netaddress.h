@@ -174,6 +174,7 @@ public:
     bool IsRFC6052() const; // IPv6 well-known prefix for IPv4-embedded address (64:FF9B::/96)
     bool IsRFC6145() const; // IPv6 IPv4-translated address (::FFFF:0:0:0/96) (actually defined in RFC2765)
     bool IsRFC6666() const; // IPv6 discard-only prefix (100::/64)
+    bool IsRFC5180() const; // IPv6 benchmarking (2001:2::/48)
     bool IsMulticast() const; // IPv4 multicast (224.0.0.0/4) or IPv6 multicast (FF00::/8)
     bool IsHeNet() const;   // IPv6 Hurricane Electric - https://he.net (2001:0470::/36)
     [[nodiscard]] bool IsTor() const { return m_net == NET_ONION; }

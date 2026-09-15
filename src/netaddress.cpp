@@ -394,6 +394,11 @@ bool CNetAddr::IsRFC6666() const
     return IsIPv6() && HasPrefix(m_addr, std::array<uint8_t, 8>{0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
 }
 
+bool CNetAddr::IsRFC5180() const
+{
+    return IsIPv6() && HasPrefix(m_addr, std::array<uint8_t, 6>{0x20, 0x01, 0x00, 0x02, 0x00, 0x00});
+}
+
 bool CNetAddr::IsRFC4843() const
 {
     return IsIPv6() && HasPrefix(m_addr, std::array<uint8_t, 3>{0x20, 0x01, 0x00}) &&
@@ -486,7 +491,7 @@ bool CNetAddr::IsValid() const
  */
 bool CNetAddr::IsRoutable() const
 {
-    return IsValid() && !(IsRFC1918() || IsRFC2544() || IsRFC3927() || IsRFC4862() || IsRFC6598() || IsRFC5737() || IsRFC1112() || IsRFC4193() || IsRFC4843() || IsRFC7343() || IsRFC6666() || IsLocal() || IsInternal());
+    return IsValid() && !(IsRFC1918() || IsRFC2544() || IsRFC3927() || IsRFC4862() || IsRFC6598() || IsRFC5737() || IsRFC1112() || IsRFC4193() || IsRFC4843() || IsRFC7343() || IsRFC6666() || IsRFC5180() || IsLocal() || IsInternal());
 }
 
 /**
