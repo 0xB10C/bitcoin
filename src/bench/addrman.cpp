@@ -110,7 +110,7 @@ static void AddrManSelectFromAlmostEmpty(benchmark::Bench& bench)
     AddrMan addrman{EMPTY_NETGROUPMAN, /*deterministic=*/false, ADDRMAN_CONSISTENCY_CHECK_RATIO};
 
     // Add one address to the new table
-    CService addr = Lookup("250.3.1.1", 8333, false).value();
+    CService addr = Lookup("150.3.1.1", 8333, false).value();
     addrman.Add({CAddress(addr, NODE_NONE)}, addr);
 
     bench.run([&] {
@@ -127,7 +127,7 @@ static void AddrManSelectByNetwork(benchmark::Bench& bench)
     i2p_service.SetSpecial("udhdrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p");
     CAddress i2p_address(i2p_service, NODE_NONE);
     i2p_address.nTime = Now<NodeSeconds>();
-    const CNetAddr source{LookupHost("252.2.2.2", false).value()};
+    const CNetAddr source{LookupHost("152.2.2.2", false).value()};
     addrman.Add({i2p_address}, source);
 
     FillAddrMan(addrman);
