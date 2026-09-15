@@ -60,7 +60,7 @@ FUZZ_TARGET(netaddress)
     }
     (void)net_addr.IsRFC1112();
     (void)net_addr.IsRFC2544();
-    if (net_addr.IsRFC3849() || net_addr.IsRFC3964() || net_addr.IsRFC4380() || net_addr.IsRFC4843() || net_addr.IsRFC7343() || net_addr.IsRFC4862() || net_addr.IsRFC6052() || net_addr.IsRFC6145() || net_addr.IsRFC9637()) {
+    if (net_addr.IsRFC3849() || net_addr.IsRFC3964() || net_addr.IsRFC4380() || net_addr.IsRFC4843() || net_addr.IsRFC7343() || net_addr.IsRFC4862() || net_addr.IsRFC6052() || net_addr.IsRFC6145() || net_addr.IsRFC9637() || net_addr.IsRFC6666()) {
         assert(net_addr.IsIPv6());
     }
     (void)net_addr.IsRFC3927();
@@ -75,6 +75,7 @@ FUZZ_TARGET(netaddress)
     (void)net_addr.IsRFC6052();
     (void)net_addr.IsRFC6145();
     (void)net_addr.IsRFC6598();
+    (void)net_addr.IsRFC6666();
     (void)net_addr.IsRFC7343();
     (void)net_addr.IsRFC9637();
     const bool routable{net_addr.IsRoutable()};

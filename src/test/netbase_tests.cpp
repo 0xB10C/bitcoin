@@ -73,6 +73,9 @@ BOOST_AUTO_TEST_CASE(netbase_properties)
     BOOST_CHECK(ResolveIP("2001:20::").IsRFC7343());
     BOOST_CHECK(ResolveIP("FE80::").IsRFC4862());
     BOOST_CHECK(ResolveIP("64:FF9B::").IsRFC6052());
+    BOOST_CHECK(ResolveIP("100::").IsRFC6666());
+    BOOST_CHECK(ResolveIP("100::FFFF:FFFF:FFFF:FFFF").IsRFC6666());
+    BOOST_CHECK(!ResolveIP("100:0:0:1::").IsRFC6666());
     BOOST_CHECK(ResolveIP("224.0.0.1").IsMulticast());
     BOOST_CHECK(ResolveIP("239.255.255.255").IsMulticast());
     BOOST_CHECK(!ResolveIP("223.255.255.255").IsMulticast());
@@ -84,6 +87,7 @@ BOOST_AUTO_TEST_CASE(netbase_properties)
     BOOST_CHECK(ResolveIP("8.8.8.8").IsRoutable());
     BOOST_CHECK(ResolveIP("2001::1").IsRoutable());
     BOOST_CHECK(!ResolveIP("240.0.0.1").IsRoutable());
+    BOOST_CHECK(!ResolveIP("100::1").IsRoutable());
     BOOST_CHECK(ResolveIP("127.0.0.1").IsValid());
     BOOST_CHECK(!ResolveIP("3FFF::").IsValid());
     BOOST_CHECK(!ResolveIP("224.0.0.1").IsValid());
