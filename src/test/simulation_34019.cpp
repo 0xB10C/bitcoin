@@ -19,6 +19,9 @@ static const uint SIMULATION_ITERATIONS = 1'000'000;
 // Rate at which our outbound connections to non-bitprojects IPs succeed.
 // The 25% are based on https://bnoc.xyz/t/outbound-connection-success-rates-of-a-bitcoin-node/142/4
 static const int CONNECTION_SUCCESS_RATE = 25;  // %
+// Number of raw address draws used to measure the attacker's effective
+// per-draw selection probability q (input to the analytical model).
+static const uint MEASURE_Q_ITERATIONS = 1'000'000;
 
 struct PeersDatFile {
     fs::path path;
@@ -179,6 +182,27 @@ static void run(node::NodeContext& node, const PeersDatFile& file) {
         counts[bitprojects_connections]++;
     }
 
+    // Measure the attacker's effective per-draw share q: how often the real
+    // selection path (Select() + the ThreadOpenConnections filters) returns a
+    // Bitprojects address when no netgroups are excluded yet. This is the 
+    // `measured q` the analytical model needs.
+    // Counting addresses under-states it, since bucket-based selection,
+    // GetChance() and the service/port filters all favor fresh, always-
+    // accepting attacker addresses over stale honest ones. Done after the
+    // simulation so the addrman RNG stream (and thus the results) is unchanged.
+    uint32_t draws = 0;
+    uint32_t draws_bitprojects = 0;
+    for (uint i = 0; i < MEASURE_Q_ITERATIONS; i++) {
+        std::optional<CAddress> address_opt = connman->TryPickOutboundAddress(
+            /*anchor=*/false, ConnectionType::OUTBOUND_FULL_RELAY, /*feeler=*/false,
+            /*outbound_ipv46_peer_netgroups=*/{}, /*preferred_net=*/std::nullopt);
+        if (!address_opt) continue;
+        draws++;
+        if (address_opt->IsBitprojects()) draws_bitprojects++;
+    }
+    const double q_measured = static_cast<double>(draws_bitprojects) / draws;
+    const double q_raw = 0.5 * file.bitprojects_new / file.new_ + 0.5 * file.bitprojects_tried / file.tried;
+
     fs::path input_path{file.path};
     fs::path output_path =
         input_path.parent_path() /
@@ -187,6 +211,10 @@ static void run(node::NodeContext& node, const PeersDatFile& file) {
 
     std::string peers_dat_filename = fs::PathToString(file.path);
     fputs((peers_dat_filename + "\n").c_str(), out);
+    fprintf(out, "# q raw:      %.4f \t (0.5 * %u/%u + 0.5 * %u/%u)\n", q_raw,
+            file.bitprojects_new, file.new_, file.bitprojects_tried, file.tried);
+    fprintf(out, "# q measured: %.4f \t (%u/%u TryPickOutboundAddress draws, no netgroups excluded)\n",
+            q_measured, draws_bitprojects, draws);
     for (size_t i = 0; i < counts.size(); ++i) {
         if (counts[i] > 0) {
             float percentage = counts[i] * 100.0 / SIMULATION_ITERATIONS;
