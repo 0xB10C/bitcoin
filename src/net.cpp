@@ -25,6 +25,7 @@
 #include <netbase.h>
 #include <node/eviction.h>
 #include <node/interface_ui.h>
+#include <node/net_trace.h>
 #include <protocol.h>
 #include <random.h>
 #include <scheduler.h>
@@ -4193,6 +4194,10 @@ void CConnman::PushMessage(CNode* pnode, CSerializedNetMsg&& msg)
         msg.data.size(),
         msg.data.data()
     );
+    if (m_net_tracer && m_net_tracer->active()) {
+        m_net_tracer->record(/*inbound=*/false, pnode->GetId(), pnode->m_addr_name,
+                             pnode->ConnectionTypeAsString(), msg.m_type, MakeUCharSpan(msg.data));
+    }
 
     size_t nBytesSent = 0;
     {

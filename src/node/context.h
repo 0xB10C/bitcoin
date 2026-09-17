@@ -44,6 +44,7 @@ class SignalInterrupt;
 
 namespace node {
 class KernelNotifications;
+class NetMessageTracer;
 class Warnings;
 
 //! NodeContext struct containing references to chain state and connection
@@ -95,6 +96,8 @@ struct NodeContext {
     std::unique_ptr<KernelNotifications> notifications;
     //! Issues calls about blocks and transactions
     std::unique_ptr<ValidationSignals> validation_signals;
+    //! Fans out P2P message trace events to subscribers (IPC tracing)
+    std::unique_ptr<NetMessageTracer> net_tracer;
     std::atomic<int> exit_status{EXIT_SUCCESS};
     //! Manages all the node warnings
     std::unique_ptr<node::Warnings> warnings;

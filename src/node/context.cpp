@@ -14,6 +14,7 @@
 #include <net_processing.h>
 #include <netgroup.h>
 #include <node/kernel_notifications.h>
+#include <node/net_trace.h>
 #include <node/warnings.h>
 #include <policy/fees/estimator_man.h>
 #include <scheduler.h>
