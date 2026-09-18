@@ -14,10 +14,18 @@ fn main() {
     // Pre-generated vmlinux.h from the `vmlinux` crate, so no bpftool is needed.
     let mut clang_args: Vec<OsString> = vec![
         OsString::from("-I"),
-        vmlinux::include_path_root().join(arch).into_os_string(),
+        vmlinux::include_path_root().join(&arch).into_os_string(),
     ];
+    // usdt.bpf.h includes <linux/errno.h> -> <asm/errno.h>. On Debian/Ubuntu
+    // the asm headers live in the multiarch directory, which clang does not
+    // search when targeting bpf, so add it explicitly when it exists.
+    let multiarch = PathBuf::from(format!("/usr/include/{arch}-linux-gnu"));
+    if multiarch.join("asm").is_dir() {
+        clang_args.push(OsString::from("-I"));
+        clang_args.push(multiarch.into_os_string());
+    }
     // BPF_CFLAGS adds extra clang arguments, e.g. an include path providing
-    // <linux/errno.h> (needed by usdt.bpf.h) on systems without /usr/include.
+    // <linux/errno.h> on systems without /usr/include (NixOS).
     if let Ok(extra) = env::var("BPF_CFLAGS") {
         clang_args.extend(extra.split_whitespace().map(OsString::from));
     }
