@@ -50,28 +50,37 @@ struct msg_event {{
 BPF_PERCPU_ARRAY(scratch, struct msg_event, 1);
 BPF_PERF_OUTPUT(events);
 
-static __always_inline int trace_message(struct pt_regs *ctx, u64 inbound) {{
-    u32 zero = 0;
-    struct msg_event *e = scratch.lookup(&zero);
-    if (e == NULL) return 1;
-    e->ts_ns = bpf_ktime_get_ns();
-    e->inbound = inbound;
-    bpf_usdt_readarg(1, ctx, &e->peer_id);
-    bpf_usdt_readarg_p(4, ctx, &e->msg_type, MAX_MSG_TYPE_LENGTH);
-    bpf_usdt_readarg(5, ctx, &e->msg_size);
 #if MAX_PAYLOAD > 0
-    void *payload = NULL;
-    bpf_usdt_readarg(6, ctx, &payload);
-    u64 len = e->msg_size;
-    if (len > MAX_PAYLOAD) len = MAX_PAYLOAD;
-    bpf_probe_read_user(&e->payload, len, payload);
+#define READ_PAYLOAD(e, ctx)                                    \
+    {{                                                          \
+        void *payload = NULL;                                   \
+        bpf_usdt_readarg(6, ctx, &payload);                     \
+        u64 len = e->msg_size;                                  \
+        if (len > MAX_PAYLOAD) len = MAX_PAYLOAD;               \
+        bpf_probe_read_user(&e->payload, len, payload);         \
+    }}
+#else
+#define READ_PAYLOAD(e, ctx)
 #endif
-    events.perf_submit(ctx, e, sizeof(*e));
-    return 0;
-}}
 
-int trace_inbound_message(struct pt_regs *ctx) {{ return trace_message(ctx, 1); }}
-int trace_outbound_message(struct pt_regs *ctx) {{ return trace_message(ctx, 0); }}
+// The probe bodies are expanded textually (not a shared helper function):
+// some BCC/kernel combinations reject the shared-function form with
+// "jump out of range" verifier errors.
+#define TRACE_MESSAGE_BODY(inbound_value)                               \
+    u32 zero = 0;                                                       \
+    struct msg_event *e = scratch.lookup(&zero);                        \
+    if (e == NULL) return 1;                                            \
+    e->ts_ns = bpf_ktime_get_ns();                                      \
+    e->inbound = inbound_value;                                         \
+    bpf_usdt_readarg(1, ctx, &e->peer_id);                              \
+    bpf_usdt_readarg_p(4, ctx, &e->msg_type, MAX_MSG_TYPE_LENGTH);      \
+    bpf_usdt_readarg(5, ctx, &e->msg_size);                             \
+    READ_PAYLOAD(e, ctx)                                                \
+    events.perf_submit(ctx, e, sizeof(*e));                             \
+    return 0;
+
+int trace_inbound_message(struct pt_regs *ctx) {{ TRACE_MESSAGE_BODY(1) }}
+int trace_outbound_message(struct pt_regs *ctx) {{ TRACE_MESSAGE_BODY(0) }}
 """
 
 

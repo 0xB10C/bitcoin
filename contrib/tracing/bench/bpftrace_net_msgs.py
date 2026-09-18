@@ -9,8 +9,10 @@ needs BTF, /sys/kernel/btf/vmlinux).
 
 bpftrace prints one line per event through its perf ring buffer; this wrapper
 parses those lines and counts events, bytes and delivery latency. Events lost
-in the ring buffer are reported by bpftrace on stderr as "Lost N events" and
-are counted as `dropped`.
+in the ring buffer are reported by bpftrace as "Lost N events" (on stdout in
+recent versions, stderr in older ones) and are counted as `dropped`. Note that
+bpftrace formats every event in a single user-space thread, so at high rates it
+is the bottleneck; the BCC receiver (binary structs) is the fairer comparison.
 
 Example:
   sudo ./bpftrace_net_msgs.py --pid $(pidof bitcoin-node) --payload 8 --duration 60
@@ -30,7 +32,8 @@ LOST_RE = re.compile(r"Lost (\d+) events?")
 
 
 def build_script(exe, payload):
-    fmt = "%d %d %s %d %d"
+    # %lu: bpftrace's %d formats a 32-bit int, which truncates nsecs.
+    fmt = "%d %ld %s %lu %lu"
     args = "arg0, str(arg3), arg4, nsecs"
     if payload > 0:
         fmt += " %r"
@@ -117,6 +120,10 @@ def main():
             now_ns = time.monotonic_ns()
             parts = line.split(" ", 5)
             if len(parts) < 5:
+                m = LOST_RE.search(line)
+                if m:
+                    with lock:
+                        interval.dropped += int(m.group(1))
                 continue
             try:
                 inbound, msg_type, size, ts_ns = int(parts[0]), parts[2], int(parts[3]), int(parts[4])
