@@ -23,6 +23,10 @@
 #include <thread>
 #include <utility>
 
+#if defined(__x86_64__) && defined(__SSE2__)
+#include <emmintrin.h>
+#endif
+
 namespace node {
 
 namespace {
@@ -77,6 +81,34 @@ util::SharedMemory MakeArena(const ArenaPlan& plan)
     auto shm{util::SharedMemory::Create(plan.slot_bytes * plan.slot_count, error)};
     if (!shm) LogDebug(BCLog::IPC, "Net message trace: no shared payload arena: %s\n", error);
     return shm;
+}
+
+//! Copy a payload into the shared arena.
+//!
+//! The node never reads these bytes back, and the subscriber reads them from
+//! another core, so the read-for-ownership a normal memcpy does on the
+//! destination is pure waste: it doubles the memory traffic and evicts the
+//! node's own working set from cache. Non-temporal stores skip it. SSE2 is
+//! baseline on x86-64, so this needs no runtime dispatch; elsewhere it is a
+//! plain memcpy.
+void CopyToArena(std::byte* dst, const unsigned char* src, size_t n)
+{
+#if defined(__x86_64__) && defined(__SSE2__)
+    size_t i{0};
+    if (reinterpret_cast<uintptr_t>(dst) % sizeof(__m128i) == 0) {
+        for (; i + sizeof(__m128i) <= n; i += sizeof(__m128i)) {
+            __m128i v;
+            std::memcpy(&v, src + i, sizeof(v));
+            _mm_stream_si128(reinterpret_cast<__m128i*>(dst + i), v);
+        }
+    }
+    std::memcpy(dst + i, src + i, n - i);
+    // Non-temporal stores are weakly ordered on x86: without this they are not
+    // necessarily visible before the release store that publishes the event.
+    _mm_sfence();
+#else
+    std::memcpy(dst, src, n);
+#endif
 }
 
 int64_t NowUs()
@@ -249,7 +281,7 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
                 dropped.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
-            std::memcpy(arena.data() + uint64_t{slot} * plan.slot_bytes, payload.data(), copy);
+            CopyToArena(arena.data() + uint64_t{slot} * plan.slot_bytes, payload.data(), copy);
         } else if (copy > INLINE_PAYLOAD) {
             // Byte bound: reserve first, give back on failure.
             if (queued_bytes.fetch_add(copy, std::memory_order_relaxed) + copy > opts.max_queue_bytes) {
