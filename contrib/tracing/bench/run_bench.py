@@ -14,6 +14,7 @@ Examples:
   run_bench.py run --mode none
   run_bench.py run --mode ipc --payload 8
   run_bench.py run --mode ebpf --payload 8   # prints a sudo command to run in another terminal
+  run_bench.py run --mode ebpf --engine bpftrace --payload 8
   run_bench.py compare results/*.json
 
 The eBPF receiver needs root, so in --mode ebpf this script prints the exact
@@ -218,10 +219,13 @@ def run(args):
             result["receiver_cmd"] = cmd
             print(f"[bench] bitcoin-trace pid={receiver.pid} subscribed", flush=True)
         elif args.mode == "ebpf":
-            receiver_script = "bpftrace_net_msgs.py" if args.engine == "bpftrace" else "ebpf_net_msgs.py"
-            cmd = ["sudo", sys.executable, os.path.join(HERE, receiver_script), "--pid", str(node.proc.pid),
-                   "--payload", str(args.payload), "--page-cnt", str(args.page_cnt), "--ready-file", ready_file,
-                   "--stop-file", stop_file, "--out", receiver_out, "--json"]
+            if args.engine == "libbpf":
+                cmd = ["sudo", args.libbpf_receiver]
+            else:
+                receiver_script = "bpftrace_net_msgs.py" if args.engine == "bpftrace" else "ebpf_net_msgs.py"
+                cmd = ["sudo", sys.executable, os.path.join(HERE, receiver_script)]
+            cmd += ["--pid", str(node.proc.pid), "--payload", str(args.payload), "--page-cnt", str(args.page_cnt),
+                    "--ready-file", ready_file, "--stop-file", stop_file, "--out", receiver_out, "--json"]
             if args.engine == "bpftrace":
                 # Root shells often lack the user's PATH (e.g. nix shells), so pass the absolute path.
                 cmd += ["--bpftrace", shutil.which("bpftrace") or "bpftrace"]
@@ -354,8 +358,12 @@ def main():
     p.add_argument("--queue", type=int, default=65536, help="ipc: node-side queue size")
     p.add_argument("--batch", type=int, default=1024, help="ipc: max events per IPC call")
     p.add_argument("--page-cnt", type=int, default=1024, help="ebpf: perf buffer pages per CPU")
-    p.add_argument("--engine", choices=["bpftrace", "bcc"], default="bpftrace",
-                   help="ebpf: receiver implementation (bcc needs kernel headers, bpftrace only BTF)")
+    p.add_argument("--engine", choices=["libbpf", "bpftrace", "bcc"], default="libbpf",
+                   help="ebpf: receiver implementation: libbpf (Rust, ring buffer; build libbpf-receiver first), "
+                        "bpftrace (only needs BTF), bcc (needs kernel headers)")
+    p.add_argument("--libbpf-receiver",
+                   default=os.path.join(HERE, "libbpf-receiver", "target", "release", "net-msgs-libbpf"),
+                   help="ebpf: path to the built libbpf-rs receiver binary")
     p.add_argument("--run-receiver", action="store_true",
                    help="ebpf: start the receiver via non-interactive sudo instead of waiting for the user")
     p.add_argument("--maxreceivebuffer", type=int, default=5000)

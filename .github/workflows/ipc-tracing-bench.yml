@@ -57,8 +57,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential ccache cmake ninja-build pkgconf python3 \
             libboost-dev libevent-dev capnproto libcapnp-dev systemtap-sdt-dev \
+            clang libelf-dev zlib1g-dev \
             bpftrace bpfcc-tools python3-bpfcc "linux-headers-$(uname -r)"
           bpftrace --version
+          cargo --version
           uname -r
           nproc
 
@@ -95,6 +97,21 @@ jobs:
           path: ${{ env.CCACHE_DIR }}
           key: ${{ steps.ccache-cache.outputs.cache-primary-key }}
 
+      - name: Restore cargo cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contrib/tracing/bench/libbpf-receiver/target
+          key: ${{ github.job }}-cargo-${{ hashFiles('contrib/tracing/bench/libbpf-receiver/Cargo.lock') }}
+          restore-keys: ${{ github.job }}-cargo-
+
+      - name: Build libbpf-rs receiver
+        run: |
+          cargo build --release --manifest-path contrib/tracing/bench/libbpf-receiver/Cargo.toml
+          contrib/tracing/bench/libbpf-receiver/target/release/net-msgs-libbpf || true
+
       - name: Functional test (IPC tracing)
         run: build/test/functional/test_runner.py interface_ipc_tracing.py interface_ipc_cli.py
 
@@ -117,6 +134,14 @@ jobs:
             done
           done
 
+      - name: eBPF tracing (libbpf-rs, ring buffer)
+        run: |
+          for payload in $PAYLOADS; do
+            for i in $(seq 1 "$REPEATS"); do
+              contrib/tracing/bench/run_bench.py run --mode ebpf --engine libbpf --run-receiver --payload "$payload" --label "libbpf-p${payload}-rep$i" --results "$RESULTS" --stages "$STAGES" --total "$TOTAL"
+            done
+          done
+
       - name: eBPF tracing (bpftrace)
         run: |
           for payload in $PAYLOADS; do
@@ -126,6 +151,7 @@ jobs:
           done
 
       - name: eBPF tracing (BCC)
+        continue-on-error: true
         run: |
           for payload in $PAYLOADS; do
             for i in $(seq 1 "$REPEATS"); do

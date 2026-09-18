@@ -12,18 +12,26 @@ and what it costs the node.
   (`rate:seconds,...`, rate `0` = as fast as the node accepts) and drains the
   node's replies. Every `pong` it receives is one ping the node processed, so
   `2 * pongs` is the number of ping/pong trace events the node emitted.
-- `bpftrace_net_msgs.py`: bpftrace receiver attaching to the two USDT
-  tracepoints; one printf line per event, "Lost N events" counted as drops.
-  Needs root, BTF (`/sys/kernel/btf/vmlinux`) and a node built with
-  `-DWITH_USDT=ON`. Default engine of the driver.
-- `ebpf_net_msgs.py`: BCC receiver, same interface, delivering a binary struct
-  per event with `open_perf_buffer(..., lost_cb=...)`. Needs kernel headers in
-  addition (`--engine bcc`).
+- `libbpf-receiver/`: Rust (libbpf-rs) receiver, the default eBPF engine and
+  the fair baseline: one fixed-size event per USDT hit into a BPF ring buffer,
+  consumed without per-event allocation; drops are counted in the BPF program
+  (failed `bpf_ringbuf_reserve`). Build with
+  `cargo build --release --manifest-path contrib/tracing/bench/libbpf-receiver/Cargo.toml`
+  (needs clang, libelf and zlib headers; `vmlinux.h` comes from the `vmlinux`
+  crate, so no bpftool). On NixOS set `BPF_CLANG` to an unwrapped clang and
+  `BPF_CFLAGS=-I<linux-headers>/include`. Needs root and BTF at runtime.
+- `bpftrace_net_msgs.py`: bpftrace receiver (`--engine bpftrace`); one printf
+  line per event, "Lost N events" counted as drops. Only needs BTF. Its single
+  user-space formatting thread is the bottleneck at high rates.
+- `ebpf_net_msgs.py`: BCC receiver (`--engine bcc`), binary struct per event via
+  `open_perf_buffer(..., lost_cb=...)`, Python callback per event. Needs kernel
+  headers.
 - `bitcoin-trace` (in `src/`): IPC receiver. `-stats -json` prints per-second
   counters and a summary with the same schema as the eBPF receiver.
 - `run_bench.py`: starts a regtest `bitcoin-node` with `-ipcbind=unix`, attaches
   the receiver, runs the flooder, samples node CPU/RSS, writes
   `results/<timestamp>-<mode>.json`, and `compare` prints a markdown table.
+  `--mode ebpf --engine libbpf|bpftrace|bcc` selects the eBPF receiver.
 
 ## Running
 
@@ -52,8 +60,11 @@ load failure"); run it on a host or a VM instead.
 - Latency is `now - event timestamp` when the receiver sees an event. Both the
   node (`std::chrono::steady_clock`) and eBPF (`bpf_ktime_get_ns`) use
   `CLOCK_MONOTONIC`, so the numbers are comparable. For IPC this includes queueing
-  in the node and the batch RPC; for eBPF it includes the perf buffer and BCC's
-  polling loop.
+  in the node and the batch RPC; for eBPF it includes the ring/perf buffer and
+  the receiver's polling loop.
+- eBPF's cost to the node is the uprobe trap on every tracepoint hit (on the
+  `msghand` thread), independent of the receiver; the receiver only determines
+  how many events survive. IPC's cost is the enqueue plus the delivery thread.
 - The node's `msghand` thread is single-threaded and replies to every ping, so the
   achievable ping rate is bounded by the node, not by the flooder. Backpressure
   (`-maxreceivebuffer`, `-maxsendbuffer`) is left at defaults unless overridden.

@@ -1,0 +1,20 @@
+[package]
+name = "net-msgs-libbpf"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "libbpf-rs ring-buffer receiver for the net:inbound_message / net:outbound_message USDT tracepoints (IPC vs eBPF benchmark)"
+license = "MIT"
+
+[dependencies]
+libbpf-rs = "0.27"
+libc = "0.2"
+plain = "0.2"
+
+[build-dependencies]
+libbpf-cargo = "0.27"
+# Pre-generated vmlinux.h for CO-RE builds, so no bpftool is needed at build time.
+vmlinux = { git = "https://github.com/libbpf/vmlinux.h.git", rev = "c32912840154a82205530cd6d498b346ac73a6d1" }
+
+[profile.release]
+debug = 1
