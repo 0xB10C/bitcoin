@@ -123,6 +123,24 @@ the IPC message entirely. Size the arena for the number of messages that may be
 in flight: `--shm 268435456` with 4 MB slots gives 64 of them. Events for which
 no slot is free are dropped and counted, like a full queue.
 
+The node writes into the arena with non-temporal stores. It never reads those
+bytes back and the subscriber reads them from another core, so the
+read-for-ownership a normal memcpy does on the destination is wasted memory
+traffic. Measured per payload on one box (node write / client read, in µs,
+destination cold as it is in a rotating arena):
+
+| payload | memcpy | non-temporal |
+|---|---|---|
+| 4 KiB | 0.34 / 0.20 | 0.17 / 0.21 |
+| 256 KiB | 17.6 / 12.4 | 4.1 / 13.6 |
+| 1 MiB | 75.7 / 54.1 | 16.9 / 67.5 |
+| 4 MiB | 283 / 195 | 92 / 221 |
+
+The node gets 2-4.5x cheaper at every size and the subscriber pays about 15%
+more on the read, so there is no size threshold: the arena always uses
+streaming stores. The non-arena path does not, because there the event-loop
+thread and the kernel read the buffer back.
+
 `--checksum` makes the IPC and libbpf receivers sum every captured payload byte,
 so that the cost of actually reading the payload is part of the measurement
 instead of only the cost of delivering it.
