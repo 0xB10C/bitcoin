@@ -26,12 +26,24 @@ and what it costs the node.
 - `ebpf_net_msgs.py`: BCC receiver (`--engine bcc`), binary struct per event via
   `open_perf_buffer(..., lost_cb=...)`, Python callback per event. Needs kernel
   headers.
-- `bitcoin-trace` (in `src/`): IPC receiver. `-stats -json` prints per-second
-  counters and a summary with the same schema as the eBPF receiver.
+- `bitcoin-trace` (in `src/`): IPC receiver (C++, libmultiprocess). `-stats -json`
+  prints per-second counters and a summary with the same schema as the eBPF
+  receivers.
+- `ipc-receiver-rs/`: Rust IPC receiver (capnp-rpc, modeled on peer-observer's
+  ipc-extractor). Compiles the repo's `src/ipc/capnp/*.capnp` with capnpc at
+  build time, implements the `ThreadMap`/`Thread` and `NetMessageTrace`
+  capabilities the node calls back into, and counts events straight from the
+  Cap'n Proto readers. Build with
+  `cargo build --release --manifest-path contrib/tracing/bench/ipc-receiver-rs/Cargo.toml`
+  (needs the `capnp` compiler). Select with `--ipc-client rust`. About 3x
+  cheaper per event than `bitcoin-trace` (0.08 vs 0.23 µs at ~500k events/s),
+  because libmultiprocess converts every event into `std::string`-carrying
+  structs while the Rust client reads fields in place.
 - `run_bench.py`: starts a regtest `bitcoin-node` with `-ipcbind=unix`, attaches
   the receiver, runs the flooder, samples node CPU/RSS, writes
   `results/<timestamp>-<mode>.json`, and `compare` prints a markdown table.
-  `--mode ebpf --engine libbpf|bpftrace|bcc` selects the eBPF receiver.
+  `--mode ebpf --engine libbpf|bpftrace|bcc` selects the eBPF receiver,
+  `--mode ipc --ipc-client cpp|rust` the IPC receiver.
 
 ## Running
 

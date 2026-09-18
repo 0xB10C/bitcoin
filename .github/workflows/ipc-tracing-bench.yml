@@ -104,13 +104,19 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             contrib/tracing/bench/libbpf-receiver/target
-          key: ${{ github.job }}-cargo-${{ hashFiles('contrib/tracing/bench/libbpf-receiver/Cargo.lock') }}
+            contrib/tracing/bench/ipc-receiver-rs/target
+          key: ${{ github.job }}-cargo-${{ hashFiles('contrib/tracing/bench/libbpf-receiver/Cargo.lock', 'contrib/tracing/bench/ipc-receiver-rs/Cargo.lock') }}
           restore-keys: ${{ github.job }}-cargo-
 
       - name: Build libbpf-rs receiver
         run: |
           cargo build --release --manifest-path contrib/tracing/bench/libbpf-receiver/Cargo.toml
           contrib/tracing/bench/libbpf-receiver/target/release/net-msgs-libbpf || true
+
+      - name: Build Rust IPC client
+        run: |
+          cargo build --release --manifest-path contrib/tracing/bench/ipc-receiver-rs/Cargo.toml
+          contrib/tracing/bench/ipc-receiver-rs/target/release/net-msgs-ipc || true
 
       - name: Functional test (IPC tracing)
         run: build/test/functional/test_runner.py interface_ipc_tracing.py interface_ipc_cli.py
@@ -135,6 +141,14 @@ jobs:
           done
           # Without batch coalescing, for comparison.
           contrib/tracing/bench/run_bench.py run --mode ipc --payload 0 --batchwait 0 --label "p0-nowait" --results "$RESULTS" --stages "$STAGES" --total "$TOTAL"
+
+      - name: IPC tracing (Rust client)
+        run: |
+          for payload in $PAYLOADS; do
+            for i in $(seq 1 "$REPEATS"); do
+              contrib/tracing/bench/run_bench.py run --mode ipc --ipc-client rust --payload "$payload" --label "rust-p${payload}-rep$i" --results "$RESULTS" --stages "$STAGES" --total "$TOTAL"
+            done
+          done
 
       - name: eBPF tracing (libbpf-rs, ring buffer)
         run: |

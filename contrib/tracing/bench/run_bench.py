@@ -13,6 +13,7 @@ result files.
 Examples:
   run_bench.py run --mode none
   run_bench.py run --mode ipc --payload 8
+  run_bench.py run --mode ipc --ipc-client rust --payload 8
   run_bench.py run --mode ebpf --payload 8   # prints a sudo command to run in another terminal
   run_bench.py run --mode ebpf --engine bpftrace --payload 8
   run_bench.py compare results/*.json
@@ -205,10 +206,15 @@ def run(args):
         print(f"[bench] node pid={node.proc.pid} ready", flush=True)
 
         if args.mode == "ipc":
-            cmd = [args.trace, "-regtest", f"-datadir={datadir}", f"-ipcconnect=unix:{node.socket_path}",
-                   "-stats", "-json", f"-payload={args.payload}", f"-queue={args.queue}", f"-batch={args.batch}",
-                   f"-batchwait={args.batchwait}",
-                   f"-out={receiver_out}"]
+            if args.ipc_client == "rust":
+                cmd = [args.ipc_rust_client, "--socket", node.socket_path, "--json", "--payload", str(args.payload),
+                       "--queue", str(args.queue), "--batch", str(args.batch), "--batchwait", str(args.batchwait),
+                       "--out", receiver_out]
+            else:
+                cmd = [args.trace, "-regtest", f"-datadir={datadir}", f"-ipcconnect=unix:{node.socket_path}",
+                       "-stats", "-json", f"-payload={args.payload}", f"-queue={args.queue}", f"-batch={args.batch}",
+                       f"-batchwait={args.batchwait}",
+                       f"-out={receiver_out}"]
             receiver_log = open(os.path.join(workdir, "receiver.log"), "w", encoding="utf-8")
             receiver = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=receiver_log, text=True)
             line = receiver.stdout.readline()
@@ -218,7 +224,7 @@ def run(args):
             threading.Thread(target=lambda: [receiver_log.write(ln) for ln in receiver.stdout], daemon=True).start()
             sampler.add("receiver", receiver.pid)
             result["receiver_cmd"] = cmd
-            print(f"[bench] bitcoin-trace pid={receiver.pid} subscribed", flush=True)
+            print(f"[bench] {args.ipc_client} IPC client pid={receiver.pid} subscribed", flush=True)
         elif args.mode == "ebpf":
             if args.engine == "libbpf":
                 cmd = ["sudo", args.libbpf_receiver]
@@ -359,6 +365,12 @@ def main():
     p.add_argument("--queue", type=int, default=65536, help="ipc: node-side queue size")
     p.add_argument("--batch", type=int, default=1024, help="ipc: max events per IPC call")
     p.add_argument("--batchwait", type=int, default=1000, help="ipc: microseconds the node may wait for a batch to fill")
+    p.add_argument("--ipc-client", choices=["cpp", "rust"], default="cpp",
+                   help="ipc: receiver implementation: cpp (bitcoin-trace, libmultiprocess) or rust (capnp-rpc, "
+                        "build ipc-receiver-rs first)")
+    p.add_argument("--ipc-rust-client",
+                   default=os.path.join(HERE, "ipc-receiver-rs", "target", "release", "net-msgs-ipc"),
+                   help="ipc: path to the built Rust IPC client binary")
     p.add_argument("--page-cnt", type=int, default=1024, help="ebpf: perf buffer pages per CPU")
     p.add_argument("--engine", choices=["libbpf", "bpftrace", "bcc"], default="libbpf",
                    help="ebpf: receiver implementation: libbpf (Rust, ring buffer; build libbpf-receiver first), "
