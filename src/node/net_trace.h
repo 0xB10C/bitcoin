@@ -8,6 +8,7 @@
 #include <interfaces/tracing.h>
 #include <sync.h>
 
+#include <array>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -22,12 +23,14 @@ namespace node {
  * Fan-out hub for P2P message trace events.
  *
  * The net code calls active() (a relaxed atomic load) on every message and
- * record() only when there is at least one subscriber. record() builds the
- * event once and appends it to each subscriber's bounded queue. A dedicated
- * delivery thread per subscriber drains that queue in batches and calls the
- * subscriber's callback, so no callback (and no IPC) ever runs on the net
- * threads. Events recorded while a subscriber's queue is full are dropped and
- * the drop count is reported with the next batch.
+ * record() only when there is at least one subscriber. record() copies the
+ * event into each subscriber's bounded lock-free ring; it never blocks, never
+ * takes a lock and never makes a system call (a payload larger than the
+ * inline slot buffer may allocate). A dedicated delivery thread per subscriber
+ * polls its ring, batches events and calls the subscriber's callback, so no
+ * callback (and no IPC) ever runs on the net threads. Events recorded while a
+ * subscriber's ring is full are dropped and the drop count is reported with
+ * the next batch.
  *
  * This header must not include net.h (net.cpp includes this header).
  */
@@ -59,18 +62,20 @@ public:
 
 private:
     struct Subscriber;
+    static constexpr size_t MAX_SUBSCRIBERS{8};
     //! Shared so that handler cleanups running after the tracer is destroyed
     //! (possible with IPC clients disconnecting late) are harmless.
     struct State {
+        //! Serializes subscribe/remove only; producers never take it.
         mutable Mutex mutex;
-        std::vector<std::shared_ptr<Subscriber>> subscribers GUARDED_BY(mutex);
-        //! Largest max_payload_bytes over all subscribers.
-        uint32_t max_payload GUARDED_BY(mutex){0};
+        //! Subscribers visible to producers, read lock-free in record().
+        std::array<std::atomic<Subscriber*>, MAX_SUBSCRIBERS> slots{};
+        //! Ownership of the subscribers in `slots`.
+        std::vector<std::shared_ptr<Subscriber>> owned GUARDED_BY(mutex);
         std::atomic<int> active{0};
 
         //! Remove a subscriber if present. Idempotent. Does not join.
         void Remove(const std::shared_ptr<Subscriber>& sub) EXCLUSIVE_LOCKS_REQUIRED(!mutex);
-        void RecomputeMaxPayload() EXCLUSIVE_LOCKS_REQUIRED(mutex);
     };
     std::shared_ptr<State> m_state;
 };
