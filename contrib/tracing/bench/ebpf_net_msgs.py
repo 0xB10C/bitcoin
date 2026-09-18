@@ -50,38 +50,39 @@ struct msg_event {{
 BPF_PERCPU_ARRAY(scratch, struct msg_event, 1);
 BPF_PERF_OUTPUT(events);
 
-#if MAX_PAYLOAD > 0
-#define READ_PAYLOAD(e, ctx)                                    \
-    {{                                                          \
-        void *payload = NULL;                                   \
-        bpf_usdt_readarg(6, ctx, &payload);                     \
-        u64 len = e->msg_size;                                  \
-        if (len > MAX_PAYLOAD) len = MAX_PAYLOAD;               \
-        bpf_probe_read_user(&e->payload, len, payload);         \
-    }}
-#else
-#define READ_PAYLOAD(e, ctx)
-#endif
-
-// The probe bodies are expanded textually (not a shared helper function):
-// some BCC/kernel combinations reject the shared-function form with
-// "jump out of range" verifier errors.
-#define TRACE_MESSAGE_BODY(inbound_value)                               \
-    u32 zero = 0;                                                       \
-    struct msg_event *e = scratch.lookup(&zero);                        \
-    if (e == NULL) return 1;                                            \
-    e->ts_ns = bpf_ktime_get_ns();                                      \
-    e->inbound = inbound_value;                                         \
-    bpf_usdt_readarg(1, ctx, &e->peer_id);                              \
-    bpf_usdt_readarg_p(4, ctx, &e->msg_type, MAX_MSG_TYPE_LENGTH);      \
-    bpf_usdt_readarg(5, ctx, &e->msg_size);                             \
-    READ_PAYLOAD(e, ctx)                                                \
-    events.perf_submit(ctx, e, sizeof(*e));                             \
-    return 0;
-
-int trace_inbound_message(struct pt_regs *ctx) {{ TRACE_MESSAGE_BODY(1) }}
-int trace_outbound_message(struct pt_regs *ctx) {{ TRACE_MESSAGE_BODY(0) }}
+{probes}
 """
+
+# One full function per probe. The body is duplicated on purpose: a shared
+# helper function was rejected by the verifier on some BCC/kernel combinations
+# ("jump out of range"), and BCC does not allow map calls inside C macros.
+PROBE = """
+int trace_{name}(struct pt_regs *ctx) {{
+    u32 zero = 0;
+    struct msg_event *e = scratch.lookup(&zero);
+    if (e == NULL) return 1;
+    e->ts_ns = bpf_ktime_get_ns();
+    e->inbound = {inbound};
+    bpf_usdt_readarg(1, ctx, &e->peer_id);
+    bpf_usdt_readarg_p(4, ctx, &e->msg_type, MAX_MSG_TYPE_LENGTH);
+    bpf_usdt_readarg(5, ctx, &e->msg_size);
+#if MAX_PAYLOAD > 0
+    void *payload = NULL;
+    bpf_usdt_readarg(6, ctx, &payload);
+    u64 len = e->msg_size;
+    if (len > MAX_PAYLOAD) len = MAX_PAYLOAD;
+    bpf_probe_read_user(&e->payload, len, payload);
+#endif
+    events.perf_submit(ctx, e, sizeof(*e));
+    return 0;
+}}
+"""
+
+
+def build_program(payload):
+    probes = "".join(PROBE.format(name=name, inbound=inbound)
+                     for name, inbound in (("inbound_message", 1), ("outbound_message", 0)))
+    return PROGRAM.format(max_msg_type=MAX_MSG_TYPE_LENGTH, payload=payload, probes=probes)
 
 
 def make_event_class(payload):
@@ -150,7 +151,7 @@ def main():
     usdt = USDT(pid=args.pid)
     usdt.enable_probe(probe="net:inbound_message", fn_name="trace_inbound_message")
     usdt.enable_probe(probe="net:outbound_message", fn_name="trace_outbound_message")
-    program = PROGRAM.format(max_msg_type=MAX_MSG_TYPE_LENGTH, payload=args.payload)
+    program = build_program(args.payload)
     bpf = BPF(text=program, usdt_contexts=[usdt],
               cflags=["-Wno-error=implicit-function-declaration", "-Wno-duplicate-decl-specifier"])
     event_class = make_event_class(args.payload)
