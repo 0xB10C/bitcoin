@@ -57,6 +57,12 @@ struct NetMessageTraceOptions {
     //! latency for fewer, larger IPC calls (0 = deliver as soon as possible).
     //! Per-call overhead dominates at high event rates, so 1 ms is the default.
     uint32_t max_batch_wait_us{1000};
+    //! Maximum payload bytes buffered in the node for this subscriber. Events
+    //! whose payload would exceed this are dropped and counted.
+    uint64_t max_queue_bytes{64 * 1024 * 1024};
+    //! Stop filling a batch once its payload bytes reach this (a batch always
+    //! holds at least one event).
+    uint64_t max_batch_bytes{4 * 1024 * 1024};
 };
 
 //! Callback interface implemented by a tracing client. Called from a

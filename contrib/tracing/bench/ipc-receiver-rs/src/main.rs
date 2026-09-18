@@ -191,6 +191,8 @@ struct Args {
     queue: u32,
     batch: u32,
     batchwait: u32,
+    queue_bytes: u64,
+    batch_bytes: u64,
     duration: f64,
     out: Option<PathBuf>,
     json: bool,
@@ -200,7 +202,7 @@ struct Args {
 fn usage() -> ! {
     eprintln!(
         "usage: net-msgs-ipc --socket <node.sock> [--payload <bytes>] [--queue <events>] [--batch <events>] \
-         [--batchwait <us>] [--duration <s>] [--out <f>] [--json] [--quiet]"
+         [--batchwait <us>] [--queue-bytes <n>] [--batch-bytes <n>] [--duration <s>] [--out <f>] [--json] [--quiet]"
     );
     process::exit(2);
 }
@@ -212,6 +214,8 @@ fn parse_args() -> Args {
         queue: 65536,
         batch: 1024,
         batchwait: 1000,
+        queue_bytes: 64 * 1024 * 1024,
+        batch_bytes: 4 * 1024 * 1024,
         duration: 0.0,
         out: None,
         json: false,
@@ -226,6 +230,8 @@ fn parse_args() -> Args {
             "--queue" => args.queue = value().parse().unwrap_or_else(|_| usage()),
             "--batch" => args.batch = value().parse().unwrap_or_else(|_| usage()),
             "--batchwait" => args.batchwait = value().parse().unwrap_or_else(|_| usage()),
+            "--queue-bytes" => args.queue_bytes = value().parse().unwrap_or_else(|_| usage()),
+            "--batch-bytes" => args.batch_bytes = value().parse().unwrap_or_else(|_| usage()),
             "--duration" => args.duration = value().parse().unwrap_or_else(|_| usage()),
             "--out" => args.out = Some(PathBuf::from(value())),
             "--json" => args.json = true,
@@ -298,6 +304,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         o.set_max_queue_events(args.queue);
         o.set_max_batch_events(args.batch);
         o.set_max_batch_wait_us(args.batchwait);
+        o.set_max_queue_bytes(args.queue_bytes);
+        o.set_max_batch_bytes(args.batch_bytes);
         p.set_callback(capnp_rpc::new_client(TraceImpl {
             interval: interval.clone(),
         }));

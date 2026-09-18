@@ -35,20 +35,21 @@ extern "C" fn on_signal(_: libc::c_int) {
 }
 
 const MAX_MSG_TYPE_LENGTH: usize = 20;
-const MAX_PAYLOAD: usize = 64;
+const MAX_PAYLOAD: usize = 4 * 1024 * 1024;
 
-/// Must match `struct msg_event` in net_msgs.bpf.c.
+/// Must match `struct msg_header` in net_msgs.bpf.c. Both the small and the
+/// large ring records start with this header; the payload follows it.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct MsgEvent {
+struct MsgHeader {
     ts_ns: u64,
     peer_id: u64,
     msg_size: u64,
     inbound: u64,
+    payload_len: u64,
     msg_type: [u8; MAX_MSG_TYPE_LENGTH],
-    payload: [u8; MAX_PAYLOAD],
 }
-unsafe impl Plain for MsgEvent {}
+unsafe impl Plain for MsgHeader {}
 
 #[derive(Default, Clone, Copy)]
 struct Counters {
@@ -99,6 +100,7 @@ struct Args {
     pid: i32,
     payload: u32,
     page_cnt: u32,
+    large_ring_mb: u32,
     duration: f64,
     ready_file: Option<PathBuf>,
     stop_file: Option<PathBuf>,
@@ -109,7 +111,7 @@ struct Args {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: net-msgs-libbpf --pid <pid> [--payload <bytes, max {MAX_PAYLOAD}>] [--page-cnt <4KiB pages of ring buffer>] \
+        "usage: net-msgs-libbpf --pid <pid> [--payload <bytes, max {MAX_PAYLOAD}>] [--page-cnt <4KiB pages of small ring>] [--large-ring-mb <MiB>] \
          [--duration <s>] [--ready-file <f>] [--stop-file <f>] [--out <f>] [--json] [--quiet]"
     );
     process::exit(2);
@@ -120,6 +122,7 @@ fn parse_args() -> Args {
         pid: 0,
         payload: 0,
         page_cnt: 1024,
+        large_ring_mb: 64,
         duration: 0.0,
         ready_file: None,
         stop_file: None,
@@ -134,6 +137,7 @@ fn parse_args() -> Args {
             "--pid" => args.pid = value().parse().unwrap_or_else(|_| usage()),
             "--payload" => args.payload = value().parse().unwrap_or_else(|_| usage()),
             "--page-cnt" => args.page_cnt = value().parse().unwrap_or_else(|_| usage()),
+            "--large-ring-mb" => args.large_ring_mb = value().parse().unwrap_or_else(|_| usage()),
             "--duration" => args.duration = value().parse().unwrap_or_else(|_| usage()),
             "--ready-file" => args.ready_file = Some(PathBuf::from(value())),
             "--stop-file" => args.stop_file = Some(PathBuf::from(value())),
@@ -186,13 +190,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut ring_bytes: u32 = args.page_cnt.max(1).saturating_mul(4096);
     ring_bytes = ring_bytes.next_power_of_two();
     open_skel.maps.events.set_max_entries(ring_bytes)?;
+    // Large payloads use a second ring with 4 MiB records.
+    let large_bytes: u32 = (args.large_ring_mb.max(8) * 1024 * 1024).next_power_of_two();
+    open_skel.maps.events_large.set_max_entries(large_bytes)?;
     let skel = open_skel.load()?;
 
     let interval = RefCell::new(Counters::default());
-    let mut builder = RingBufferBuilder::new();
-    builder.add(&skel.maps.events, |data: &[u8]| -> i32 {
+    let handle = |data: &[u8]| -> i32 {
         let now_ns = monotonic_ns();
-        let Ok(e) = plain::from_bytes::<MsgEvent>(data) else {
+        let Ok(e) = plain::from_bytes::<MsgHeader>(data) else {
             return 0;
         };
         let lat_us = now_ns.saturating_sub(e.ts_ns) / 1000;
@@ -218,7 +224,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         0
-    })?;
+    };
+    let mut builder = RingBufferBuilder::new();
+    builder.add(&skel.maps.events, handle)?;
+    builder.add(&skel.maps.events_large, handle)?;
     let ring = builder.build()?;
 
     let _link_in =
@@ -287,11 +296,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .dropped;
 
     let summary = format!(
-        "{{{},\"mode\":\"ebpf\",\"engine\":\"libbpf-rs\",\"event\":\"summary\",\"payload_bytes\":{},\"page_cnt\":{},\"ringbuf_bytes\":{}}}",
+        "{{{},\"mode\":\"ebpf\",\"engine\":\"libbpf-rs\",\"event\":\"summary\",\"payload_bytes\":{},\"page_cnt\":{},\"ringbuf_bytes\":{},\"large_ringbuf_bytes\":{}}}",
         total.to_json(duration),
         args.payload,
         args.page_cnt,
-        ring_bytes
+        ring_bytes,
+        large_bytes
     );
     match &args.out {
         Some(path) => fs::write(path, format!("{summary}\n"))?,

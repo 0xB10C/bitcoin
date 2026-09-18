@@ -31,8 +31,8 @@ constexpr uint32_t MAX_QUEUE_EVENTS{1 << 20};
 //! Payload bytes stored inline in a ring slot; larger payloads use the slot's
 //! heap buffer (allocated on the producer, capacity kept for reuse).
 constexpr size_t INLINE_PAYLOAD{64};
-//! Shrink a slot's heap payload buffer back below this after use.
-constexpr size_t MAX_RETAINED_PAYLOAD{64 * 1024};
+//! Largest payload buffer kept for reuse (bounded by PAYLOAD_POOL_SIZE of them).
+constexpr size_t MAX_RETAINED_PAYLOAD{MAX_PAYLOAD_BYTES};
 //! Polling interval of the delivery thread when max_batch_wait_us is 0.
 constexpr std::chrono::microseconds MIN_POLL_INTERVAL{50};
 
@@ -42,6 +42,8 @@ interfaces::NetMessageTraceOptions ClampOptions(interfaces::NetMessageTraceOptio
     opts.max_queue_events = std::clamp<uint32_t>(opts.max_queue_events, 1, MAX_QUEUE_EVENTS);
     opts.max_batch_events = std::clamp<uint32_t>(opts.max_batch_events, 1, opts.max_queue_events);
     opts.max_batch_wait_us = std::min<uint32_t>(opts.max_batch_wait_us, 1'000'000);
+    opts.max_queue_bytes = std::max<uint64_t>(opts.max_queue_bytes, opts.max_payload_bytes);
+    opts.max_batch_bytes = std::max<uint64_t>(opts.max_batch_bytes, 1);
     return opts;
 }
 
@@ -60,8 +62,7 @@ void CopyString(std::array<char, N>& dst, std::string_view src)
 
 //! One event as stored in the ring. Plain data plus one optional heap buffer
 //! for payloads larger than INLINE_PAYLOAD.
-struct Slot {
-    std::atomic<size_t> seq;
+struct Event {
     bool inbound;
     int64_t peer_id;
     uint64_t msg_size;
@@ -74,19 +75,21 @@ struct Slot {
     std::vector<unsigned char> payload_heap;
 };
 
-//! Bounded multi-producer, single-consumer ring (Vyukov's algorithm).
-//! Producers never block: a full ring makes TryPush return false.
-class EventRing
+//! Bounded lock-free multi-producer multi-consumer ring (Vyukov's algorithm).
+//! Nobody ever blocks: a full ring makes TryPush return false, an empty one
+//! makes TryPop return false.
+template <typename T>
+class Ring
 {
 public:
-    explicit EventRing(uint32_t min_capacity)
-        : m_mask{std::bit_ceil<size_t>(std::max<uint32_t>(min_capacity, 2)) - 1},
+    explicit Ring(size_t min_capacity)
+        : m_mask{std::bit_ceil<size_t>(std::max<size_t>(min_capacity, 2)) - 1},
           m_slots(m_mask + 1)
     {
         for (size_t i = 0; i <= m_mask; ++i) m_slots[i].seq.store(i, std::memory_order_relaxed);
     }
 
-    //! Claim a slot, fill it with `fill(slot)`, publish it. Returns false if full.
+    //! Claim a slot, fill it with `fill(T&)`, publish it. Returns false if full.
     template <typename Fill>
     bool TryPush(Fill&& fill)
     {
@@ -104,41 +107,64 @@ public:
                 pos = m_enqueue.load(std::memory_order_relaxed);
             }
         }
-        fill(*slot);
+        fill(slot->value);
         slot->seq.store(pos + 1, std::memory_order_release);
         return true;
     }
 
-    //! Consume one slot with `consume(slot)`. Single consumer only. Returns false if empty.
+    //! Consume one slot with `consume(T&)`. Returns false if empty.
     template <typename Consume>
     bool TryPop(Consume&& consume)
     {
-        Slot& slot{m_slots[m_dequeue & m_mask]};
-        const size_t seq{slot.seq.load(std::memory_order_acquire)};
-        if (static_cast<intptr_t>(seq) - static_cast<intptr_t>(m_dequeue + 1) != 0) return false;
-        consume(slot);
-        slot.seq.store(m_dequeue + m_mask + 1, std::memory_order_release);
-        ++m_dequeue;
+        size_t pos{m_dequeue.load(std::memory_order_relaxed)};
+        Slot* slot;
+        while (true) {
+            slot = &m_slots[pos & m_mask];
+            const size_t seq{slot->seq.load(std::memory_order_acquire)};
+            const intptr_t diff{static_cast<intptr_t>(seq) - static_cast<intptr_t>(pos + 1)};
+            if (diff == 0) {
+                if (m_dequeue.compare_exchange_weak(pos, pos + 1, std::memory_order_relaxed)) break;
+            } else if (diff < 0) {
+                return false; // empty
+            } else {
+                pos = m_dequeue.load(std::memory_order_relaxed);
+            }
+        }
+        consume(slot->value);
+        slot->seq.store(pos + m_mask + 1, std::memory_order_release);
         return true;
     }
 
 private:
+    struct Slot {
+        std::atomic<size_t> seq;
+        T value;
+    };
     const size_t m_mask;
     std::vector<Slot> m_slots;
     alignas(64) std::atomic<size_t> m_enqueue{0};
-    alignas(64) size_t m_dequeue{0};
+    alignas(64) std::atomic<size_t> m_dequeue{0};
 };
+
+//! Number of large payload buffers kept for reuse per subscriber (at most
+//! PAYLOAD_POOL_SIZE * MAX_RETAINED_PAYLOAD bytes retained).
+constexpr size_t PAYLOAD_POOL_SIZE{16};
 } // namespace
 
 struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
     Subscriber(std::weak_ptr<State> state, interfaces::NetMessageTraceOptions options,
                std::unique_ptr<interfaces::NetMessageTrace> cb)
-        : opts{ClampOptions(options)}, m_state{std::move(state)}, ring{opts.max_queue_events}, callback{std::move(cb)} {}
+        : opts{ClampOptions(options)}, m_state{std::move(state)}, ring{opts.max_queue_events}, pool{PAYLOAD_POOL_SIZE}, callback{std::move(cb)} {}
 
     const interfaces::NetMessageTraceOptions opts;
     const std::weak_ptr<State> m_state;
 
-    EventRing ring;
+    Ring<Event> ring;
+    //! Reusable heap buffers for payloads larger than INLINE_PAYLOAD, so
+    //! steady-state large messages do not allocate (and page-fault) per event.
+    Ring<std::vector<unsigned char>> pool;
+    //! Payload bytes currently held in the ring (producers add, consumer subtracts).
+    std::atomic<uint64_t> queued_bytes{0};
     //! Events dropped because the ring was full (producers, relaxed).
     std::atomic<uint64_t> dropped{0};
     //! Producers currently inside record() for this subscriber; removal waits for zero.
@@ -162,7 +188,15 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
               std::string_view msg_type, std::span<const unsigned char> payload, int64_t now_us)
     {
         const size_t copy{std::min<size_t>(payload.size(), opts.max_payload_bytes)};
-        const bool ok{ring.TryPush([&](Slot& s) {
+        if (copy > INLINE_PAYLOAD) {
+            // Byte bound: reserve first, give back on failure.
+            if (queued_bytes.fetch_add(copy, std::memory_order_relaxed) + copy > opts.max_queue_bytes) {
+                queued_bytes.fetch_sub(copy, std::memory_order_relaxed);
+                dropped.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+        }
+        const bool ok{ring.TryPush([&](Event& s) {
             s.inbound = inbound;
             s.peer_id = peer_id;
             s.msg_size = payload.size();
@@ -174,17 +208,25 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
             if (copy <= INLINE_PAYLOAD) {
                 std::memcpy(s.payload_inline.data(), payload.data(), copy);
             } else {
+                if (s.payload_heap.capacity() < copy) {
+                    // Try a recycled buffer before allocating.
+                    pool.TryPop([&](std::vector<unsigned char>& buf) { s.payload_heap.swap(buf); });
+                }
                 s.payload_heap.assign(payload.begin(), payload.begin() + copy);
             }
         })};
-        if (!ok) dropped.fetch_add(1, std::memory_order_relaxed);
+        if (!ok) {
+            if (copy > INLINE_PAYLOAD) queued_bytes.fetch_sub(copy, std::memory_order_relaxed);
+            dropped.fetch_add(1, std::memory_order_relaxed);
+        }
     }
 
-    //! Delivery thread: move up to max_batch_events out of the ring.
-    void Drain(std::vector<interfaces::NetMessageInfo>& batch)
+    //! Delivery thread: move events out of the ring until the batch is full
+    //! (by count or payload bytes). Returns the batch's payload bytes.
+    uint64_t Drain(std::vector<interfaces::NetMessageInfo>& batch, uint64_t batch_bytes)
     {
-        while (batch.size() < opts.max_batch_events) {
-            const bool got{ring.TryPop([&](Slot& s) {
+        while (batch.size() < opts.max_batch_events && (batch.empty() || batch_bytes < opts.max_batch_bytes)) {
+            const bool got{ring.TryPop([&](Event& s) {
                 auto& info{batch.emplace_back()};
                 info.inbound = s.inbound;
                 info.peer_id = s.peer_id;
@@ -197,12 +239,26 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
                     info.payload.assign(s.payload_inline.begin(), s.payload_inline.begin() + s.payload_len);
                 } else {
                     info.payload.swap(s.payload_heap);
-                    info.payload.resize(s.payload_len);
-                    s.payload_heap.clear();
-                    if (s.payload_heap.capacity() > MAX_RETAINED_PAYLOAD) s.payload_heap.shrink_to_fit();
+                    queued_bytes.fetch_sub(s.payload_len, std::memory_order_relaxed);
                 }
+                batch_bytes += info.payload.size();
             })};
             if (!got) break;
+        }
+        return batch_bytes;
+    }
+
+    //! After delivery, keep large payload buffers for reuse by producers.
+    void RecycleBuffers(std::vector<interfaces::NetMessageInfo>& batch)
+    {
+        for (auto& info : batch) {
+            if (info.payload.capacity() <= INLINE_PAYLOAD) continue;
+            if (info.payload.capacity() > MAX_RETAINED_PAYLOAD) {
+                std::vector<unsigned char>().swap(info.payload);
+                continue;
+            }
+            info.payload.clear();
+            pool.TryPush([&](std::vector<unsigned char>& buf) { buf.swap(info.payload); });
         }
     }
 
@@ -213,16 +269,17 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
         batch.reserve(opts.max_batch_events);
         const std::chrono::microseconds wait{opts.max_batch_wait_us > 0 ? std::chrono::microseconds{opts.max_batch_wait_us} : MIN_POLL_INTERVAL};
         while (true) {
+            RecycleBuffers(batch);
             batch.clear();
-            Drain(batch);
-            if (batch.size() < opts.max_batch_events) {
+            uint64_t bytes{Drain(batch, 0)};
+            if (batch.size() < opts.max_batch_events && bytes < opts.max_batch_bytes) {
                 // Not full: give the batch a moment to fill (or, when idle, just poll).
                 {
                     WAIT_LOCK(mutex, lock);
                     cv.wait_for(lock, wait, [this]() EXCLUSIVE_LOCKS_REQUIRED(mutex) { return stop; });
                     if (stop) break;
                 }
-                Drain(batch);
+                Drain(batch, bytes);
                 if (batch.empty()) continue;
             }
             const uint64_t dropped_now{dropped.exchange(0, std::memory_order_relaxed)};

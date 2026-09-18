@@ -83,6 +83,8 @@ static void AddArgs(ArgsManager& args)
     args.AddArg("-payload=<n>", "Receive up to <n> bytes of each message payload (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     args.AddArg("-queue=<n>", "Maximum number of events buffered in the node before events are dropped (default: 65536)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     args.AddArg("-batch=<n>", "Maximum number of events delivered per IPC call (default: 1024)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    args.AddArg("-queuebytes=<n>", "Maximum payload bytes buffered in the node before events are dropped (default: 67108864)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    args.AddArg("-batchbytes=<n>", "Stop filling a batch once its payload bytes reach <n> (default: 4194304)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     args.AddArg("-batchwait=<us>", "Let the node wait up to <us> microseconds for a batch to fill before delivering it (default: 1000)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     args.AddArg("-stats", "Print per-second statistics instead of individual events (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     args.AddArg("-json", "Print events and statistics as JSON lines (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -298,6 +300,8 @@ MAIN_FUNCTION
     options.max_queue_events = static_cast<uint32_t>(std::max<int64_t>(1, args.GetIntArg("-queue", options.max_queue_events)));
     options.max_batch_events = static_cast<uint32_t>(std::max<int64_t>(1, args.GetIntArg("-batch", options.max_batch_events)));
     options.max_batch_wait_us = static_cast<uint32_t>(std::max<int64_t>(0, args.GetIntArg("-batchwait", options.max_batch_wait_us)));
+    options.max_queue_bytes = static_cast<uint64_t>(std::max<int64_t>(1, args.GetIntArg("-queuebytes", options.max_queue_bytes)));
+    options.max_batch_bytes = static_cast<uint64_t>(std::max<int64_t>(1, args.GetIntArg("-batchbytes", options.max_batch_bytes)));
 
     // Connect to bitcoin-node process, or fail and print an error.
     std::unique_ptr<interfaces::Init> local_init{interfaces::MakeBasicInit("bitcoin-trace", argc > 0 ? argv[0] : "")};
@@ -388,6 +392,8 @@ MAIN_FUNCTION
         summary.pushKV("queue_events", options.max_queue_events);
         summary.pushKV("batch_events", options.max_batch_events);
         summary.pushKV("batch_wait_us", options.max_batch_wait_us);
+        summary.pushKV("queue_bytes", options.max_queue_bytes);
+        summary.pushKV("batch_bytes", options.max_batch_bytes);
         const std::string out_path{args.GetArg("-out", "")};
         if (!out_path.empty()) {
             std::ofstream out{fs::PathToString(fs::PathFromString(out_path))};

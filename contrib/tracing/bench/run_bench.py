@@ -197,7 +197,7 @@ def run(args):
     stop_file = os.path.join(workdir, "stop")
     ready_file = os.path.join(workdir, "ready")
     result = {"mode": args.mode, "label": label, "node_args": node.args[1:], "stages": args.stages,
-              "total": args.total, "payload": args.payload, "workdir": workdir}
+              "total": args.total, "payload": args.payload, "ping_size": args.ping_size, "workdir": workdir}
     print(f"[bench] mode={args.mode} workdir={workdir} p2p_port={p2p_port} rpc_port={rpc_port}", flush=True)
     try:
         node.start()
@@ -267,7 +267,8 @@ def run(args):
         time.sleep(2)  # let samplers settle
         flood_out = os.path.join(workdir, "flood.json")
         flood_cmd = [sys.executable, os.path.join(HERE, "p2p_ping_flood.py"), "--port", str(p2p_port),
-                     "--stages", args.stages, "--total", str(args.total), "--out", flood_out]
+                     "--stages", args.stages, "--total", str(args.total), "--ping-size", str(args.ping_size),
+                     "--out", flood_out]
         t0 = time.monotonic()
         subprocess.run(flood_cmd, check=True)
         t1 = time.monotonic()
@@ -369,6 +370,7 @@ def main():
     p.add_argument("--stages", default="1000:10,10000:10,100000:10,0:30")
     p.add_argument("--total", type=int, default=1_000_000)
     p.add_argument("--payload", type=int, default=0, help="payload bytes per event for the receiver")
+    p.add_argument("--ping-size", type=int, default=8, help="ping payload bytes sent by the flooder (large-message benchmark)")
     p.add_argument("--queue", type=int, default=65536, help="ipc: node-side queue size")
     p.add_argument("--batch", type=int, default=1024, help="ipc: max events per IPC call")
     p.add_argument("--batchwait", type=int, default=1000, help="ipc: microseconds the node may wait for a batch to fill")

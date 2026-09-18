@@ -22,6 +22,12 @@ on:
       repeats:
         description: 'How many times to repeat every run'
         default: '1'
+      large_ping_size:
+        description: 'Ping payload bytes for the large-message runs (0 = skip them)'
+        default: '1000000'
+      large_total:
+        description: 'Number of pings for the large-message runs'
+        default: '20000'
   push:
     branches:
       - '2026-09-ipc-net-tracing'
@@ -47,6 +53,9 @@ jobs:
       TOTAL: ${{ github.event.inputs.total || '3000000' }}
       PAYLOADS: ${{ github.event.inputs.payloads || '0 8' }}
       REPEATS: ${{ github.event.inputs.repeats || '1' }}
+      LARGE_PING_SIZE: ${{ github.event.inputs.large_ping_size || '1000000' }}
+      LARGE_TOTAL: ${{ github.event.inputs.large_total || '20000' }}
+      LARGE_STAGES: '0:20'
       RESULTS: ${{ github.workspace }}/bench-results
     steps:
       - uses: actions/checkout@v6
@@ -174,6 +183,18 @@ jobs:
               contrib/tracing/bench/run_bench.py run --mode ebpf --engine bcc --run-receiver --payload "$payload" --label "bcc-p${payload}-rep$i" --results "$RESULTS" --stages "$STAGES" --total "$TOTAL"
             done
           done
+
+      - name: Large messages (1 MB pings, full payload capture)
+        if: env.LARGE_PING_SIZE != '0'
+        run: |
+          B=contrib/tracing/bench/run_bench.py
+          common=(--ping-size "$LARGE_PING_SIZE" --stages "$LARGE_STAGES" --total "$LARGE_TOTAL" --results "$RESULTS")
+          $B run --mode none --label "big" "${common[@]}"
+          $B run --mode ipc --payload 0 --label "big-meta" "${common[@]}"
+          $B run --mode ipc --payload 4000000 --label "big-full" "${common[@]}"
+          $B run --mode ipc --ipc-client rust --payload 4000000 --label "rust-big-full" "${common[@]}"
+          $B run --mode ebpf --engine libbpf --run-receiver --payload 0 --label "libbpf-big-meta" "${common[@]}"
+          $B run --mode ebpf --engine libbpf --run-receiver --payload 4000000 --label "libbpf-big-full" "${common[@]}"
 
       - name: Compare
         if: always()

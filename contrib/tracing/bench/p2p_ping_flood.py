@@ -42,6 +42,7 @@ from test_framework.messages import (  # noqa: E402
 HEADER_LEN = 24
 TICK_S = 0.01  # sender granularity for rate-limited stages
 UNLIMITED_CHUNK = 1024  # pings per write for unlimited stages
+MAX_CHUNK_BYTES = 4 * 1024 * 1024  # cap a single write for large pings
 
 
 def frame(chain, msgtype, payload):
@@ -51,7 +52,7 @@ def frame(chain, msgtype, payload):
 
 
 class Flooder:
-    def __init__(self, host, port, chain, total, log):
+    def __init__(self, host, port, chain, total, log, ping_size=8):
         self.host = host
         self.port = port
         self.chain = chain
@@ -65,7 +66,10 @@ class Flooder:
         self.sent = 0
         self.handshake_done = threading.Event()
         self.closed = threading.Event()
-        self.ping_frame = frame(chain, b"ping", (0).to_bytes(8, "little"))
+        # The node reads the 8 byte nonce and ignores any extra bytes, so a ping
+        # can carry an arbitrarily large payload (up to the 4 MB message limit).
+        self.ping_frame = frame(chain, b"ping", (0).to_bytes(8, "little") + b"\x00" * max(0, ping_size - 8))
+        self.chunk_pings = max(1, min(UNLIMITED_CHUNK, MAX_CHUNK_BYTES // len(self.ping_frame)))
 
     def connect(self):
         self.sock = socket.create_connection((self.host, self.port))
@@ -130,7 +134,7 @@ class Flooder:
         sent_start, pongs_start = self.sent, self.pongs
         deadline = start + seconds
         if rate > 0:
-            per_tick = max(1, int(rate * TICK_S))
+            per_tick = max(1, min(int(rate * TICK_S), self.chunk_pings))
             chunk = self.ping_frame * per_tick
             next_tick = start
             while time.monotonic() < deadline and self.sent < self.total and not self.closed.is_set():
@@ -141,10 +145,10 @@ class Flooder:
                 if delay > 0:
                     time.sleep(delay)
         else:
-            chunk = self.ping_frame * UNLIMITED_CHUNK
+            chunk = self.ping_frame * self.chunk_pings
             while time.monotonic() < deadline and self.sent < self.total and not self.closed.is_set():
                 self._send(chunk)  # blocks when the node stops reading (backpressure)
-                self.sent += UNLIMITED_CHUNK
+                self.sent += self.chunk_pings
         send_elapsed = time.monotonic() - start
         self.wait_caught_up()
         elapsed = time.monotonic() - start
@@ -201,6 +205,8 @@ def main():
     parser.add_argument("--stages", default="1000:10,10000:10,100000:10,0:30",
                         help="comma separated rate:seconds stages, rate 0 = unlimited")
     parser.add_argument("--total", type=int, default=1_000_000, help="stop after this many pings")
+    parser.add_argument("--ping-size", type=int, default=8,
+                        help="ping payload size in bytes (>= 8; the node ignores bytes after the nonce)")
     parser.add_argument("--out", help="write the JSON report to this file instead of stdout")
     parser.add_argument("--quiet", action="store_true", help="no progress output on stderr")
     args = parser.parse_args()
@@ -209,7 +215,7 @@ def main():
         if not args.quiet:
             print(msg, file=sys.stderr, flush=True)
 
-    flooder = Flooder(args.host, args.port, args.chain, args.total, log)
+    flooder = Flooder(args.host, args.port, args.chain, args.total, log, ping_size=args.ping_size)
     flooder.connect()
     log("handshake complete, starting flood")
     start = time.monotonic()
@@ -222,6 +228,7 @@ def main():
     duration = time.monotonic() - start
     report = {
         "sent": flooder.sent,
+        "ping_size": args.ping_size,
         "pongs": flooder.pongs,
         "recv_msgs": flooder.recv_msgs,
         "recv_bytes": flooder.recv_bytes,

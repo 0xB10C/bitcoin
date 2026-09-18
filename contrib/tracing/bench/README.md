@@ -88,5 +88,18 @@ load failure"); run it on a host or a VM instead.
   achievable ping rate is bounded by the node, not by the flooder. Backpressure
   (`-maxreceivebuffer`, `-maxsendbuffer`) is left at defaults unless overridden.
 
-The IBD (large messages) benchmark is only stubbed (`--mode ibd`); it needs a
-synced local node to download from.
+## Large messages
+
+`p2p_ping_flood.py --ping-size N` sends pings with an N byte payload (the node
+reads the 8 byte nonce and ignores the rest, up to the 4 MB message limit), so
+the same driver measures large-message tracing: `run_bench.py run --mode ipc
+--ping-size 1000000 --payload 4000000 --total 20000 --stages 0:20`. The node
+bounds buffered payload bytes per subscriber (`max_queue_bytes`, default 64 MiB,
+`-queuebytes`) and batch payload bytes (`max_batch_bytes`, default 4 MiB,
+`-batchbytes`); large payload buffers are recycled through a small per-subscriber
+pool so steady-state large messages do not allocate per event. The libbpf
+receiver uses a second ring buffer with 4 MiB records for large payloads
+(`--large-ring-mb`), like peer-observer's tiered rings.
+
+The IBD benchmark itself is only stubbed (`--mode ibd`); it needs a synced local
+node to download from. The large-ping flood covers the same message sizes.
