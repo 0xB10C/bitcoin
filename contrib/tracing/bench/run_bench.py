@@ -134,7 +134,8 @@ def read_json_line(path, key="summary"):
 
 
 class Node:
-    def __init__(self, binary, cli, datadir, p2p_port, rpc_port, extra_args):
+    def __init__(self, binary, cli, datadir, p2p_port, rpc_port, extra_args, env=None):
+        self.env = env or {}
         self.binary = binary
         self.cli = cli
         self.datadir = datadir
@@ -151,7 +152,8 @@ class Node:
         return [self.cli, "-regtest", f"-datadir={self.datadir}", f"-rpcport={self.rpc_port}"]
 
     def start(self):
-        self.proc = subprocess.Popen(self.args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        env = dict(os.environ, **(self.env or {}))
+        self.proc = subprocess.Popen(self.args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env)
         start = time.monotonic()
         while True:
             if self.proc.poll() is not None:
@@ -191,7 +193,8 @@ def run(args):
     os.makedirs(datadir)
     p2p_port, rpc_port = pick_ports()
     node = Node(args.node, args.cli, datadir, p2p_port, rpc_port,
-                [f"-maxreceivebuffer={args.maxreceivebuffer}", f"-maxsendbuffer={args.maxsendbuffer}"])
+                [f"-maxreceivebuffer={args.maxreceivebuffer}", f"-maxsendbuffer={args.maxsendbuffer}"],
+                env={"BITCOIN_TRACE_ARENA_COPY": args.arena_copy})
     sampler = ProcSampler()
     receiver = None
     receiver_out = os.path.join(workdir, "receiver.json")
@@ -199,7 +202,7 @@ def run(args):
     ready_file = os.path.join(workdir, "ready")
     result = {"mode": args.mode, "label": label, "node_args": node.args[1:], "stages": args.stages,
               "total": args.total, "payload": args.payload, "ping_size": args.ping_size, "shm": args.shm,
-              "checksum": args.checksum, "workdir": workdir}
+              "checksum": args.checksum, "arena_copy": args.arena_copy, "workdir": workdir}
     print(f"[bench] mode={args.mode} workdir={workdir} p2p_port={p2p_port} rpc_port={rpc_port}", flush=True)
     try:
         node.start()
@@ -384,6 +387,9 @@ def main():
     p.add_argument("--shm", type=int, default=0,
                    help="ipc: bytes of shared memory the node may use to pass large payloads without copying them "
                         "into the IPC messages (0 = off)")
+    p.add_argument("--arena-copy", choices=["nt", "memcpy", "none"], default="nt",
+                   help="ipc: how the node writes payloads into the shared arena; 'none' skips the "
+                        "payload bytes (garbage data) to measure the path without the copy")
     p.add_argument("--shm-min", type=int, default=4096,
                    help="ipc: smallest payload passed through shared memory when --shm is set")
     p.add_argument("--checksum", action="store_true",
