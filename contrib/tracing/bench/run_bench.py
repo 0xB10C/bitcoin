@@ -224,7 +224,7 @@ def run(args):
             result["receiver_cmd"] = cmd
             print("\n[bench] Run the eBPF receiver as root in another terminal now:\n\n    "
                   + " ".join(cmd) + "\n\n[bench] waiting for it to attach ...", flush=True)
-            wait_for_file(ready_file, timeout=600, what="eBPF receiver ready file")
+            wait_for_file(ready_file, timeout=3600, what="eBPF receiver ready file")
             with open(ready_file, encoding="utf-8") as f:
                 sampler.add("receiver", int(f.read().strip()))
             print("[bench] eBPF receiver attached", flush=True)
