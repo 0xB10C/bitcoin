@@ -62,6 +62,10 @@ load failure"); run it on a host or a VM instead.
   `CLOCK_MONOTONIC`, so the numbers are comparable. For IPC this includes queueing
   in the node and the batch RPC; for eBPF it includes the ring/perf buffer and
   the receiver's polling loop.
+- IPC batching: the node waits up to `max_batch_wait_us` (default 1 ms,
+  `bitcoin-trace -batchwait`) for a batch to fill. Per-call overhead dominates
+  otherwise: at ~500k events/s, coalescing cut the node's extra CPU from 0.65 to
+  0.21 µs/event and the receiver's from 1.13 to 0.23 µs/event.
 - eBPF's cost to the node is the uprobe trap on every tracepoint hit (on the
   `msghand` thread), independent of the receiver; the receiver only determines
   how many events survive. IPC's cost is the enqueue plus the delivery thread.

@@ -30,6 +30,7 @@ struct NetMessageTraceOptions $Proxy.wrap("interfaces::NetMessageTraceOptions") 
     maxPayloadBytes @2 :UInt32 = 0 $Proxy.name("max_payload_bytes");
     maxQueueEvents @3 :UInt32 = 65536 $Proxy.name("max_queue_events");
     maxBatchEvents @4 :UInt32 = 1024 $Proxy.name("max_batch_events");
+    maxBatchWaitUs @5 :UInt32 = 1000 $Proxy.name("max_batch_wait_us");
 }
 
 struct NetMessage $Proxy.wrap("interfaces::NetMessageInfo") {

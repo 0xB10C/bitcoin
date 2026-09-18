@@ -29,6 +29,7 @@ interfaces::NetMessageTraceOptions ClampOptions(interfaces::NetMessageTraceOptio
     opts.max_payload_bytes = std::min(opts.max_payload_bytes, MAX_PAYLOAD_BYTES);
     opts.max_queue_events = std::clamp<uint32_t>(opts.max_queue_events, 1, MAX_QUEUE_EVENTS);
     opts.max_batch_events = std::clamp<uint32_t>(opts.max_batch_events, 1, opts.max_queue_events);
+    opts.max_batch_wait_us = std::min<uint32_t>(opts.max_batch_wait_us, 1'000'000);
     return opts;
 }
 } // namespace
@@ -65,6 +66,13 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
                 WAIT_LOCK(mutex, lock);
                 cv.wait(lock, [this]() EXCLUSIVE_LOCKS_REQUIRED(mutex) { return stop || !queue.empty(); });
                 if (stop) break;
+                if (opts.max_batch_wait_us > 0 && queue.size() < opts.max_batch_events) {
+                    // Coalesce: give the batch a moment to fill up.
+                    cv.wait_for(lock, std::chrono::microseconds{opts.max_batch_wait_us}, [this]() EXCLUSIVE_LOCKS_REQUIRED(mutex) {
+                        return stop || queue.size() >= opts.max_batch_events;
+                    });
+                    if (stop) break;
+                }
                 const size_t n{std::min<size_t>(queue.size(), opts.max_batch_events)};
                 pending.assign(std::make_move_iterator(queue.begin()), std::make_move_iterator(queue.begin() + n));
                 queue.erase(queue.begin(), queue.begin() + n);

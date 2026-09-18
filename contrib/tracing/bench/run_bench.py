@@ -207,6 +207,7 @@ def run(args):
         if args.mode == "ipc":
             cmd = [args.trace, "-regtest", f"-datadir={datadir}", f"-ipcconnect=unix:{node.socket_path}",
                    "-stats", "-json", f"-payload={args.payload}", f"-queue={args.queue}", f"-batch={args.batch}",
+                   f"-batchwait={args.batchwait}",
                    f"-out={receiver_out}"]
             receiver_log = open(os.path.join(workdir, "receiver.log"), "w", encoding="utf-8")
             receiver = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=receiver_log, text=True)
@@ -357,6 +358,7 @@ def main():
     p.add_argument("--payload", type=int, default=0, help="payload bytes per event for the receiver")
     p.add_argument("--queue", type=int, default=65536, help="ipc: node-side queue size")
     p.add_argument("--batch", type=int, default=1024, help="ipc: max events per IPC call")
+    p.add_argument("--batchwait", type=int, default=1000, help="ipc: microseconds the node may wait for a batch to fill")
     p.add_argument("--page-cnt", type=int, default=1024, help="ebpf: perf buffer pages per CPU")
     p.add_argument("--engine", choices=["libbpf", "bpftrace", "bcc"], default="libbpf",
                    help="ebpf: receiver implementation: libbpf (Rust, ring buffer; build libbpf-receiver first), "

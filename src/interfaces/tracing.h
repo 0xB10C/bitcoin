@@ -52,6 +52,11 @@ struct NetMessageTraceOptions {
     uint32_t max_queue_events{65536};
     //! Maximum number of events delivered in a single messages() call.
     uint32_t max_batch_events{1024};
+    //! After the first event of a batch arrives, wait up to this long for the
+    //! batch to fill up to max_batch_events before delivering it. Trades
+    //! latency for fewer, larger IPC calls (0 = deliver as soon as possible).
+    //! Per-call overhead dominates at high event rates, so 1 ms is the default.
+    uint32_t max_batch_wait_us{1000};
 };
 
 //! Callback interface implemented by a tracing client. Called from a
