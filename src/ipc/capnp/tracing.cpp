@@ -78,7 +78,11 @@ struct ProxyClientCustom<ipc::capnp::messages::NetMessageTrace, interfaces::NetM
     const kj::Duration m_interval;
     const std::function<bool(std::vector<interfaces::NetMessageInfo>&, uint64_t&)> m_drain;
     const std::function<void(std::vector<interfaces::NetMessageInfo>&, bool)> m_complete;
-    std::vector<std::vector<interfaces::NetMessageInfo>> m_pool;
+    //! Batches are held by shared_ptr because both continuations of a send
+    //! have to name the same one; capturing by move into each would give the
+    //! data to whichever lambda the compiler happens to construct first and
+    //! leave the other empty.
+    std::vector<std::shared_ptr<std::vector<interfaces::NetMessageInfo>>> m_pool;
     int m_in_flight{0};
     bool m_stopped{false};
 
@@ -100,13 +104,15 @@ struct ProxyClientCustom<ipc::capnp::messages::NetMessageTrace, interfaces::NetM
         // max_batch_events per interval, which silently drops events once the
         // node produces them faster than that.
         while (m_in_flight < MAX_IN_FLIGHT) {
-            std::vector<interfaces::NetMessageInfo> batch;
+            std::shared_ptr<std::vector<interfaces::NetMessageInfo>> batch;
             if (!m_pool.empty()) {
                 batch = std::move(m_pool.back());
                 m_pool.pop_back();
+            } else {
+                batch = std::make_shared<std::vector<interfaces::NetMessageInfo>>();
             }
             uint64_t dropped{0};
-            if (!m_drain(batch, dropped)) {
+            if (!m_drain(*batch, dropped)) {
                 if (m_pool.size() < static_cast<size_t>(MAX_IN_FLIGHT)) m_pool.push_back(std::move(batch));
                 break;
             }
@@ -115,24 +121,26 @@ struct ProxyClientCustom<ipc::capnp::messages::NetMessageTrace, interfaces::NetM
         Schedule(self);
     }
 
-    void Send(const std::shared_ptr<Streamer>& self, std::vector<interfaces::NetMessageInfo> batch, uint64_t dropped)
+    void Send(const std::shared_ptr<Streamer>& self,
+              std::shared_ptr<std::vector<interfaces::NetMessageInfo>> batch, uint64_t dropped)
     {
         auto request{m_client.messagesStreamRequest(nullptr)};
-        auto list{request.initMessages(batch.size())};
-        for (size_t i{0}; i < batch.size(); ++i) BuildNetMessage(list[i], batch[i]);
+        auto list{request.initMessages(batch->size())};
+        for (size_t i{0}; i < batch->size(); ++i) BuildNetMessage(list[i], (*batch)[i]);
         request.setDropped(dropped);
         ++m_in_flight;
         m_loop.m_task_set->add(request.send().then(
-            [self, batch = std::move(batch)](auto&&) mutable { self->Finish(batch, /*ok=*/true); },
-            [self, batch = std::move(batch)](const kj::Exception&) mutable { self->Finish(batch, /*ok=*/false); }));
+            [self, batch](auto&&) { self->Finish(batch, /*ok=*/true); },
+            [self, batch](const kj::Exception&) { self->Finish(batch, /*ok=*/false); }));
     }
 
-    void Finish(std::vector<interfaces::NetMessageInfo>& batch, bool ok)
+    void Finish(const std::shared_ptr<std::vector<interfaces::NetMessageInfo>>& batch, bool ok)
     {
         --m_in_flight;
-        m_complete(batch, ok);
-        batch.clear();
-        if (m_pool.size() < static_cast<size_t>(MAX_IN_FLIGHT)) m_pool.push_back(std::move(batch));
+        // Hands the batch's arena slots and payload buffers back to the node.
+        m_complete(*batch, ok);
+        batch->clear();
+        if (m_pool.size() < static_cast<size_t>(MAX_IN_FLIGHT)) m_pool.push_back(batch);
     }
 };
 

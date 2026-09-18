@@ -191,7 +191,7 @@ class TestBitcoinIpcTracing(BitcoinTestFramework):
         peer = node.add_p2p_connection(P2PInterface())
         payload = NONCE.to_bytes(8, "little") + bytes(range(256)) * 40  # 10248 bytes
         sent = 0
-        for _ in range(4):
+        for _ in range(8):
             for _ in range(5):
                 peer.send_raw_message(self.build_ping(peer, payload))
                 sent += 1
@@ -204,16 +204,17 @@ class TestBitcoinIpcTracing(BitcoinTestFramework):
         assert_equal(returncode, 0)
         assert_equal(stderr, "")
         pings = [e for e in trace.events() if e["type"] == "ping" and e["size"] == len(payload)]
-        assert_equal(len(pings), 20)
+        assert_equal(len(pings), 40)
         # Every one of them must carry the right bytes out of its arena slot.
         for ping in pings:
             assert ping["slot"] >= 0
             assert_equal(bytes.fromhex(ping["payload"]), payload)
         # Slots were reused rather than each event getting a fresh one.
-        assert len({ping["slot"] for ping in pings}) < 20
+        # Ten slots serving forty events means each was reused about four times.
+        assert len({ping["slot"] for ping in pings}) <= 10
         summary = trace.summary()
         assert_equal(summary["dropped"], 0)
-        assert summary["shm_events"] >= 20
+        assert summary["shm_events"] >= 40
         peer.peer_disconnect()
 
     def test_shared_memory_payload(self):
