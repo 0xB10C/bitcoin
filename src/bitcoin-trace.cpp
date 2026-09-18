@@ -21,6 +21,7 @@
 #include <tinyformat.h>
 #include <univalue.h>
 #include <util/fs.h>
+#include <util/shared_memory.h>
 #include <util/signalinterrupt.h>
 #include <util/strencodings.h>
 #include <util/time.h>
@@ -35,6 +36,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -85,6 +88,9 @@ static void AddArgs(ArgsManager& args)
     args.AddArg("-batch=<n>", "Maximum number of events delivered per IPC call (default: 1024)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     args.AddArg("-queuebytes=<n>", "Maximum payload bytes buffered in the node before events are dropped (default: 67108864)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     args.AddArg("-batchbytes=<n>", "Stop filling a batch once its payload bytes reach <n> (default: 4194304)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    args.AddArg("-shm=<n>", "Ask the node to pass payloads of at least -shmmin bytes through an <n> byte shared memory region instead of copying them into the IPC messages (default: 0, disabled)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    args.AddArg("-checksum", "Sum the captured payload bytes of every event, so that the cost of actually reading them is part of the measurement (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    args.AddArg("-shmmin=<n>", "Smallest payload passed through shared memory when -shm is set (default: 4096)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     args.AddArg("-batchwait=<us>", "Let the node wait up to <us> microseconds for a batch to fill before delivering it (default: 1000)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     args.AddArg("-stats", "Print per-second statistics instead of individual events (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     args.AddArg("-json", "Print events and statistics as JSON lines (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -111,6 +117,9 @@ struct Counters {
     uint64_t pong_out{0};
     uint64_t dropped{0};
     uint64_t batches{0};
+    uint64_t shm_events{0};
+    uint64_t payload_bytes_seen{0};
+    uint64_t checksum{0};
     uint64_t lat_sum_us{0};
     uint64_t lat_max_us{0};
 
@@ -124,6 +133,9 @@ struct Counters {
         pong_out += o.pong_out;
         dropped += o.dropped;
         batches += o.batches;
+        shm_events += o.shm_events;
+        payload_bytes_seen += o.payload_bytes_seen;
+        checksum += o.checksum;
         lat_sum_us += o.lat_sum_us;
         lat_max_us = std::max(lat_max_us, o.lat_max_us);
     }
@@ -139,6 +151,9 @@ struct Counters {
         o.pushKV("bytes", bytes);
         o.pushKV("dropped", dropped);
         o.pushKV("batches", batches);
+        o.pushKV("shm_events", shm_events);
+        o.pushKV("payload_bytes_seen", payload_bytes_seen);
+        o.pushKV("checksum", checksum);
         o.pushKV("duration_s", seconds);
         o.pushKV("events_per_s", seconds > 0 ? events / seconds : 0.0);
         UniValue lat{UniValue::VOBJ};
@@ -152,7 +167,29 @@ struct Counters {
 class TraceCallback : public interfaces::NetMessageTrace
 {
 public:
-    TraceCallback(bool print_events, bool json) : m_print_events{print_events}, m_json{json} {}
+    TraceCallback(bool print_events, bool json, bool checksum)
+        : m_print_events{print_events}, m_json{json}, m_checksum{checksum} {}
+
+    void payloadArena(const std::string& name, uint64_t slot_bytes, uint32_t slot_count) override
+    {
+        std::string error;
+        m_arena = util::SharedMemory::Open(name, slot_bytes * slot_count, error);
+        if (!m_arena) {
+            // Throwing here tells the node to keep sending payloads inline.
+            throw std::runtime_error(strprintf("cannot map shared payload arena: %s", error));
+        }
+        m_slot_bytes = slot_bytes;
+        m_slot_count = slot_count;
+    }
+
+    //! Captured payload bytes of an event, from the message or from the arena.
+    std::span<const unsigned char> Payload(const interfaces::NetMessageInfo& m) const
+    {
+        if (m.payload_slot < 0) return m.payload;
+        const auto slot{static_cast<uint32_t>(m.payload_slot)};
+        if (!m_arena || slot >= m_slot_count || m.payload_len > m_slot_bytes) return {};
+        return {reinterpret_cast<const unsigned char*>(m_arena.data()) + slot * m_slot_bytes, m.payload_len};
+    }
 
     void messages(const std::vector<interfaces::NetMessageInfo>& messages, uint64_t dropped) override
     {
@@ -170,6 +207,16 @@ public:
                 if (m.msg_type == "pong") ++c.pong_out;
             }
             c.bytes += m.msg_size;
+            if (m.payload_slot >= 0) ++c.shm_events;
+            const std::span<const unsigned char> payload{Payload(m)};
+            c.payload_bytes_seen += payload.size();
+            if (m_checksum) {
+                // Actually read the bytes, so that the cost of consuming them
+                // is part of the measurement on both delivery paths.
+                uint64_t sum{0};
+                for (const unsigned char b : payload) sum += b;
+                c.checksum += sum;
+            }
             const uint64_t lat{now_us > m.timestamp_us ? static_cast<uint64_t>(now_us - m.timestamp_us) : 0};
             c.lat_sum_us += lat;
             c.lat_max_us = std::max(c.lat_max_us, lat);
@@ -209,6 +256,7 @@ public:
 private:
     void Print(const interfaces::NetMessageInfo& m, uint64_t lat_us)
     {
+        const std::span<const unsigned char> payload{Payload(m)};
         if (m_json) {
             UniValue o{UniValue::VOBJ};
             o.pushKV("t", m.timestamp_us);
@@ -218,19 +266,26 @@ private:
             o.pushKV("conn", m.conn_type);
             o.pushKV("type", m.msg_type);
             o.pushKV("size", m.msg_size);
-            o.pushKV("payload", HexStr(m.payload));
+            o.pushKV("payload", HexStr(payload));
+            o.pushKV("slot", m.payload_slot);
             o.pushKV("lat_us", lat_us);
             tfm::format(std::cout, "%s\n", o.write());
         } else {
             tfm::format(std::cout, "%s '%s' msg %s peer %d (%s, %s) with %d bytes%s\n",
                         m.inbound ? "inbound" : "outbound", m.msg_type, m.inbound ? "from" : "to",
                         m.peer_id, m.conn_type, m.peer_addr, m.msg_size,
-                        m.payload.empty() ? "" : strprintf(" payload %s", HexStr(m.payload)));
+                        payload.empty() ? "" : strprintf(" payload %s", HexStr(payload)));
         }
     }
 
     const bool m_print_events;
     const bool m_json;
+    const bool m_checksum;
+    //! Only written in payloadArena(), which the node calls before the first
+    //! batch and from the same thread.
+    util::SharedMemory m_arena;
+    uint64_t m_slot_bytes{0};
+    uint32_t m_slot_count{0};
     std::mutex m_mutex;
     Counters m_total;
     Counters m_interval;
@@ -302,6 +357,8 @@ MAIN_FUNCTION
     options.max_batch_wait_us = static_cast<uint32_t>(std::max<int64_t>(0, args.GetIntArg("-batchwait", options.max_batch_wait_us)));
     options.max_queue_bytes = static_cast<uint64_t>(std::max<int64_t>(1, args.GetIntArg("-queuebytes", options.max_queue_bytes)));
     options.max_batch_bytes = static_cast<uint64_t>(std::max<int64_t>(1, args.GetIntArg("-batchbytes", options.max_batch_bytes)));
+    options.shm_bytes = static_cast<uint64_t>(std::max<int64_t>(0, args.GetIntArg("-shm", 0)));
+    options.shm_min_payload_bytes = static_cast<uint32_t>(std::max<int64_t>(1, args.GetIntArg("-shmmin", options.shm_min_payload_bytes)));
 
     // Connect to bitcoin-node process, or fail and print an error.
     std::unique_ptr<interfaces::Init> local_init{interfaces::MakeBasicInit("bitcoin-trace", argc > 0 ? argv[0] : "")};
@@ -341,7 +398,7 @@ MAIN_FUNCTION
             tfm::format(std::cerr, "Error: bitcoin-node does not provide the tracing interface\n");
             return EXIT_FAILURE;
         }
-        auto callback{std::make_unique<TraceCallback>(/*print_events=*/!stats, json)};
+        auto callback{std::make_unique<TraceCallback>(/*print_events=*/!stats, json, args.GetBoolArg("-checksum", false))};
         TraceCallback& cb{*callback};
         std::unique_ptr<interfaces::Handler> handler{tracing->traceNetMessages(options, std::move(callback))};
         const auto start{std::chrono::steady_clock::now()};
@@ -394,6 +451,7 @@ MAIN_FUNCTION
         summary.pushKV("batch_wait_us", options.max_batch_wait_us);
         summary.pushKV("queue_bytes", options.max_queue_bytes);
         summary.pushKV("batch_bytes", options.max_batch_bytes);
+        summary.pushKV("shm_bytes", options.shm_bytes);
         const std::string out_path{args.GetArg("-out", "")};
         if (!out_path.empty()) {
             std::ofstream out{fs::PathToString(fs::PathFromString(out_path))};

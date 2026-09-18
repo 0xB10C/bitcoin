@@ -159,6 +159,32 @@ class TestBitcoinIpcTracing(BitcoinTestFramework):
         assert_equal(trace.summary()["dropped"], 0)
         peer.peer_disconnect()
 
+    def test_shared_memory_payload(self):
+        self.log.info("Check that a large payload is delivered through the shared memory arena")
+        node = self.nodes[0]
+        # 8 MiB of shared memory, 1 MB slots, so a handful of slots.
+        trace = self.start_trace(["-payload=1000000", "-shm=8388608", "-shmmin=4096"])
+        peer = node.add_p2p_connection(P2PInterface())
+        payload = NONCE.to_bytes(8, "little") + bytes(range(256)) * 40  # 10248 bytes
+        peer.send_raw_message(self.build_ping(peer, payload))
+        peer.wait_until(lambda: "pong" in peer.last_message and peer.last_message["pong"].nonce == NONCE)
+        self.wait_until(lambda: any(e["type"] == "ping" and e["size"] == len(payload) for e in trace.events()))
+        returncode, stderr = trace.stop()
+        assert_equal(returncode, 0)
+        assert_equal(stderr, "")
+        ping = next(e for e in trace.events() if e["type"] == "ping" and e["size"] == len(payload))
+        assert_equal(bytes.fromhex(ping["payload"]), payload)
+        # The payload came out of an arena slot, not out of the IPC message.
+        assert ping["slot"] >= 0
+        # Small handshake messages stay inline, below -shmmin.
+        version = next(e for e in trace.events() if e["type"] == "version" and e["dir"] == "in")
+        assert_equal(version["slot"], -1)
+        summary = trace.summary()
+        assert_equal(summary["dropped"], 0)
+        assert summary["shm_events"] >= 1
+        assert_equal(summary["shm_bytes"], 8388608)
+        peer.peer_disconnect()
+
     @staticmethod
     def build_ping(peer, payload):
         """Build a v1 ping message with an arbitrary payload."""
@@ -183,6 +209,7 @@ class TestBitcoinIpcTracing(BitcoinTestFramework):
         self.test_ping_pong_events()
         self.test_direction_filter()
         self.test_large_payload()
+        self.test_shared_memory_payload()
         self.test_node_shutdown_with_subscriber()
 
 
