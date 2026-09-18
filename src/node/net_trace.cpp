@@ -208,9 +208,14 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
             if (copy <= INLINE_PAYLOAD) {
                 std::memcpy(s.payload_inline.data(), payload.data(), copy);
             } else {
-                if (s.payload_heap.capacity() < copy) {
+                // Capacity is rounded up to 8 bytes: the IPC layer may attach the
+                // buffer to the outgoing message as-is, and Cap'n Proto reads up to
+                // the next word boundary.
+                const size_t padded{(copy + 7) & ~size_t{7}};
+                if (s.payload_heap.capacity() < padded) {
                     // Try a recycled buffer before allocating.
                     pool.TryPop([&](std::vector<unsigned char>& buf) { s.payload_heap.swap(buf); });
+                    if (s.payload_heap.capacity() < padded) s.payload_heap.reserve(padded);
                 }
                 s.payload_heap.assign(payload.begin(), payload.begin() + copy);
             }

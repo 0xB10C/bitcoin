@@ -141,6 +141,34 @@ class TestBitcoinIpcTracing(BitcoinTestFramework):
         assert_equal(trace.summary()["ping_in"], 0)
         peer.peer_disconnect()
 
+    def test_large_payload(self):
+        self.log.info("Check that a large payload is delivered intact (external segment path)")
+        node = self.nodes[0]
+        trace = self.start_trace(["-payload=1000000"])
+        peer = node.add_p2p_connection(P2PInterface())
+        # A ping may carry more than the 8 byte nonce; the node ignores the rest.
+        payload = NONCE.to_bytes(8, "little") + bytes(range(256)) * 40  # 10248 bytes
+        peer.send_raw_message(self.build_ping(peer, payload))
+        peer.wait_until(lambda: "pong" in peer.last_message and peer.last_message["pong"].nonce == NONCE)
+        self.wait_until(lambda: any(e["type"] == "ping" and e["size"] == len(payload) for e in trace.events()))
+        returncode, stderr = trace.stop()
+        assert_equal(returncode, 0)
+        assert_equal(stderr, "")
+        ping = next(e for e in trace.events() if e["type"] == "ping" and e["size"] == len(payload))
+        assert_equal(bytes.fromhex(ping["payload"]), payload)
+        assert_equal(trace.summary()["dropped"], 0)
+        peer.peer_disconnect()
+
+    @staticmethod
+    def build_ping(peer, payload):
+        """Build a v1 ping message with an arbitrary payload."""
+        class RawPing:
+            msgtype = b"ping"
+
+            def serialize(self):
+                return payload
+        return peer.build_message(RawPing())
+
     def test_node_shutdown_with_subscriber(self):
         self.log.info("Check that bitcoin-trace exits when the node shuts down")
         trace = self.start_trace([])
@@ -154,6 +182,7 @@ class TestBitcoinIpcTracing(BitcoinTestFramework):
     def run_test(self):
         self.test_ping_pong_events()
         self.test_direction_filter()
+        self.test_large_payload()
         self.test_node_shutdown_with_subscriber()
 
 

@@ -97,8 +97,13 @@ the same driver measures large-message tracing: `run_bench.py run --mode ipc
 bounds buffered payload bytes per subscriber (`max_queue_bytes`, default 64 MiB,
 `-queuebytes`) and batch payload bytes (`max_batch_bytes`, default 4 MiB,
 `-batchbytes`); large payload buffers are recycled through a small per-subscriber
-pool so steady-state large messages do not allocate per event. The libbpf
-receiver uses a second ring buffer with 4 MiB records for large payloads
+pool so steady-state large messages do not allocate per event. Payloads of 4 KiB
+and more are attached to the outgoing Cap'n Proto message as an external segment
+(`capnp::Orphanage::referenceExternalData`, see `src/ipc/capnp/tracing-types.h`)
+instead of being copied into it on the node's event-loop thread. Locally, full
+capture of 1 MB messages then costs the calling thread one memcpy (~70 µs/MB)
+and the event-loop thread ~150 µs/MB, mostly the kernel copy into the socket.
+The libbpf receiver uses a second ring buffer with 4 MiB records for large payloads
 (`--large-ring-mb`), like peer-observer's tiered rings.
 
 The IBD benchmark itself is only stubbed (`--mode ibd`); it needs a synced local
