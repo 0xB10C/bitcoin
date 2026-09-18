@@ -314,16 +314,22 @@ def run(args):
 
 
 def compare_table(results):
-    rows = ["| run | pings processed | ping/s (max stage) | events received | expected | drop % | reported dropped | node CPU % | node RSS MB | recv CPU % | lat mean/max us |",
-            "|---|---|---|---|---|---|---|---|---|---|---|"]
+    rows = ["| run | pings processed | ping/s (max stage) | events received | expected | drop % | reported dropped "
+            "| node CPU % | node CPU us/ping | recv CPU % | recv CPU us/event | lat mean/max us |",
+            "|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in sorted(results, key=lambda r: r["label"]):
         flood = r.get("flood", {})
         rec = r.get("receiver")
         cpu = r.get("cpu", {})
         node_cpu = cpu.get("node") or {}
         recv_cpu = cpu.get("receiver") or {}
+        pongs = flood.get("pongs", 0)
         max_pong_rate = max((s["pong_rate"] for s in flood.get("stages", [])), default=0)
-        rows.append("| {label} | {pongs} | {rate:.0f} | {got} | {exp} | {drop} | {rdrop} | {ncpu} | {rss} | {rcpu} | {lat} |".format(
+        # CPU per unit of work: percentages hide throughput differences (a tracer
+        # that halves the node's message rate can show the same CPU% as untraced).
+        node_us_per_ping = node_cpu["cpu_s"] / pongs * 1e6 if node_cpu and pongs else None
+        recv_us_per_event = recv_cpu["cpu_s"] / (2 * pongs) * 1e6 if recv_cpu and pongs else None
+        rows.append("| {label} | {pongs} | {rate:.0f} | {got} | {exp} | {drop} | {rdrop} | {ncpu} | {nus} | {rcpu} | {rus} | {lat} |".format(
             label=r["label"],
             pongs=flood.get("pongs", "-"),
             rate=max_pong_rate,
@@ -332,8 +338,9 @@ def compare_table(results):
             drop=f"{r['drop_pct']:.2f}" if r.get("drop_pct") is not None else "-",
             rdrop=rec["dropped"] if rec else "-",
             ncpu=f"{node_cpu['avg_cpu_pct']:.0f}" if node_cpu else "-",
-            rss=f"{node_cpu['peak_rss_kb'] / 1024:.0f}" if node_cpu else "-",
+            nus=f"{node_us_per_ping:.1f}" if node_us_per_ping is not None else "-",
             rcpu=f"{recv_cpu['avg_cpu_pct']:.0f}" if recv_cpu else "-",
+            rus=f"{recv_us_per_event:.2f}" if recv_us_per_event is not None else "-",
             lat=f"{rec['latency_us']['mean']:.0f}/{rec['latency_us']['max']}" if rec else "-",
         ))
     return "\n".join(rows)

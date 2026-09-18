@@ -68,7 +68,10 @@ load failure"); run it on a host or a VM instead.
 - `expected_events = 2 * pongs`, `drop % = 1 - (ping_in + pong_out) / expected`.
   This is independent of the receiver's own drop counter, which is also reported
   (`dropped` = queue-full drops for IPC, perf-buffer lost samples for eBPF).
-- Node CPU% is utime+stime over the flood period, sampled from `/proc`.
+- Node CPU% is utime+stime over the flood period, sampled from `/proc`. Compare
+  the per-work columns (node CPU µs per ping, receiver CPU µs per event):
+  percentages hide throughput differences, e.g. eBPF halves the node's message
+  rate while its CPU% stays flat.
 - Latency is `now - event timestamp` when the receiver sees an event. Both the
   node (`std::chrono::steady_clock`) and eBPF (`bpf_ktime_get_ns`) use
   `CLOCK_MONOTONIC`, so the numbers are comparable. For IPC this includes queueing
