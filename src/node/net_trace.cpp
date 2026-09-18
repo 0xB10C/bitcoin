@@ -93,8 +93,39 @@ util::SharedMemory MakeArena(const ArenaPlan& plan)
 //! node's own working set from cache. Non-temporal stores skip it. SSE2 is
 //! baseline on x86-64, so this needs no runtime dispatch; elsewhere it is a
 //! plain memcpy.
+enum class ArenaCopy { kNonTemporal, kMemcpy, kNone };
+
+//! Selected once from BITCOIN_TRACE_ARENA_COPY, which exists only so the
+//! benchmark in contrib/tracing/bench can A/B the copy with a single binary:
+//! "nt" (the default) uses streaming stores, "memcpy" a plain copy, and "none"
+//! skips the payload bytes, which delivers garbage but measures what the rest
+//! of the path costs without the copy.
+ArenaCopy ArenaCopyMode()
+{
+    static const ArenaCopy mode{[] {
+        const char* env{std::getenv("BITCOIN_TRACE_ARENA_COPY")};
+        if (!env) return ArenaCopy::kNonTemporal;
+        const std::string_view value{env};
+        if (value == "memcpy") return ArenaCopy::kMemcpy;
+        if (value == "none") return ArenaCopy::kNone;
+        return ArenaCopy::kNonTemporal;
+    }()};
+    return mode;
+}
+
 void CopyToArena(std::byte* dst, const unsigned char* src, size_t n)
 {
+    switch (ArenaCopyMode()) {
+    case ArenaCopy::kNone:
+        // Benchmark only: touch the slot but skip the payload.
+        std::memcpy(dst, src, std::min<size_t>(n, 64));
+        return;
+    case ArenaCopy::kMemcpy:
+        std::memcpy(dst, src, n);
+        return;
+    case ArenaCopy::kNonTemporal:
+        break;
+    }
 #if defined(__x86_64__) && defined(__SSE2__)
     size_t i{0};
     if (reinterpret_cast<uintptr_t>(dst) % sizeof(__m128i) == 0) {
