@@ -251,8 +251,6 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
     std::atomic<uint64_t> queued_bytes{0};
     //! Events dropped because the ring was full (producers, relaxed).
     std::atomic<uint64_t> dropped{0};
-    //! Producers currently inside record() for this subscriber; removal waits for zero.
-    std::atomic<int> in_use{0};
     //! Set when delivery failed (client gone); producers skip the subscriber.
     std::atomic<bool> dead{false};
 
@@ -451,11 +449,13 @@ void NetMessageTracer::State::Remove(const std::shared_ptr<Subscriber>& sub)
 {
     LOCK(mutex);
     for (auto& slot : slots) {
-        if (slot.load(std::memory_order_acquire) != sub.get()) continue;
-        slot.store(nullptr, std::memory_order_release);
+        if (slot.sub.load(std::memory_order_acquire) != sub.get()) continue;
+        slot.sub.store(nullptr, std::memory_order_release);
         active.fetch_sub(1, std::memory_order_relaxed);
-        // Wait for producers that picked up the pointer before it was cleared.
-        while (sub->in_use.load(std::memory_order_acquire) != 0) std::this_thread::yield();
+        // Wait for producers that entered the slot before it was cleared. They
+        // may still be pushing to this subscriber, so it must stay alive (and,
+        // with a shared payload arena, stay mapped) until they are done.
+        while (slot.in_use.load(std::memory_order_acquire) != 0) std::this_thread::yield();
         owned.erase(std::find(owned.begin(), owned.end(), sub));
         return;
     }
@@ -468,14 +468,14 @@ NetMessageTracer::~NetMessageTracer()
     std::vector<std::shared_ptr<Subscriber>> subs;
     {
         LOCK(m_state->mutex);
-        for (auto& slot : m_state->slots) slot.store(nullptr, std::memory_order_release);
+        for (auto& slot : m_state->slots) slot.sub.store(nullptr, std::memory_order_release);
         m_state->active.store(0, std::memory_order_relaxed);
+        for (auto& slot : m_state->slots) {
+            while (slot.in_use.load(std::memory_order_acquire) != 0) std::this_thread::yield();
+        }
         subs.swap(m_state->owned);
     }
-    for (const auto& sub : subs) {
-        while (sub->in_use.load(std::memory_order_acquire) != 0) std::this_thread::yield();
-        sub->Stop();
-    }
+    for (const auto& sub : subs) sub->Stop();
 }
 
 size_t NetMessageTracer::subscriberCount() const
@@ -489,15 +489,18 @@ void NetMessageTracer::record(bool inbound, int64_t peer_id, std::string_view pe
 {
     const int64_t now_us{NowUs()};
     for (auto& slot : m_state->slots) {
-        Subscriber* sub{slot.load(std::memory_order_acquire)};
-        if (!sub) continue;
-        sub->in_use.fetch_add(1, std::memory_order_acquire);
-        // Re-check after announcing use: Remove() clears the slot first, then waits for in_use.
-        if (slot.load(std::memory_order_acquire) == sub && !sub->dead.load(std::memory_order_relaxed) &&
+        if (slot.sub.load(std::memory_order_relaxed) == nullptr) continue;
+        // Announce use on the slot, which outlives every subscriber in it, and
+        // only then read the subscriber: Remove() clears `sub` before it waits
+        // for in_use, so a subscriber read here cannot be destroyed until this
+        // iteration is done with it.
+        slot.in_use.fetch_add(1, std::memory_order_acquire);
+        Subscriber* sub{slot.sub.load(std::memory_order_acquire)};
+        if (sub && !sub->dead.load(std::memory_order_relaxed) &&
             (inbound ? sub->opts.inbound : sub->opts.outbound)) {
             sub->Push(inbound, peer_id, peer_addr, conn_type, msg_type, payload, now_us);
         }
-        sub->in_use.fetch_sub(1, std::memory_order_release);
+        slot.in_use.fetch_sub(1, std::memory_order_release);
     }
 }
 
@@ -508,13 +511,13 @@ std::unique_ptr<interfaces::Handler> NetMessageTracer::subscribe(const interface
     {
         LOCK(m_state->mutex);
         auto it{std::find_if(m_state->slots.begin(), m_state->slots.end(),
-                             [](const auto& s) { return s.load(std::memory_order_relaxed) == nullptr; })};
+                             [](const auto& s) { return s.sub.load(std::memory_order_relaxed) == nullptr; })};
         if (it == m_state->slots.end()) {
             throw std::runtime_error(strprintf("Too many net message trace subscribers (max %d)", m_state->slots.size()));
         }
         m_state->owned.push_back(sub);
         sub->thread = std::thread(&util::TraceThread, "nettrace", [sub] { sub->Run(); });
-        it->store(sub.get(), std::memory_order_release);
+        it->sub.store(sub.get(), std::memory_order_release);
         m_state->active.fetch_add(1, std::memory_order_relaxed);
     }
     return interfaces::MakeCleanupHandler([weak_state = std::weak_ptr<State>(m_state), sub] {

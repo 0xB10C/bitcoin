@@ -65,11 +65,20 @@ private:
     static constexpr size_t MAX_SUBSCRIBERS{8};
     //! Shared so that handler cleanups running after the tracer is destroyed
     //! (possible with IPC clients disconnecting late) are harmless.
+    //! One publication slot. The slot itself outlives every subscriber that
+    //! passes through it, so producers can announce their use on it (in_use)
+    //! before they touch the subscriber it points at.
+    struct alignas(64) Slot {
+        std::atomic<Subscriber*> sub{nullptr};
+        //! Producers currently inside record() for whatever this slot points
+        //! at. Remove() clears `sub`, then waits for this to reach zero.
+        std::atomic<int> in_use{0};
+    };
     struct State {
         //! Serializes subscribe/remove only; producers never take it.
         mutable Mutex mutex;
         //! Subscribers visible to producers, read lock-free in record().
-        std::array<std::atomic<Subscriber*>, MAX_SUBSCRIBERS> slots{};
+        std::array<Slot, MAX_SUBSCRIBERS> slots{};
         //! Ownership of the subscribers in `slots`.
         std::vector<std::shared_ptr<Subscriber>> owned GUARDED_BY(mutex);
         std::atomic<int> active{0};

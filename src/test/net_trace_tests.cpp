@@ -17,8 +17,10 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <atomic>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 using interfaces::NetMessageInfo;
@@ -343,6 +345,44 @@ BOOST_AUTO_TEST_CASE(throwing_callback_removes_subscriber)
     Record(tracer, true, "ping", 0);
     handler.reset();
     BOOST_CHECK_EQUAL(tracer.subscriberCount(), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(subscriber_churn_under_load)
+{
+    // Producers must never touch a subscriber that is being removed. The
+    // window is between reading the slot and announcing use of it, so hammer
+    // it: several threads recording while subscribers come and go, with a
+    // shared payload arena, whose teardown unmaps the memory producers write
+    // into. Best run under TSan/ASan, where a regression is a hard failure.
+    NetMessageTracer tracer;
+    std::atomic<bool> stop{false};
+    std::vector<std::thread> producers;
+    for (int i = 0; i < 4; ++i) {
+        producers.emplace_back([&tracer, &stop, i] {
+            std::vector<unsigned char> payload(i % 2 ? 8 : 20000, 0x5a);
+            while (!stop.load(std::memory_order_relaxed)) {
+                if (tracer.active()) {
+                    tracer.record(i % 2, i, "127.0.0.1:1234", "inbound", "ping", payload);
+                }
+            }
+        });
+    }
+    NetMessageTraceOptions opts;
+    opts.max_payload_bytes = 64 * 1024;
+    opts.shm_bytes = 2 * 1024 * 1024;
+    opts.max_batch_wait_us = 0;
+    for (int round = 0; round < 40; ++round) {
+        std::vector<std::unique_ptr<interfaces::Handler>> handlers;
+        for (int i = 0; i < 3; ++i) {
+            handlers.push_back(tracer.subscribe(opts, std::make_unique<ArenaTrace>()));
+        }
+        UninterruptibleSleep(std::chrono::milliseconds{5});
+        handlers.clear();
+        BOOST_CHECK_EQUAL(tracer.subscriberCount(), 0U);
+    }
+    stop.store(true);
+    for (auto& p : producers) p.join();
+    BOOST_CHECK(!tracer.active());
 }
 
 BOOST_AUTO_TEST_CASE(destroy_tracer_with_live_subscriber)
