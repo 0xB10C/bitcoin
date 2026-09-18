@@ -12,9 +12,13 @@ and what it costs the node.
   (`rate:seconds,...`, rate `0` = as fast as the node accepts) and drains the
   node's replies. Every `pong` it receives is one ping the node processed, so
   `2 * pongs` is the number of ping/pong trace events the node emitted.
-- `ebpf_net_msgs.py`: BCC receiver attaching to the two USDT tracepoints. Uses
-  `open_perf_buffer(..., lost_cb=...)` to count lost events. Needs root and a
-  node built with `-DWITH_USDT=ON`.
+- `bpftrace_net_msgs.py`: bpftrace receiver attaching to the two USDT
+  tracepoints; one printf line per event, "Lost N events" counted as drops.
+  Needs root, BTF (`/sys/kernel/btf/vmlinux`) and a node built with
+  `-DWITH_USDT=ON`. Default engine of the driver.
+- `ebpf_net_msgs.py`: BCC receiver, same interface, delivering a binary struct
+  per event with `open_perf_buffer(..., lost_cb=...)`. Needs kernel headers in
+  addition (`--engine bcc`).
 - `bitcoin-trace` (in `src/`): IPC receiver. `-stats -json` prints per-second
   counters and a summary with the same schema as the eBPF receiver.
 - `run_bench.py`: starts a regtest `bitcoin-node` with `-ipcbind=unix`, attaches
@@ -32,8 +36,11 @@ contrib/tracing/bench/run_bench.py run --mode ebpf --payload 8
 contrib/tracing/bench/run_bench.py compare contrib/tracing/bench/results/*.json
 ```
 
-`--mode ebpf` prints a `sudo ... ebpf_net_msgs.py --pid ...` command and waits
-until you run it in another terminal (the driver itself never needs root).
+`--mode ebpf` prints a `sudo ... --pid ...` receiver command (also written to
+`results/run_ebpf_receiver.sh`) and waits until you run it in another terminal;
+the driver itself never needs root. The eBPF side cannot run in containers
+without BPF program loading permission (the load fails with "Unknown BPF object
+load failure"); run it on a host or a VM instead.
 
 ## Reading the numbers
 

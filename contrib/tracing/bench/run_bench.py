@@ -218,12 +218,21 @@ def run(args):
             result["receiver_cmd"] = cmd
             print(f"[bench] bitcoin-trace pid={receiver.pid} subscribed", flush=True)
         elif args.mode == "ebpf":
-            cmd = ["sudo", sys.executable, os.path.join(HERE, "ebpf_net_msgs.py"), "--pid", str(node.proc.pid),
+            receiver_script = "bpftrace_net_msgs.py" if args.engine == "bpftrace" else "ebpf_net_msgs.py"
+            cmd = ["sudo", sys.executable, os.path.join(HERE, receiver_script), "--pid", str(node.proc.pid),
                    "--payload", str(args.payload), "--page-cnt", str(args.page_cnt), "--ready-file", ready_file,
                    "--stop-file", stop_file, "--out", receiver_out, "--json"]
+            if args.engine == "bpftrace":
+                # Root shells often lack the user's PATH (e.g. nix shells), so pass the absolute path.
+                cmd += ["--bpftrace", shutil.which("bpftrace") or "bpftrace"]
+            # Also write the command to a file, for terminals where copy/paste is awkward.
+            helper = os.path.join(args.results, "run_ebpf_receiver.sh")
+            with open(helper, "w", encoding="utf-8") as f:
+                f.write("#!/usr/bin/env bash\n" + " ".join(cmd) + "\n")
+            os.chmod(helper, 0o755)
             result["receiver_cmd"] = cmd
             print("\n[bench] Run the eBPF receiver as root in another terminal now:\n\n    "
-                  + " ".join(cmd) + "\n\n[bench] waiting for it to attach ...", flush=True)
+                  + " ".join(cmd) + f"\n\n[bench] (also saved as {helper})\n[bench] waiting for it to attach ...", flush=True)
             wait_for_file(ready_file, timeout=3600, what="eBPF receiver ready file")
             with open(ready_file, encoding="utf-8") as f:
                 sampler.add("receiver", int(f.read().strip()))
@@ -328,6 +337,8 @@ def main():
     p.add_argument("--queue", type=int, default=65536, help="ipc: node-side queue size")
     p.add_argument("--batch", type=int, default=1024, help="ipc: max events per IPC call")
     p.add_argument("--page-cnt", type=int, default=1024, help="ebpf: perf buffer pages per CPU")
+    p.add_argument("--engine", choices=["bpftrace", "bcc"], default="bpftrace",
+                   help="ebpf: receiver implementation (bcc needs kernel headers, bpftrace only BTF)")
     p.add_argument("--maxreceivebuffer", type=int, default=5000)
     p.add_argument("--maxsendbuffer", type=int, default=1000)
     p.add_argument("--results", default=os.path.join(HERE, "results"))
