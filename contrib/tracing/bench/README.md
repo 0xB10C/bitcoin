@@ -38,7 +38,8 @@ contrib/tracing/bench/run_bench.py compare contrib/tracing/bench/results/*.json
 
 `--mode ebpf` prints a `sudo ... --pid ...` receiver command (also written to
 `results/run_ebpf_receiver.sh`) and waits until you run it in another terminal;
-the driver itself never needs root. The eBPF side cannot run in containers
+the driver itself never needs root. With `--run-receiver` (non-interactive sudo, e.g. CI)
+the driver starts the receiver itself. The eBPF side cannot run in containers
 without BPF program loading permission (the load fails with "Unknown BPF object
 load failure"); run it on a host or a VM instead.
 

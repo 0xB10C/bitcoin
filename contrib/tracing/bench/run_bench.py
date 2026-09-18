@@ -231,9 +231,24 @@ def run(args):
                 f.write("#!/usr/bin/env bash\n" + " ".join(cmd) + "\n")
             os.chmod(helper, 0o755)
             result["receiver_cmd"] = cmd
-            print("\n[bench] Run the eBPF receiver as root in another terminal now:\n\n    "
-                  + " ".join(cmd) + f"\n\n[bench] (also saved as {helper})\n[bench] waiting for it to attach ...", flush=True)
-            wait_for_file(ready_file, timeout=3600, what="eBPF receiver ready file")
+            if args.run_receiver:
+                # Non-interactive sudo available (e.g. CI): start the receiver ourselves.
+                receiver_log = open(os.path.join(workdir, "receiver.log"), "w", encoding="utf-8")
+                receiver = subprocess.Popen(cmd, stdout=receiver_log, stderr=subprocess.STDOUT)
+                print("[bench] started eBPF receiver via sudo, waiting for it to attach ...", flush=True)
+                start_wait = time.monotonic()
+                while not os.path.exists(ready_file):
+                    if receiver.poll() is not None:
+                        receiver_log.close()
+                        with open(os.path.join(workdir, "receiver.log"), encoding="utf-8") as f:
+                            raise RuntimeError("eBPF receiver exited early:\n" + f.read())
+                    if time.monotonic() - start_wait > 300:
+                        raise RuntimeError("timeout waiting for eBPF receiver ready file")
+                    time.sleep(0.2)
+            else:
+                print("\n[bench] Run the eBPF receiver as root in another terminal now:\n\n    "
+                      + " ".join(cmd) + f"\n\n[bench] (also saved as {helper})\n[bench] waiting for it to attach ...", flush=True)
+                wait_for_file(ready_file, timeout=3600, what="eBPF receiver ready file")
             with open(ready_file, encoding="utf-8") as f:
                 sampler.add("receiver", int(f.read().strip()))
             print("[bench] eBPF receiver attached", flush=True)
@@ -259,6 +274,8 @@ def run(args):
             wait_for_file(receiver_out, timeout=120, what="eBPF receiver summary")
             time.sleep(0.5)
             result["receiver"] = read_json_line(receiver_out)
+            if receiver:
+                receiver.wait(timeout=60)
 
         result["cpu"] = {"node": sampler.summary("node", t0, t1)}
         if "receiver" in sampler.pids:
@@ -339,6 +356,8 @@ def main():
     p.add_argument("--page-cnt", type=int, default=1024, help="ebpf: perf buffer pages per CPU")
     p.add_argument("--engine", choices=["bpftrace", "bcc"], default="bpftrace",
                    help="ebpf: receiver implementation (bcc needs kernel headers, bpftrace only BTF)")
+    p.add_argument("--run-receiver", action="store_true",
+                   help="ebpf: start the receiver via non-interactive sudo instead of waiting for the user")
     p.add_argument("--maxreceivebuffer", type=int, default=5000)
     p.add_argument("--maxsendbuffer", type=int, default=1000)
     p.add_argument("--results", default=os.path.join(HERE, "results"))

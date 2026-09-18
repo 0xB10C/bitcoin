@@ -90,7 +90,7 @@ def main():
 
     exe = os.readlink(f"/proc/{args.pid}/exe")
     script = build_script(exe, args.payload)
-    env = dict(os.environ, BPFTRACE_PERF_RB_PAGES=str(args.page_cnt), BPFTRACE_MAX_STRLEN="32")
+    env = dict(os.environ, BPFTRACE_PERF_RB_PAGES=str(args.page_cnt), BPFTRACE_MAX_STRLEN="32", BPFTRACE_STRLEN="32")
     cmd = [args.bpftrace, "-q", "-p", str(args.pid), "-e", script]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env, text=True, bufsize=1)
 
