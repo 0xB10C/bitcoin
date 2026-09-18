@@ -6,9 +6,11 @@
 #include <interfaces/tracing.h>
 #include <node/net_trace.h>
 #include <test/util/setup_common.h>
+#include <util/shared_memory.h>
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -103,11 +105,82 @@ public:
     std::promise<void> m_called;
 };
 
-void Record(NetMessageTracer& tracer, bool inbound, const std::string& type, size_t payload_len, int64_t peer = 7)
+void Record(NetMessageTracer& tracer, bool inbound, const std::string& type, size_t payload_len, int64_t peer = 7,
+            unsigned char fill = 0xab)
 {
-    std::vector<unsigned char> payload(payload_len, 0xab);
+    std::vector<unsigned char> payload(payload_len, fill);
     tracer.record(inbound, peer, "127.0.0.1:1234", "inbound", type, payload);
 }
+
+//! Maps the shared payload arena and resolves every event's payload bytes from
+//! it, the way an out-of-process subscriber does.
+class ArenaTrace : public interfaces::NetMessageTrace
+{
+public:
+    void payloadArena(const std::string& name, uint64_t slot_bytes, uint32_t slot_count) override
+    {
+        std::string error;
+        m_arena = util::SharedMemory::Open(name, slot_bytes * slot_count, error);
+        BOOST_REQUIRE_MESSAGE(m_arena, error);
+        m_slot_bytes = slot_bytes;
+        m_slot_count = slot_count;
+    }
+
+    void messages(const std::vector<NetMessageInfo>& messages, uint64_t dropped) override
+    {
+        std::lock_guard lock{m_mutex};
+        m_dropped += dropped;
+        for (const auto& m : messages) {
+            std::vector<unsigned char> payload;
+            if (m.payload_slot >= 0) {
+                BOOST_REQUIRE(m_arena);
+                BOOST_REQUIRE(static_cast<uint32_t>(m.payload_slot) < m_slot_count);
+                BOOST_REQUIRE(m.payload_len <= m_slot_bytes);
+                const auto* base{reinterpret_cast<const unsigned char*>(m_arena.data())};
+                base += static_cast<uint64_t>(m.payload_slot) * m_slot_bytes;
+                payload.assign(base, base + m.payload_len);
+            } else {
+                payload = m.payload;
+            }
+            m_events.emplace_back(m.msg_type, m.payload_slot, std::move(payload));
+        }
+    }
+
+    struct Event {
+        std::string type;
+        int32_t slot;
+        std::vector<unsigned char> payload;
+    };
+    std::vector<Event> Events()
+    {
+        std::lock_guard lock{m_mutex};
+        return m_events;
+    }
+    uint64_t Dropped()
+    {
+        std::lock_guard lock{m_mutex};
+        return m_dropped;
+    }
+    void WaitEvents(size_t n)
+    {
+        for (int i = 0; i < 1000; ++i) {
+            {
+                std::lock_guard lock{m_mutex};
+                if (m_events.size() >= n) return;
+            }
+            UninterruptibleSleep(std::chrono::milliseconds{10});
+        }
+        BOOST_FAIL("timed out waiting for events");
+    }
+
+private:
+    util::SharedMemory m_arena;
+    uint64_t m_slot_bytes{0};
+    uint32_t m_slot_count{0};
+    std::mutex m_mutex;
+    std::vector<Event> m_events;
+    uint64_t m_dropped{0};
+};
 
 } // namespace
 
@@ -198,6 +271,58 @@ BOOST_AUTO_TEST_CASE(bounded_queue_drops_and_batches)
     BOOST_CHECK_EQUAL(trace_ptr->Dropped(), 6U);
     BOOST_CHECK_EQUAL(trace_ptr->Delivered() + trace_ptr->Dropped(), 11U);
     for (const auto& batch : trace_ptr->Batches()) BOOST_CHECK(batch.size() <= 3);
+}
+
+BOOST_AUTO_TEST_CASE(shared_memory_payload_arena)
+{
+    NetMessageTracer tracer;
+    auto trace{std::make_unique<ArenaTrace>()};
+    auto* trace_ptr{trace.get()};
+    NetMessageTraceOptions opts;
+    opts.max_payload_bytes = 64 * 1024;
+    opts.shm_bytes = 4 * 1024 * 1024; // 64 slots of 64 KiB
+    opts.shm_min_payload_bytes = 4096;
+    opts.max_batch_wait_us = 0;
+    auto handler{tracer.subscribe(opts, std::move(trace))};
+
+    // The arena is only used after the subscriber has been told about it.
+    for (int i = 0; i < 1000 && trace_ptr->Events().empty(); ++i) {
+        Record(tracer, /*inbound=*/true, "ping", 10000, /*peer=*/7, /*fill=*/0x11);
+        UninterruptibleSleep(std::chrono::milliseconds{1});
+    }
+    trace_ptr->WaitEvents(1);
+    // Small payloads stay inline, large ones go through the arena. Send both
+    // several times so that arena slots are reused after delivery.
+    for (int i = 0; i < 100; ++i) {
+        Record(tracer, /*inbound=*/true, "small", 100, /*peer=*/7, /*fill=*/0x22);
+        Record(tracer, /*inbound=*/true, "big", 10000, /*peer=*/7, /*fill=*/0x33);
+        UninterruptibleSleep(std::chrono::milliseconds{1});
+    }
+
+    size_t small{0}, big{0};
+    for (int i = 0; i < 500 && (small < 100 || big < 100); ++i) {
+        small = big = 0;
+        for (const auto& e : trace_ptr->Events()) {
+            if (e.type == "small") ++small;
+            if (e.type == "big") ++big;
+        }
+        if (small < 100 || big < 100) UninterruptibleSleep(std::chrono::milliseconds{10});
+    }
+    BOOST_CHECK_EQUAL(trace_ptr->Dropped(), 0U);
+    BOOST_CHECK_EQUAL(small, 100U);
+    BOOST_CHECK_EQUAL(big, 100U);
+    for (const auto& e : trace_ptr->Events()) {
+        if (e.type == "small") {
+            BOOST_CHECK_EQUAL(e.slot, -1);
+            BOOST_CHECK_EQUAL(e.payload.size(), 100U);
+            BOOST_CHECK(std::ranges::all_of(e.payload, [](unsigned char c) { return c == 0x22; }));
+        } else if (e.type == "big") {
+            BOOST_CHECK(e.slot >= 0);
+            BOOST_CHECK_EQUAL(e.payload.size(), 10000U);
+            BOOST_CHECK(std::ranges::all_of(e.payload, [](unsigned char c) { return c == 0x33; }));
+        }
+    }
+    handler.reset();
 }
 
 BOOST_AUTO_TEST_CASE(throwing_callback_removes_subscriber)

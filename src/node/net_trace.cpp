@@ -6,6 +6,7 @@
 
 #include <logging.h>
 #include <tinyformat.h>
+#include <util/shared_memory.h>
 #include <util/thread.h>
 #include <util/time.h>
 
@@ -35,6 +36,11 @@ constexpr size_t INLINE_PAYLOAD{64};
 constexpr size_t MAX_RETAINED_PAYLOAD{MAX_PAYLOAD_BYTES};
 //! Polling interval of the delivery thread when max_batch_wait_us is 0.
 constexpr std::chrono::microseconds MIN_POLL_INTERVAL{50};
+//! Upper bounds for the shared memory payload arena.
+constexpr uint64_t MAX_SHM_BYTES{1024 * 1024 * 1024};
+constexpr uint32_t MAX_ARENA_SLOTS{4096};
+//! Arena slots are page aligned so that a slot never shares a page with another.
+constexpr uint64_t ARENA_PAGE{4096};
 
 interfaces::NetMessageTraceOptions ClampOptions(interfaces::NetMessageTraceOptions opts)
 {
@@ -44,7 +50,33 @@ interfaces::NetMessageTraceOptions ClampOptions(interfaces::NetMessageTraceOptio
     opts.max_batch_wait_us = std::min<uint32_t>(opts.max_batch_wait_us, 1'000'000);
     opts.max_queue_bytes = std::max<uint64_t>(opts.max_queue_bytes, opts.max_payload_bytes);
     opts.max_batch_bytes = std::max<uint64_t>(opts.max_batch_bytes, 1);
+    opts.shm_bytes = std::min<uint64_t>(opts.shm_bytes, MAX_SHM_BYTES);
+    // Below the inline slot buffer the arena would cost more than it saves.
+    opts.shm_min_payload_bytes = std::max<uint32_t>(opts.shm_min_payload_bytes, INLINE_PAYLOAD + 1);
     return opts;
+}
+
+//! Geometry of the shared memory payload arena, empty when it is not used.
+struct ArenaPlan {
+    uint64_t slot_bytes{0};
+    uint32_t slot_count{0};
+};
+
+ArenaPlan PlanArena(const interfaces::NetMessageTraceOptions& opts)
+{
+    if (opts.shm_bytes == 0 || opts.max_payload_bytes < opts.shm_min_payload_bytes) return {};
+    const uint64_t slot_bytes{((opts.max_payload_bytes + ARENA_PAGE - 1) / ARENA_PAGE) * ARENA_PAGE};
+    if (slot_bytes == 0 || opts.shm_bytes < slot_bytes) return {};
+    return {slot_bytes, static_cast<uint32_t>(std::min<uint64_t>(opts.shm_bytes / slot_bytes, MAX_ARENA_SLOTS))};
+}
+
+util::SharedMemory MakeArena(const ArenaPlan& plan)
+{
+    if (plan.slot_count == 0) return {};
+    std::string error;
+    auto shm{util::SharedMemory::Create(plan.slot_bytes * plan.slot_count, error)};
+    if (!shm) LogDebug(BCLog::IPC, "Net message trace: no shared payload arena: %s\n", error);
+    return shm;
 }
 
 int64_t NowUs()
@@ -67,7 +99,10 @@ struct Event {
     int64_t peer_id;
     uint64_t msg_size;
     int64_t timestamp_us;
+    //! Captured payload bytes, inline, on the heap or in the arena slot.
     uint32_t payload_len;
+    //! Arena slot holding the payload, or -1 when it is inline/on the heap.
+    int32_t payload_slot;
     std::array<char, 80> peer_addr;
     std::array<char, 24> conn_type;
     std::array<char, 16> msg_type;
@@ -154,12 +189,29 @@ constexpr size_t PAYLOAD_POOL_SIZE{16};
 struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
     Subscriber(std::weak_ptr<State> state, interfaces::NetMessageTraceOptions options,
                std::unique_ptr<interfaces::NetMessageTrace> cb)
-        : opts{ClampOptions(options)}, m_state{std::move(state)}, ring{opts.max_queue_events}, pool{PAYLOAD_POOL_SIZE}, callback{std::move(cb)} {}
+        : opts{ClampOptions(options)}, m_state{std::move(state)}, plan{PlanArena(opts)}, arena{MakeArena(plan)},
+          ring{opts.max_queue_events}, free_slots{std::max<uint32_t>(plan.slot_count, 1)}, pool{PAYLOAD_POOL_SIZE},
+          callback{std::move(cb)}
+    {
+        if (!arena) return;
+        for (uint32_t i{0}; i < plan.slot_count; ++i) {
+            free_slots.TryPush([&](uint32_t& s) { s = i; });
+        }
+    }
 
     const interfaces::NetMessageTraceOptions opts;
     const std::weak_ptr<State> m_state;
 
+    //! Shared memory arena for large payloads. Only used once the subscriber
+    //! has been told about it (arena_ready), so that it is mapped on the other
+    //! side before the first byte is written into it.
+    const ArenaPlan plan;
+    util::SharedMemory arena;
+    std::atomic<bool> arena_ready{false};
+
     Ring<Event> ring;
+    //! Indices of arena slots not currently holding an undelivered payload.
+    Ring<uint32_t> free_slots;
     //! Reusable heap buffers for payloads larger than INLINE_PAYLOAD, so
     //! steady-state large messages do not allocate (and page-fault) per event.
     Ring<std::vector<unsigned char>> pool;
@@ -188,7 +240,17 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
               std::string_view msg_type, std::span<const unsigned char> payload, int64_t now_us)
     {
         const size_t copy{std::min<size_t>(payload.size(), opts.max_payload_bytes)};
-        if (copy > INLINE_PAYLOAD) {
+        const bool use_arena{copy >= opts.shm_min_payload_bytes && arena_ready.load(std::memory_order_relaxed)};
+        uint32_t slot{0};
+        if (use_arena) {
+            // The only copy of a large payload: straight into the memory the
+            // subscriber has mapped. Nothing else touches these bytes.
+            if (!free_slots.TryPop([&](uint32_t& s) { slot = s; })) {
+                dropped.fetch_add(1, std::memory_order_relaxed);
+                return;
+            }
+            std::memcpy(arena.data() + uint64_t{slot} * plan.slot_bytes, payload.data(), copy);
+        } else if (copy > INLINE_PAYLOAD) {
             // Byte bound: reserve first, give back on failure.
             if (queued_bytes.fetch_add(copy, std::memory_order_relaxed) + copy > opts.max_queue_bytes) {
                 queued_bytes.fetch_sub(copy, std::memory_order_relaxed);
@@ -202,10 +264,13 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
             s.msg_size = payload.size();
             s.timestamp_us = now_us;
             s.payload_len = copy;
+            s.payload_slot = use_arena ? static_cast<int32_t>(slot) : -1;
             CopyString(s.peer_addr, peer_addr);
             CopyString(s.conn_type, conn_type);
             CopyString(s.msg_type, msg_type);
-            if (copy <= INLINE_PAYLOAD) {
+            if (use_arena) {
+                // Payload already written to the arena.
+            } else if (copy <= INLINE_PAYLOAD) {
                 std::memcpy(s.payload_inline.data(), payload.data(), copy);
             } else {
                 // Capacity is rounded up to 8 bytes: the IPC layer may attach the
@@ -221,7 +286,11 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
             }
         })};
         if (!ok) {
-            if (copy > INLINE_PAYLOAD) queued_bytes.fetch_sub(copy, std::memory_order_relaxed);
+            if (use_arena) {
+                free_slots.TryPush([&](uint32_t& s) { s = slot; });
+            } else if (copy > INLINE_PAYLOAD) {
+                queued_bytes.fetch_sub(copy, std::memory_order_relaxed);
+            }
             dropped.fetch_add(1, std::memory_order_relaxed);
         }
     }
@@ -240,7 +309,11 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
                 info.msg_type = s.msg_type.data();
                 info.msg_size = s.msg_size;
                 info.timestamp_us = s.timestamp_us;
-                if (s.payload_len <= INLINE_PAYLOAD) {
+                info.payload_slot = s.payload_slot;
+                info.payload_len = s.payload_slot >= 0 ? s.payload_len : 0;
+                if (s.payload_slot >= 0) {
+                    // Payload stays in the arena; the batch carries only the slot.
+                } else if (s.payload_len <= INLINE_PAYLOAD) {
                     info.payload.assign(s.payload_inline.begin(), s.payload_inline.begin() + s.payload_len);
                 } else {
                     info.payload.swap(s.payload_heap);
@@ -251,6 +324,18 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
             if (!got) break;
         }
         return batch_bytes;
+    }
+
+    //! After delivery, hand the arena slots of a batch back to the producers.
+    //! Must run only once the subscriber is done reading them, i.e. after
+    //! messages() returned.
+    void ReleaseSlots(std::vector<interfaces::NetMessageInfo>& batch)
+    {
+        for (auto& info : batch) {
+            if (info.payload_slot < 0) continue;
+            free_slots.TryPush([&](uint32_t& s) { s = static_cast<uint32_t>(info.payload_slot); });
+            info.payload_slot = -1;
+        }
     }
 
     //! After delivery, keep large payload buffers for reuse by producers.
@@ -272,6 +357,17 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
     {
         std::vector<interfaces::NetMessageInfo> batch;
         batch.reserve(opts.max_batch_events);
+        if (arena) {
+            // Only start using the arena once the subscriber has mapped it,
+            // which it does in this call. If it cannot, the arena stays unused
+            // and payloads travel inline as usual.
+            try {
+                callback->payloadArena(arena.name(), plan.slot_bytes, plan.slot_count);
+                arena_ready.store(true, std::memory_order_relaxed);
+            } catch (const std::exception& e) {
+                LogDebug(BCLog::IPC, "Net message trace subscriber cannot use a shared payload arena: %s\n", e.what());
+            }
+        }
         const std::chrono::microseconds wait{opts.max_batch_wait_us > 0 ? std::chrono::microseconds{opts.max_batch_wait_us} : MIN_POLL_INTERVAL};
         while (true) {
             RecycleBuffers(batch);
@@ -290,6 +386,7 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
             const uint64_t dropped_now{dropped.exchange(0, std::memory_order_relaxed)};
             try {
                 callback->messages(batch, dropped_now);
+                ReleaseSlots(batch);
             } catch (const std::exception& e) {
                 LogDebug(BCLog::IPC, "Net message trace subscriber failed, removing it: %s\n", e.what());
                 dead.store(true, std::memory_order_relaxed);

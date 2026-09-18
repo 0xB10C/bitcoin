@@ -22,6 +22,7 @@ interface Tracing $Proxy.wrap("interfaces::Tracing") {
 interface NetMessageTrace $Proxy.wrap("interfaces::NetMessageTrace") {
     destroy @0 (context :Proxy.Context) -> ();
     messages @1 (context :Proxy.Context, messages :List(NetMessage), dropped :UInt64) -> ();
+    payloadArena @2 (context :Proxy.Context, name :Text, slotBytes :UInt64, slotCount :UInt32) -> ();
 }
 
 struct NetMessageTraceOptions $Proxy.wrap("interfaces::NetMessageTraceOptions") {
@@ -33,6 +34,8 @@ struct NetMessageTraceOptions $Proxy.wrap("interfaces::NetMessageTraceOptions") 
     maxBatchWaitUs @5 :UInt32 = 1000 $Proxy.name("max_batch_wait_us");
     maxQueueBytes @6 :UInt64 = 67108864 $Proxy.name("max_queue_bytes");
     maxBatchBytes @7 :UInt64 = 4194304 $Proxy.name("max_batch_bytes");
+    shmBytes @8 :UInt64 = 0 $Proxy.name("shm_bytes");
+    shmMinPayloadBytes @9 :UInt32 = 4096 $Proxy.name("shm_min_payload_bytes");
 }
 
 struct NetMessage $Proxy.wrap("interfaces::NetMessageInfo") {
@@ -44,4 +47,7 @@ struct NetMessage $Proxy.wrap("interfaces::NetMessageInfo") {
     msgSize @5 :UInt64 $Proxy.name("msg_size");
     payload @6 :Data $Proxy.name("payload");
     timestampUs @7 :Int64 $Proxy.name("timestamp_us");
+    # -1 unless the payload is in the shared memory arena (see payloadArena).
+    payloadSlot @8 :Int32 = -1 $Proxy.name("payload_slot");
+    payloadLen @9 :UInt32 $Proxy.name("payload_len");
 }

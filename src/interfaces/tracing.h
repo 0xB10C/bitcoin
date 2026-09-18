@@ -33,8 +33,17 @@ struct NetMessageInfo {
     std::string msg_type;
     //! Full message payload size in bytes, even if payload below is truncated.
     uint64_t msg_size{0};
-    //! First NetMessageTraceOptions::max_payload_bytes bytes of the payload.
+    //! First NetMessageTraceOptions::max_payload_bytes bytes of the payload,
+    //! unless payload_slot is set.
     std::vector<unsigned char> payload;
+    //! When >= 0, the captured payload is not in `payload` but in the shared
+    //! memory arena announced by NetMessageTrace::payloadArena(), at byte
+    //! offset payload_slot * slot_bytes, and is payload_len bytes long. The
+    //! bytes are only valid for the duration of the messages() call that
+    //! delivered the event. -1 means the payload is inline in `payload`.
+    int32_t payload_slot{-1};
+    //! Number of captured payload bytes in the arena slot (0 if payload_slot < 0).
+    uint32_t payload_len{0};
     //! Time the event was recorded, in microseconds on std::chrono::steady_clock
     //! (CLOCK_MONOTONIC on Linux, so comparable across local processes).
     int64_t timestamp_us{0};
@@ -61,8 +70,20 @@ struct NetMessageTraceOptions {
     //! whose payload would exceed this are dropped and counted.
     uint64_t max_queue_bytes{64 * 1024 * 1024};
     //! Stop filling a batch once its payload bytes reach this (a batch always
-    //! holds at least one event).
+    //! holds at least one event). Payloads passed through the shared memory
+    //! arena do not count towards this, since they are not part of the batch.
     uint64_t max_batch_bytes{4 * 1024 * 1024};
+    //! Size in bytes of a shared memory region the node sets up for this
+    //! subscriber to pass large payloads through without copying them into
+    //! the IPC message (0 = do not use shared memory). Only useful for a
+    //! subscriber that can map the region, i.e. one on the same machine.
+    //! The region is divided into slots of max_payload_bytes (rounded up to a
+    //! page), so it must be at least that large to be used at all.
+    uint64_t shm_bytes{0};
+    //! Payloads of at least this many bytes go through the shared memory
+    //! arena when one was set up; smaller ones stay inline in the IPC message,
+    //! where they are cheaper than a slot round trip.
+    uint32_t shm_min_payload_bytes{4096};
 };
 
 //! Callback interface implemented by a tracing client. Called from a
@@ -75,6 +96,15 @@ public:
     //! Deliver a batch of events. `dropped` is the number of events discarded
     //! since the previous batch because the subscriber's buffer was full.
     virtual void messages(const std::vector<NetMessageInfo>& messages, uint64_t dropped) = 0;
+
+    //! Announce the shared memory payload arena, called once before the first
+    //! messages() call and only if NetMessageTraceOptions::shm_bytes asked for
+    //! one and the node could create it. `name` is a POSIX shared memory
+    //! object name (see util::SharedMemory) holding slot_count slots of
+    //! slot_bytes bytes each; an event with payload_slot >= 0 has its payload
+    //! at offset payload_slot * slot_bytes. Subscribers that do not map the
+    //! arena see those events without payload bytes.
+    virtual void payloadArena(const std::string& name, uint64_t slot_bytes, uint32_t slot_count) {}
 };
 
 //! Interface for subscribing to node trace events.
