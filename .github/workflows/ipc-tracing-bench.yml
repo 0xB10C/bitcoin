@@ -1,0 +1,243 @@
+# Copyright (c) 2025-present The Bitcoin Core developers
+# Distributed under the MIT software license, see the accompanying
+# file COPYING or https://opensource.org/license/mit.
+
+# Benchmark branch only: builds bitcoin-node/bitcoin-trace with IPC and USDT
+# tracepoints enabled and runs the IPC-vs-eBPF ping-flood benchmark from
+# contrib/tracing/bench/. The regular CI workflow is disabled on this branch.
+
+name: IPC tracing benchmark
+on:
+  workflow_dispatch:
+    inputs:
+      stages:
+        description: 'Flood stages, rate:seconds comma separated (rate 0 = unlimited)'
+        default: '1000:5,10000:5,100000:5,0:15'
+      total:
+        description: 'Maximum number of pings per run'
+        default: '3000000'
+      payloads:
+        description: 'Payload sizes to test (space separated)'
+        default: '0 8'
+      repeats:
+        description: 'How many times to repeat every run'
+        default: '1'
+      large_ping_size:
+        description: 'Ping payload bytes for the large-message runs (0 = skip them)'
+        default: '1000000'
+      large_total:
+        description: 'Number of pings for the large-message runs'
+        default: '20000'
+      large_shm_bytes:
+        description: 'Shared memory arena size for the large-message IPC runs'
+        default: '268435456'
+  push:
+    branches:
+      - '2026-09-ipc-net-tracing'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  bench:
+    name: 'ping-flood benchmark (ipc vs ebpf)'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      STAGES: ${{ github.event.inputs.stages || '1000:5,10000:5,100000:5,0:15' }}
+      TOTAL: ${{ github.event.inputs.total || '3000000' }}
+      PAYLOADS: ${{ github.event.inputs.payloads || '0 8' }}
+      REPEATS: ${{ github.event.inputs.repeats || '1' }}
+      LARGE_PING_SIZE: ${{ github.event.inputs.large_ping_size || '1000000' }}
+      LARGE_TOTAL: ${{ github.event.inputs.large_total || '20000' }}
+      LARGE_SHM_BYTES: ${{ github.event.inputs.large_shm_bytes || '268435456' }}
+      LARGE_STAGES: '0:20'
+      RESULTS: ${{ github.workspace }}/bench-results
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential ccache cmake ninja-build pkgconf python3 \
+            libboost-dev libevent-dev capnproto libcapnp-dev systemtap-sdt-dev \
+            clang libelf-dev zlib1g-dev \
+            bpftrace bpfcc-tools python3-bpfcc "linux-headers-$(uname -r)"
+          bpftrace --version
+          cargo --version
+          uname -r
+          nproc
+
+      - name: Set Ccache directory
+        run: echo "CCACHE_DIR=${RUNNER_TEMP}/ccache_dir" >> "$GITHUB_ENV"
+
+      - name: Restore Ccache cache
+        id: ccache-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ github.job }}-ccache-${{ github.run_id }}
+          restore-keys: ${{ github.job }}-ccache-
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DENABLE_IPC=ON -DWITH_USDT=ON \
+            -DENABLE_WALLET=OFF -DBUILD_GUI=OFF -DBUILD_TESTS=OFF -DBUILD_BENCH=OFF \
+            -DBUILD_TX=OFF -DBUILD_UTIL=OFF \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        run: |
+          cmake --build build -j"$(nproc)" -t bitcoin bitcoind bitcoin-node bitcoin-trace bitcoin-cli
+          ccache --show-stats
+          readelf -n build/bin/bitcoin-node | grep -c stapsdt
+
+      - name: Save Ccache cache
+        uses: actions/cache/save@v5
+        if: steps.ccache-cache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ${{ steps.ccache-cache.outputs.cache-primary-key }}
+
+      - name: Restore cargo cache
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            contrib/tracing/bench/libbpf-receiver/target
+            contrib/tracing/bench/ipc-receiver-rs/target
+          key: ${{ github.job }}-cargo-${{ hashFiles('contrib/tracing/bench/libbpf-receiver/Cargo.lock', 'contrib/tracing/bench/ipc-receiver-rs/Cargo.lock') }}
+          restore-keys: ${{ github.job }}-cargo-
+
+      - name: Build libbpf-rs receiver
+        run: |
+          cargo build --release --manifest-path contrib/tracing/bench/libbpf-receiver/Cargo.toml
+          contrib/tracing/bench/libbpf-receiver/target/release/net-msgs-libbpf || true
+
+      - name: Build Rust IPC client
+        run: |
+          cargo build --release --manifest-path contrib/tracing/bench/ipc-receiver-rs/Cargo.toml
+          contrib/tracing/bench/ipc-receiver-rs/target/release/net-msgs-ipc || true
+
+      - name: Functional test (IPC tracing)
+        run: build/test/functional/test_runner.py interface_ipc_tracing.py interface_ipc_cli.py
+
+      - name: Check eBPF works on this runner
+        run: |
+          sudo bpftrace -e 'BEGIN { printf("bpftrace ok\n"); exit(); }'
+          sudo python3 -c 'from bcc import BPF; BPF(text="int f(void *ctx) { return 0; }"); print("bcc ok")'
+
+      - name: Baseline (no tracing)
+        run: |
+          for i in $(seq 1 "$REPEATS"); do
+            contrib/tracing/bench/run_bench.py run --mode none --label "rep$i" --results "$RESULTS" --stages "$STAGES" --total "$TOTAL"
+          done
+
+      - name: IPC tracing
+        run: |
+          for payload in $PAYLOADS; do
+            for i in $(seq 1 "$REPEATS"); do
+              contrib/tracing/bench/run_bench.py run --mode ipc --payload "$payload" --label "p${payload}-rep$i" --results "$RESULTS" --stages "$STAGES" --total "$TOTAL"
+            done
+          done
+          # Without batch coalescing, for comparison.
+          contrib/tracing/bench/run_bench.py run --mode ipc --payload 0 --batchwait 0 --label "p0-nowait" --results "$RESULTS" --stages "$STAGES" --total "$TOTAL"
+          # Streaming delivery: no thread handoff or round trip per batch.
+          contrib/tracing/bench/run_bench.py run --mode ipc --payload 0 --stream --label "p0-stream" --results "$RESULTS" --stages "$STAGES" --total "$TOTAL"
+          contrib/tracing/bench/run_bench.py run --mode ipc --ipc-client rust --payload 0 --stream --label "rust-p0-stream" --results "$RESULTS" --stages "$STAGES" --total "$TOTAL"
+
+      - name: IPC tracing (Rust client)
+        run: |
+          for payload in $PAYLOADS; do
+            for i in $(seq 1 "$REPEATS"); do
+              contrib/tracing/bench/run_bench.py run --mode ipc --ipc-client rust --payload "$payload" --label "rust-p${payload}-rep$i" --results "$RESULTS" --stages "$STAGES" --total "$TOTAL"
+            done
+          done
+
+      - name: eBPF tracing (libbpf-rs, ring buffer)
+        run: |
+          for payload in $PAYLOADS; do
+            for i in $(seq 1 "$REPEATS"); do
+              contrib/tracing/bench/run_bench.py run --mode ebpf --engine libbpf --run-receiver --payload "$payload" --label "libbpf-p${payload}-rep$i" --results "$RESULTS" --stages "$STAGES" --total "$TOTAL"
+            done
+          done
+
+      - name: eBPF tracing (bpftrace)
+        run: |
+          for payload in $PAYLOADS; do
+            for i in $(seq 1 "$REPEATS"); do
+              contrib/tracing/bench/run_bench.py run --mode ebpf --engine bpftrace --run-receiver --payload "$payload" --label "bpftrace-p${payload}-rep$i" --results "$RESULTS" --stages "$STAGES" --total "$TOTAL"
+            done
+          done
+
+      - name: eBPF tracing (BCC)
+        continue-on-error: true
+        run: |
+          for payload in $PAYLOADS; do
+            for i in $(seq 1 "$REPEATS"); do
+              contrib/tracing/bench/run_bench.py run --mode ebpf --engine bcc --run-receiver --payload "$payload" --label "bcc-p${payload}-rep$i" --results "$RESULTS" --stages "$STAGES" --total "$TOTAL"
+            done
+          done
+
+      - name: Large messages (1 MB pings, full payload capture)
+        if: env.LARGE_PING_SIZE != '0'
+        run: |
+          B=contrib/tracing/bench/run_bench.py
+          common=(--ping-size "$LARGE_PING_SIZE" --stages "$LARGE_STAGES" --total "$LARGE_TOTAL" --results "$RESULTS")
+          shm=(--shm "$LARGE_SHM_BYTES")
+          $B run --mode none --label "big" "${common[@]}"
+          $B run --mode ipc --payload 0 --label "big-meta" "${common[@]}"
+          $B run --mode ipc --payload 4000000 --label "big-full" "${common[@]}"
+          $B run --mode ipc --payload 4000000 "${shm[@]}" --label "big-full-shm" "${common[@]}"
+          $B run --mode ipc --ipc-client rust --payload 4000000 --label "rust-big-full" "${common[@]}"
+          $B run --mode ipc --ipc-client rust --payload 4000000 "${shm[@]}" --label "rust-big-full-shm" "${common[@]}"
+          $B run --mode ebpf --engine libbpf --run-receiver --payload 0 --label "libbpf-big-meta" "${common[@]}"
+          $B run --mode ebpf --engine libbpf --run-receiver --payload 4000000 --label "libbpf-big-full" "${common[@]}"
+
+      - name: Large messages, receivers reading every payload byte
+        if: env.LARGE_PING_SIZE != '0'
+        run: |
+          B=contrib/tracing/bench/run_bench.py
+          common=(--ping-size "$LARGE_PING_SIZE" --stages "$LARGE_STAGES" --total "$LARGE_TOTAL" --results "$RESULTS" --checksum)
+          $B run --mode ipc --payload 4000000 --label "big-full-sum" "${common[@]}"
+          $B run --mode ipc --payload 4000000 --shm "$LARGE_SHM_BYTES" --label "big-full-shm-sum" "${common[@]}"
+          $B run --mode ipc --ipc-client rust --payload 4000000 --shm "$LARGE_SHM_BYTES" --label "rust-big-full-shm-sum" "${common[@]}"
+          $B run --mode ebpf --engine libbpf --run-receiver --payload 4000000 --label "libbpf-big-full-sum" "${common[@]}"
+          # Streaming delivery, and streaming with batches allowed to fill: the
+          # per-batch round trip is what dominates when events arrive slowly.
+          shm=(--shm "$LARGE_SHM_BYTES")
+          $B run --mode ipc --payload 4000000 "${shm[@]}" --stream --label "big-full-shm-stream-sum" "${common[@]}"
+          $B run --mode ipc --payload 4000000 "${shm[@]}" --stream --batchwait 10000 --label "big-full-shm-stream-w10-sum" "${common[@]}"
+          $B run --mode ipc --payload 4000000 "${shm[@]}" --batchwait 10000 --label "big-full-shm-sync-w10-sum" "${common[@]}"
+          $B run --mode ipc --ipc-client rust --payload 4000000 "${shm[@]}" --stream --batchwait 10000 --label "rust-big-full-shm-stream-w10-sum" "${common[@]}"
+
+      - name: Compare
+        if: always()
+        run: |
+          {
+            echo "## IPC vs eBPF ping-flood benchmark"
+            echo
+            echo "Runner: $(nproc) CPUs, kernel $(uname -r), stages \`$STAGES\`, total $TOTAL pings, payloads: $PAYLOADS"
+            echo
+            contrib/tracing/bench/run_bench.py compare "$RESULTS"/*.json
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipc-tracing-bench-results
+          path: ${{ env.RESULTS }}
+          if-no-files-found: warn

@@ -340,6 +340,7 @@ def get_binary_paths(config):
         "bitcoin-cli": "BITCOINCLI",
         "bitcoin-util": "BITCOINUTIL",
         "bitcoin-tx": "BITCOINTX",
+        "bitcoin-trace": "BITCOINTRACE",
         "bitcoin-chainstate": "BITCOINCHAINSTATE",
         "bitcoin-wallet": "BITCOINWALLET",
     }

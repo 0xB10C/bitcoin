@@ -5,6 +5,7 @@
 add_library(bitcoin_ipc STATIC EXCLUDE_FROM_ALL
   capnp/mining.cpp
   capnp/protocol.cpp
+  capnp/tracing.cpp
   interfaces.cpp
   process.cpp
 )
@@ -12,9 +13,11 @@ add_library(bitcoin_ipc STATIC EXCLUDE_FROM_ALL
 target_capnp_sources(bitcoin_ipc ${CMAKE_CURRENT_SOURCE_DIR}
   capnp/common.capnp
   capnp/echo.capnp
+  capnp/handler.capnp
   capnp/init.capnp
   capnp/mining.capnp
   capnp/rpc.capnp
+  capnp/tracing.capnp
 )
 
 target_link_libraries(bitcoin_ipc

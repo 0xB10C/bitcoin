@@ -23,6 +23,7 @@
 #include <interfaces/mining.h>
 #include <interfaces/node.h>
 #include <interfaces/rpc.h>
+#include <interfaces/tracing.h>
 #include <interfaces/types.h>
 #include <kernel/context.h>
 #include <key.h>
@@ -42,6 +43,7 @@
 #include <node/mini_miner.h>
 #include <node/mining_args.h>
 #include <node/mining_types.h>
+#include <node/net_trace.h>
 #include <node/transaction.h>
 #include <node/types.h>
 #include <node/warnings.h>
@@ -94,7 +96,10 @@ using interfaces::Handler;
 using interfaces::MakeSignalHandler;
 using interfaces::Mining;
 using interfaces::Node;
+using interfaces::NetMessageTrace;
+using interfaces::NetMessageTraceOptions;
 using interfaces::Rpc;
+using interfaces::Tracing;
 using interfaces::WalletLoader;
 using kernel::ChainstateRole;
 using node::BlockAssembler;
@@ -1080,6 +1085,20 @@ public:
 
     NodeContext& m_node;
 };
+
+class TracingImpl : public Tracing
+{
+public:
+    explicit TracingImpl(NodeContext& node) : m_node(node) {}
+
+    std::unique_ptr<Handler> traceNetMessages(const NetMessageTraceOptions& options,
+                                              std::unique_ptr<NetMessageTrace> callback) override
+    {
+        return Assert(m_node.net_tracer)->subscribe(options, std::move(callback));
+    }
+
+    NodeContext& m_node;
+};
 } // namespace
 } // namespace node
 
@@ -1100,4 +1119,5 @@ std::unique_ptr<Mining> MakeMining(const node::NodeContext& context, bool wait_l
     return std::make_unique<node::MinerImpl>(context);
 }
 std::unique_ptr<Rpc> MakeRpc(node::NodeContext& context) { return std::make_unique<node::RpcImpl>(context); }
+std::unique_ptr<Tracing> MakeTracing(node::NodeContext& context) { return std::make_unique<node::TracingImpl>(context); }
 } // namespace interfaces

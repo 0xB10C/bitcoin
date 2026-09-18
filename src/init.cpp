@@ -64,6 +64,7 @@
 #include <node/mempool_persist_args.h>
 #include <node/mining_args.h>
 #include <node/mining_types.h>
+#include <node/net_trace.h>
 #include <node/peerman_args.h>
 #include <policy/feerate.h>
 #include <policy/fees/block_policy_estimator.h>
@@ -415,6 +416,9 @@ void Shutdown(NodeContext& node)
     if (interfaces::Ipc* ipc = node.init->ipc()) {
         ipc->disconnectIncoming();
     }
+    // Stop trace delivery threads after IPC clients are disconnected, while
+    // the IPC event loop (owned by node.init) is still alive.
+    node.net_tracer.reset();
 
 #ifdef ENABLE_ZMQ
     if (g_zmq_notification_interface) {
@@ -1566,6 +1570,11 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     node.notifications = std::make_unique<KernelNotifications>(Assert(node.shutdown_request), node.exit_status, *Assert(node.warnings));
     ReadNotificationArgs(args, *node.notifications);
 
+    // Create the net message tracer. Like the notifications above, this must
+    // exist before ipc->listenAddress() so IPC tracing clients can subscribe.
+    assert(!node.net_tracer);
+    node.net_tracer = std::make_unique<node::NetMessageTracer>();
+
     // Create client interfaces for wallets that are supposed to be loaded
     // according to -wallet and -disablewallet options. This only constructs
     // the interfaces, it doesn't load wallet data. Wallets actually get loaded
@@ -1653,6 +1662,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     PeerManager::Options peerman_opts{};
     ApplyArgsManOptions(args, peerman_opts);
+    peerman_opts.net_tracer = node.net_tracer.get();
 
     {
         // Read asmap file if configured or embedded asmap data and initialize
@@ -2201,6 +2211,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     connOptions.m_peer_connect_timeout = peer_connect_timeout;
     connOptions.whitelist_forcerelay = args.GetBoolArg("-whitelistforcerelay", DEFAULT_WHITELISTFORCERELAY);
     connOptions.whitelist_relay = args.GetBoolArg("-whitelistrelay", DEFAULT_WHITELISTRELAY);
+    connOptions.m_net_tracer = node.net_tracer.get();
     connOptions.m_capture_messages = args.GetBoolArg("-capturemessages", false);
 
     // Port to bind to if `-bind=addr` is provided without a `:port` suffix.
