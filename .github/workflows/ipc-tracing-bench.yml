@@ -154,6 +154,9 @@ jobs:
           done
           # Without batch coalescing, for comparison.
           contrib/tracing/bench/run_bench.py run --mode ipc --payload 0 --batchwait 0 --label "p0-nowait" --results "$RESULTS" --stages "$STAGES" --total "$TOTAL"
+          # Streaming delivery: no thread handoff or round trip per batch.
+          contrib/tracing/bench/run_bench.py run --mode ipc --payload 0 --stream --label "p0-stream" --results "$RESULTS" --stages "$STAGES" --total "$TOTAL"
+          contrib/tracing/bench/run_bench.py run --mode ipc --ipc-client rust --payload 0 --stream --label "rust-p0-stream" --results "$RESULTS" --stages "$STAGES" --total "$TOTAL"
 
       - name: IPC tracing (Rust client)
         run: |
@@ -212,6 +215,13 @@ jobs:
           $B run --mode ipc --payload 4000000 --shm "$LARGE_SHM_BYTES" --label "big-full-shm-sum" "${common[@]}"
           $B run --mode ipc --ipc-client rust --payload 4000000 --shm "$LARGE_SHM_BYTES" --label "rust-big-full-shm-sum" "${common[@]}"
           $B run --mode ebpf --engine libbpf --run-receiver --payload 4000000 --label "libbpf-big-full-sum" "${common[@]}"
+          # Streaming delivery, and streaming with batches allowed to fill: the
+          # per-batch round trip is what dominates when events arrive slowly.
+          shm=(--shm "$LARGE_SHM_BYTES")
+          $B run --mode ipc --payload 4000000 "${shm[@]}" --stream --label "big-full-shm-stream-sum" "${common[@]}"
+          $B run --mode ipc --payload 4000000 "${shm[@]}" --stream --batchwait 10000 --label "big-full-shm-stream-w10-sum" "${common[@]}"
+          $B run --mode ipc --payload 4000000 "${shm[@]}" --batchwait 10000 --label "big-full-shm-sync-w10-sum" "${common[@]}"
+          $B run --mode ipc --ipc-client rust --payload 4000000 "${shm[@]}" --stream --batchwait 10000 --label "rust-big-full-shm-stream-w10-sum" "${common[@]}"
 
       - name: Compare
         if: always()

@@ -218,6 +218,10 @@ private:
 //! Number of large payload buffers kept for reuse per subscriber (at most
 //! PAYLOAD_POOL_SIZE * MAX_RETAINED_PAYLOAD bytes retained).
 constexpr size_t PAYLOAD_POOL_SIZE{16};
+//! Batches allowed in flight at once when streaming. Beyond this the delivery
+//! thread stops draining, so the subscriber's ring fills and events are
+//! dropped and counted, exactly as when a synchronous subscriber is too slow.
+constexpr int MAX_IN_FLIGHT{4};
 } // namespace
 
 struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
@@ -255,6 +259,14 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
     std::atomic<uint64_t> dropped{0};
     //! Set when delivery failed (client gone); producers skip the subscriber.
     std::atomic<bool> dead{false};
+    //! Streaming batches handed to the subscriber but not yet completed.
+    std::atomic<int> in_flight{0};
+    //! Set by a completed streaming batch that failed; the delivery thread
+    //! does the actual removal, so it never runs on the IPC event loop.
+    std::atomic<bool> failed{false};
+    //! Batch vectors handed back by completed streaming calls, kept so that
+    //! steady-state delivery does not reallocate one per batch.
+    Ring<std::vector<interfaces::NetMessageInfo>> batch_pool{MAX_IN_FLIGHT * 2};
 
     //! Only for stopping the delivery thread. Producers never touch these.
     Mutex mutex;
@@ -384,9 +396,34 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
         }
     }
 
+    //! Called when a streaming batch has been delivered, on whichever thread
+    //! the IPC layer completes it. Gives the batch's arena slots and payload
+    //! buffers back to the producers and keeps the batch for reuse.
+    void Complete(std::vector<interfaces::NetMessageInfo> batch, bool ok)
+    {
+        ReleaseSlots(batch);
+        RecycleBuffers(batch);
+        batch.clear();
+        batch_pool.TryPush([&](std::vector<interfaces::NetMessageInfo>& slot) { slot.swap(batch); });
+        if (!ok) failed.store(true, std::memory_order_relaxed);
+        in_flight.fetch_sub(1, std::memory_order_acq_rel);
+    }
+
+    //! Take a batch vector to fill, reusing one returned by a completed
+    //! streaming call when there is one.
+    std::vector<interfaces::NetMessageInfo> TakeBatch()
+    {
+        std::vector<interfaces::NetMessageInfo> batch;
+        batch_pool.TryPop([&](std::vector<interfaces::NetMessageInfo>& slot) { batch.swap(slot); });
+        batch.clear();
+        if (batch.capacity() < opts.max_batch_events) batch.reserve(opts.max_batch_events);
+        return batch;
+    }
+
     //! Delivery loop, runs on `thread`. Polls the ring; producers never signal.
     void Run() EXCLUSIVE_LOCKS_REQUIRED(!mutex)
     {
+        const bool streaming{opts.stream && callback->canStream()};
         std::vector<interfaces::NetMessageInfo> batch;
         batch.reserve(opts.max_batch_events);
         if (arena) {
@@ -402,8 +439,26 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
         }
         const std::chrono::microseconds wait{opts.max_batch_wait_us > 0 ? std::chrono::microseconds{opts.max_batch_wait_us} : MIN_POLL_INTERVAL};
         while (true) {
-            RecycleBuffers(batch);
-            batch.clear();
+            if (failed.load(std::memory_order_relaxed)) {
+                LogDebug(BCLog::IPC, "Net message trace subscriber failed, removing it\n");
+                dead.store(true, std::memory_order_relaxed);
+                if (auto state{m_state.lock()}) state->Remove(shared_from_this());
+                break;
+            }
+            if (streaming && in_flight.load(std::memory_order_acquire) >= MAX_IN_FLIGHT) {
+                // Too many batches outstanding: stop draining and let the ring
+                // absorb (and, if it fills, drop) events until one completes.
+                WAIT_LOCK(mutex, lock);
+                cv.wait_for(lock, wait, [this]() EXCLUSIVE_LOCKS_REQUIRED(mutex) { return stop; });
+                if (stop) break;
+                continue;
+            }
+            if (streaming) {
+                batch = TakeBatch();
+            } else {
+                RecycleBuffers(batch);
+                batch.clear();
+            }
             uint64_t bytes{Drain(batch, 0)};
             if (batch.size() < opts.max_batch_events && bytes < opts.max_batch_bytes) {
                 // Not full: give the batch a moment to fill (or, when idle, just poll).
@@ -416,6 +471,19 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
                 if (batch.empty()) continue;
             }
             const uint64_t dropped_now{dropped.exchange(0, std::memory_order_relaxed)};
+            if (streaming) {
+                // Hand the batch over and carry on; its slots come back in
+                // Complete(). Keeping a reference to ourselves alive means an
+                // outstanding call can never outlive the arena it points into.
+                in_flight.fetch_add(1, std::memory_order_acq_rel);
+                auto self{shared_from_this()};
+                callback->messagesAsync(std::move(batch), dropped_now,
+                                        [self](std::vector<interfaces::NetMessageInfo> done_batch, bool ok) {
+                                            self->Complete(std::move(done_batch), ok);
+                                        });
+                batch = {};
+                continue;
+            }
             try {
                 callback->messages(batch, dropped_now);
                 ReleaseSlots(batch);
@@ -425,6 +493,13 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
                 if (auto state{m_state.lock()}) state->Remove(shared_from_this());
                 break;
             }
+        }
+        // Outstanding streaming calls reference this subscriber's arena, so
+        // let them finish before the callback (and with it the connection) is
+        // torn down. They are completed or rejected by the IPC layer, so this
+        // waits only as long as the connection takes to fail.
+        for (int i{0}; i < 10000 && in_flight.load(std::memory_order_acquire) > 0; ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds{1});
         }
         // Destroy the callback from this thread. For IPC clients this sends
         // the destroy request over the connection (or logs if it is gone).

@@ -141,6 +141,30 @@ more on the read, so there is no size threshold: the arena always uses
 streaming stores. The non-arena path does not, because there the event-loop
 thread and the kernel read the buffer back.
 
+### Streaming delivery
+
+Most of what tracing costs the node is neither bytes nor events: it is the
+round trip of each batch. `clientInvoke()` hands the call to the Cap'n Proto
+event loop thread, waits for it to be picked up, and then blocks until the
+subscriber has answered, which is six to eight thread wakeups per batch no
+matter how few events the batch carries. Measured on CI it is 100-150 us of
+node CPU per batch, the same whether the batch holds 2 events or 315.
+
+`--stream` (bitcoin-trace `-stream`, `net-msgs-ipc --stream`) sends batches
+with `messagesStream()` instead, a schema method with no `Proxy.Context`: the
+node sends it without waiting for the response, and the subscriber handles it
+on its own event loop instead of paying a second handoff. The batch comes back
+to the node through a completion callback, which is also when its arena slots
+are released, so a slow subscriber still applies backpressure (at most
+`MAX_IN_FLIGHT` batches are outstanding, after which events queue and are
+dropped and counted as usual).
+
+Because the delivery thread no longer blocks per batch, arena slots are freed
+promptly, which is what makes a longer `--batchwait` usable: with synchronous
+delivery a 10 ms wait drops events because slots stay pinned across the round
+trip, while streaming at the same wait drops none and makes a quarter as many
+batches.
+
 `--checksum` makes the IPC and libbpf receivers sum every captured payload byte,
 so that the cost of actually reading the payload is part of the measurement
 instead of only the cost of delivering it.

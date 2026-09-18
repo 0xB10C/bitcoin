@@ -8,6 +8,7 @@
 #include <interfaces/handler.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -69,6 +70,11 @@ struct NetMessageTraceOptions {
     //! Maximum payload bytes buffered in the node for this subscriber. Events
     //! whose payload would exceed this are dropped and counted.
     uint64_t max_queue_bytes{64 * 1024 * 1024};
+    //! Deliver batches without waiting for the subscriber to handle each one.
+    //! Removes a thread handoff and a round trip per batch, which is the
+    //! dominant node-side cost when batches are small. Only has an effect for
+    //! subscribers that support it (see NetMessageTrace::canStream()).
+    bool stream{false};
     //! Stop filling a batch once its payload bytes reach this (a batch always
     //! holds at least one event). Payloads passed through the shared memory
     //! arena do not count towards this, since they are not part of the batch.
@@ -96,6 +102,31 @@ public:
     //! Deliver a batch of events. `dropped` is the number of events discarded
     //! since the previous batch because the subscriber's buffer was full.
     virtual void messages(const std::vector<NetMessageInfo>& messages, uint64_t dropped) = 0;
+
+    //! Streaming delivery. Same meaning as messages(), but the node does not
+    //! wait for it to return, and over IPC it runs on the subscriber's event
+    //! loop thread, so it must not block. Defaults to messages().
+    virtual void messagesStream(const std::vector<NetMessageInfo>& messages, uint64_t dropped)
+    {
+        this->messages(messages, dropped);
+    }
+
+    //! Whether messagesAsync() is available. Checked before handing a batch
+    //! over, because messagesAsync() takes the batch by value and so cannot
+    //! give it back if it turns out not to support streaming.
+    virtual bool canStream() const { return false; }
+
+    //! Hand a batch over for delivery without waiting for the subscriber to
+    //! handle it. Returns false if streaming is not available, in which case
+    //! the caller should use messages() instead. When it returns true the
+    //! batch is in flight and `done` is called exactly once, on an unspecified
+    //! thread, handing the batch back so its buffers and any shared arena
+    //! slots can be reused, together with whether delivery succeeded.
+    virtual bool messagesAsync(std::vector<NetMessageInfo> messages, uint64_t dropped,
+                               std::function<void(std::vector<NetMessageInfo>, bool ok)> done)
+    {
+        return false;
+    }
 
     //! Announce the shared memory payload arena, called once before the first
     //! messages() call and only if NetMessageTraceOptions::shm_bytes asked for

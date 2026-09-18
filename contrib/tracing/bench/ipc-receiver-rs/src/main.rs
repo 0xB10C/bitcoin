@@ -228,17 +228,35 @@ impl net_message_trace::Server for TraceImpl {
         Ok(())
     }
 
+    async fn messages_stream(
+        self: Rc<Self>,
+        params: net_message_trace::MessagesStreamParams,
+        _results: net_message_trace::MessagesStreamResults,
+    ) -> Result<(), Error> {
+        let p = params.get()?;
+        self.count(p.get_messages()?, p.get_dropped())
+    }
+
     async fn messages(
         self: Rc<Self>,
         params: net_message_trace::MessagesParams,
         _results: net_message_trace::MessagesResults,
     ) -> Result<(), Error> {
-        let now_us = monotonic_us();
         let p = params.get()?;
-        let list = p.get_messages()?;
+        self.count(p.get_messages()?, p.get_dropped())
+    }
+}
+
+impl TraceImpl {
+    fn count(
+        &self,
+        list: capnp::struct_list::Reader<'_, tracing_capnp::net_message::Owned>,
+        dropped: u64,
+    ) -> Result<(), Error> {
+        let now_us = monotonic_us();
         let mut c = self.interval.borrow_mut();
         c.batches += 1;
-        c.dropped += p.get_dropped();
+        c.dropped += dropped;
         let arena = self.arena.borrow();
         for m in list.iter() {
             c.events += 1;
@@ -295,6 +313,7 @@ struct Args {
     shm_bytes: u64,
     shm_min: u32,
     checksum: bool,
+    stream: bool,
     duration: f64,
     out: Option<PathBuf>,
     json: bool,
@@ -322,6 +341,7 @@ fn parse_args() -> Args {
         shm_bytes: 0,
         shm_min: 4096,
         checksum: false,
+        stream: false,
         duration: 0.0,
         out: None,
         json: false,
@@ -341,6 +361,7 @@ fn parse_args() -> Args {
             "--shm" => args.shm_bytes = value().parse().unwrap_or_else(|_| usage()),
             "--shm-min" => args.shm_min = value().parse().unwrap_or_else(|_| usage()),
             "--checksum" => args.checksum = true,
+            "--stream" => args.stream = true,
             "--duration" => args.duration = value().parse().unwrap_or_else(|_| usage()),
             "--out" => args.out = Some(PathBuf::from(value())),
             "--json" => args.json = true,
@@ -417,6 +438,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         o.set_max_batch_bytes(args.batch_bytes);
         o.set_shm_bytes(args.shm_bytes);
         o.set_shm_min_payload_bytes(args.shm_min);
+        o.set_stream(args.stream);
         p.set_callback(capnp_rpc::new_client(TraceImpl {
             interval: interval.clone(),
             arena: RefCell::new(None),

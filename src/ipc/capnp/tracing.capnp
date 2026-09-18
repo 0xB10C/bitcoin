@@ -10,6 +10,7 @@ $Cxx.namespace("ipc::capnp::messages");
 using Handler = import "handler.capnp";
 using Proxy = import "/mp/proxy.capnp";
 $Proxy.include("interfaces/tracing.h");
+$Proxy.include("ipc/capnp/tracing-custom.h");
 $Proxy.includeTypes("ipc/capnp/tracing-types.h");
 
 interface Tracing $Proxy.wrap("interfaces::Tracing") {
@@ -23,6 +24,10 @@ interface NetMessageTrace $Proxy.wrap("interfaces::NetMessageTrace") {
     destroy @0 (context :Proxy.Context) -> ();
     messages @1 (context :Proxy.Context, messages :List(NetMessage), dropped :UInt64) -> ();
     payloadArena @2 (context :Proxy.Context, name :Text, slotBytes :UInt64, slotCount :UInt32) -> ();
+    # Same payload as messages(), but with no Proxy.Context: the node sends it
+    # from its event loop thread without waiting for the response, and the
+    # subscriber handles it on its own event loop. Used for streaming delivery.
+    messagesStream @3 (messages :List(NetMessage), dropped :UInt64) -> ();
 }
 
 struct NetMessageTraceOptions $Proxy.wrap("interfaces::NetMessageTraceOptions") {
@@ -36,6 +41,7 @@ struct NetMessageTraceOptions $Proxy.wrap("interfaces::NetMessageTraceOptions") 
     maxBatchBytes @7 :UInt64 = 4194304 $Proxy.name("max_batch_bytes");
     shmBytes @8 :UInt64 = 0 $Proxy.name("shm_bytes");
     shmMinPayloadBytes @9 :UInt32 = 4096 $Proxy.name("shm_min_payload_bytes");
+    stream @10 :Bool = false $Proxy.name("stream");
 }
 
 struct NetMessage $Proxy.wrap("interfaces::NetMessageInfo") {

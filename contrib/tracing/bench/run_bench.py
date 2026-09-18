@@ -202,7 +202,8 @@ def run(args):
     ready_file = os.path.join(workdir, "ready")
     result = {"mode": args.mode, "label": label, "node_args": node.args[1:], "stages": args.stages,
               "total": args.total, "payload": args.payload, "ping_size": args.ping_size, "shm": args.shm,
-              "checksum": args.checksum, "arena_copy": args.arena_copy, "workdir": workdir}
+              "checksum": args.checksum, "arena_copy": args.arena_copy, "stream": args.stream,
+              "workdir": workdir}
     print(f"[bench] mode={args.mode} workdir={workdir} p2p_port={p2p_port} rpc_port={rpc_port}", flush=True)
     try:
         node.start()
@@ -217,11 +218,13 @@ def run(args):
                        "--shm", str(args.shm), "--shm-min", str(args.shm_min), "--out", receiver_out]
                 if args.checksum:
                     cmd.append("--checksum")
+                if args.stream:
+                    cmd.append("--stream")
             else:
                 cmd = [args.trace, "-regtest", f"-datadir={datadir}", f"-ipcconnect=unix:{node.socket_path}",
                        "-stats", "-json", f"-payload={args.payload}", f"-queue={args.queue}", f"-batch={args.batch}",
                        f"-batchwait={args.batchwait}", f"-shm={args.shm}", f"-shmmin={args.shm_min}",
-                       f"-checksum={1 if args.checksum else 0}",
+                       f"-checksum={1 if args.checksum else 0}", f"-stream={1 if args.stream else 0}",
                        f"-out={receiver_out}"]
             receiver_log = open(os.path.join(workdir, "receiver.log"), "w", encoding="utf-8")
             receiver = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=receiver_log, text=True)
@@ -392,6 +395,9 @@ def main():
                         "payload bytes (garbage data) to measure the path without the copy")
     p.add_argument("--shm-min", type=int, default=4096,
                    help="ipc: smallest payload passed through shared memory when --shm is set")
+    p.add_argument("--stream", action="store_true",
+                   help="ipc: let the node deliver batches without waiting for the receiver, removing a "
+                        "thread handoff and a round trip per batch")
     p.add_argument("--checksum", action="store_true",
                    help="ipc: sum every captured payload byte in the receiver, so reading them is measured too")
     p.add_argument("--ipc-client", choices=["cpp", "rust"], default="cpp",

@@ -89,6 +89,7 @@ static void AddArgs(ArgsManager& args)
     args.AddArg("-queuebytes=<n>", "Maximum payload bytes buffered in the node before events are dropped (default: 67108864)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     args.AddArg("-batchbytes=<n>", "Stop filling a batch once its payload bytes reach <n> (default: 4194304)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     args.AddArg("-shm=<n>", "Ask the node to pass payloads of at least -shmmin bytes through an <n> byte shared memory region instead of copying them into the IPC messages (default: 0, disabled)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
+    args.AddArg("-stream", "Ask the node to deliver batches without waiting for this client to handle each one, which removes a thread handoff and a round trip per batch in the node (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     args.AddArg("-checksum", "Sum the captured payload bytes of every event, so that the cost of actually reading them is part of the measurement (default: 0)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     args.AddArg("-shmmin=<n>", "Smallest payload passed through shared memory when -shm is set (default: 4096)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
     args.AddArg("-batchwait=<us>", "Let the node wait up to <us> microseconds for a batch to fill before delivering it (default: 1000)", ArgsManager::ALLOW_ANY, OptionsCategory::OPTIONS);
@@ -357,6 +358,7 @@ MAIN_FUNCTION
     options.max_batch_wait_us = static_cast<uint32_t>(std::max<int64_t>(0, args.GetIntArg("-batchwait", options.max_batch_wait_us)));
     options.max_queue_bytes = static_cast<uint64_t>(std::max<int64_t>(1, args.GetIntArg("-queuebytes", options.max_queue_bytes)));
     options.max_batch_bytes = static_cast<uint64_t>(std::max<int64_t>(1, args.GetIntArg("-batchbytes", options.max_batch_bytes)));
+    options.stream = args.GetBoolArg("-stream", false);
     options.shm_bytes = static_cast<uint64_t>(std::max<int64_t>(0, args.GetIntArg("-shm", 0)));
     options.shm_min_payload_bytes = static_cast<uint32_t>(std::max<int64_t>(1, args.GetIntArg("-shmmin", options.shm_min_payload_bytes)));
 
@@ -452,6 +454,7 @@ MAIN_FUNCTION
         summary.pushKV("queue_bytes", options.max_queue_bytes);
         summary.pushKV("batch_bytes", options.max_batch_bytes);
         summary.pushKV("shm_bytes", options.shm_bytes);
+        summary.pushKV("stream", options.stream);
         const std::string out_path{args.GetArg("-out", "")};
         if (!out_path.empty()) {
             std::ofstream out{fs::PathToString(fs::PathFromString(out_path))};
