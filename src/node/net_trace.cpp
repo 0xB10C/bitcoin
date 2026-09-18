@@ -454,7 +454,7 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
     //! Delivery loop, runs on `thread`. Polls the ring; producers never signal.
     void Run() EXCLUSIVE_LOCKS_REQUIRED(!mutex)
     {
-        const bool streaming{opts.stream && callback->canStream()};
+        bool streaming{opts.stream && callback->canStream()};
         std::vector<interfaces::NetMessageInfo> batch;
         batch.reserve(opts.max_batch_events);
         if (arena) {
@@ -469,6 +469,24 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
             }
         }
         const std::chrono::microseconds wait{opts.max_batch_wait_us > 0 ? std::chrono::microseconds{opts.max_batch_wait_us} : MIN_POLL_INTERVAL};
+        if (streaming) {
+            // Hand draining to the subscriber, which does it on the thread
+            // that owns the connection, so a batch costs no thread handoff.
+            auto self{shared_from_this()};
+            streaming = callback->startStreaming(
+                opts.max_batch_wait_us > 0 ? opts.max_batch_wait_us : 50,
+                [self](std::vector<interfaces::NetMessageInfo>& batch, uint64_t& dropped_out) {
+                    self->Drain(batch, 0);
+                    if (batch.empty()) return false;
+                    dropped_out = self->dropped.exchange(0, std::memory_order_relaxed);
+                    return true;
+                },
+                [self](std::vector<interfaces::NetMessageInfo>& batch, bool ok) {
+                    self->ReleaseSlots(batch);
+                    self->RecycleBuffers(batch);
+                    if (!ok) self->failed.store(true, std::memory_order_relaxed);
+                });
+        }
         while (true) {
             if (failed.load(std::memory_order_relaxed)) {
                 LogDebug(BCLog::IPC, "Net message trace subscriber failed, removing it\n");
@@ -476,20 +494,15 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
                 if (auto state{m_state.lock()}) state->Remove(shared_from_this());
                 break;
             }
-            if (streaming && in_flight.load(std::memory_order_acquire) >= MAX_IN_FLIGHT) {
-                // Too many batches outstanding: stop draining and let the ring
-                // absorb (and, if it fills, drop) events until one completes.
+            if (streaming) {
+                // The subscriber drains us from its own thread; just wait.
                 WAIT_LOCK(mutex, lock);
                 cv.wait_for(lock, wait, [this]() EXCLUSIVE_LOCKS_REQUIRED(mutex) { return stop; });
                 if (stop) break;
                 continue;
             }
-            if (streaming) {
-                batch = TakeBatch();
-            } else {
-                RecycleBuffers(batch);
-                batch.clear();
-            }
+            RecycleBuffers(batch);
+            batch.clear();
             uint64_t bytes{Drain(batch, 0)};
             if (batch.size() < opts.max_batch_events && bytes < opts.max_batch_bytes) {
                 // Not full: give the batch a moment to fill (or, when idle, just poll).
@@ -502,19 +515,6 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
                 if (batch.empty()) continue;
             }
             const uint64_t dropped_now{dropped.exchange(0, std::memory_order_relaxed)};
-            if (streaming) {
-                // Hand the batch over and carry on; its slots come back in
-                // Complete(). Keeping a reference to ourselves alive means an
-                // outstanding call can never outlive the arena it points into.
-                in_flight.fetch_add(1, std::memory_order_acq_rel);
-                auto self{shared_from_this()};
-                callback->messagesAsync(std::move(batch), dropped_now,
-                                        [self](std::vector<interfaces::NetMessageInfo> done_batch, bool ok) {
-                                            self->Complete(std::move(done_batch), ok);
-                                        });
-                batch = {};
-                continue;
-            }
             try {
                 callback->messages(batch, dropped_now);
                 ReleaseSlots(batch);
@@ -525,6 +525,9 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
                 break;
             }
         }
+        // No further drain() or complete() runs after this returns, so the
+        // arena and the rings are ours again.
+        if (streaming) callback->stopStreaming();
         // Outstanding streaming calls reference this subscriber's arena, so
         // let them finish before the callback (and with it the connection) is
         // torn down. They are completed or rejected by the IPC layer, so this

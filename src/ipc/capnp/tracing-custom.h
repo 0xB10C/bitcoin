@@ -11,6 +11,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <vector>
 
 namespace mp {
@@ -34,10 +35,19 @@ class ProxyClientCustom<ipc::capnp::messages::NetMessageTrace, interfaces::NetMe
 public:
     using ProxyClientBase::ProxyClientBase;
 
+    ~ProxyClientCustom();
+
     bool canStream() const override { return true; }
 
-    bool messagesAsync(std::vector<interfaces::NetMessageInfo> messages, uint64_t dropped,
-                       std::function<void(std::vector<interfaces::NetMessageInfo>, bool ok)> done) override;
+    bool startStreaming(uint32_t interval_us,
+                        std::function<bool(std::vector<interfaces::NetMessageInfo>&, uint64_t&)> drain,
+                        std::function<void(std::vector<interfaces::NetMessageInfo>&, bool ok)> complete) override;
+    void stopStreaming() override;
+
+private:
+    struct Streamer;
+    //! Shared with the event loop so a tick in flight can never outlive us.
+    std::shared_ptr<Streamer> m_streamer;
 };
 } // namespace mp
 

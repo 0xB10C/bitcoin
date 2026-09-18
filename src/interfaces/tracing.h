@@ -116,17 +116,28 @@ public:
     //! give it back if it turns out not to support streaming.
     virtual bool canStream() const { return false; }
 
-    //! Hand a batch over for delivery without waiting for the subscriber to
-    //! handle it. Returns false if streaming is not available, in which case
-    //! the caller should use messages() instead. When it returns true the
-    //! batch is in flight and `done` is called exactly once, on an unspecified
-    //! thread, handing the batch back so its buffers and any shared arena
-    //! slots can be reused, together with whether delivery succeeded.
-    virtual bool messagesAsync(std::vector<NetMessageInfo> messages, uint64_t dropped,
-                               std::function<void(std::vector<NetMessageInfo>, bool ok)> done)
+    //! Ask the subscriber to drive delivery itself, from whichever thread is
+    //! cheapest for it. For an IPC subscriber that is its Cap'n Proto event
+    //! loop thread, so sending a batch costs no thread handoff at all: the
+    //! node never blocks and never wakes the loop.
+    //!
+    //! `drain` is called every `interval_us` to fill a batch and set the
+    //! dropped count, returning false when there is nothing to send.
+    //! `complete` is called when a batch has been delivered, so its shared
+    //! arena slots and payload buffers can be reused; the batch stays owned by
+    //! the caller of these callbacks. Both run on the delivering thread, never
+    //! concurrently with each other. Returns false if streaming is not
+    //! available, in which case delivery falls back to messages().
+    virtual bool startStreaming(uint32_t interval_us,
+                                std::function<bool(std::vector<NetMessageInfo>&, uint64_t&)> drain,
+                                std::function<void(std::vector<NetMessageInfo>&, bool ok)> complete)
     {
         return false;
     }
+
+    //! Stop delivery started by startStreaming(). Returns once no further
+    //! drain() or complete() call can begin.
+    virtual void stopStreaming() {}
 
     //! Announce the shared memory payload arena, called once before the first
     //! messages() call and only if NetMessageTraceOptions::shm_bytes asked for
