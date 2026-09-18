@@ -159,6 +159,63 @@ class TestBitcoinIpcTracing(BitcoinTestFramework):
         assert_equal(trace.summary()["dropped"], 0)
         peer.peer_disconnect()
 
+    def test_streaming_delivery(self):
+        self.log.info("Check that -stream delivers events without waiting for this client")
+        node = self.nodes[0]
+        trace = self.start_trace(["-payload=8", "-stream"])
+        peer = node.add_p2p_connection(P2PInterface())
+        peer.send_without_ping(msg_ping(nonce=NONCE))
+        peer.wait_until(lambda: "pong" in peer.last_message and peer.last_message["pong"].nonce == NONCE)
+        payload = NONCE.to_bytes(8, "little").hex()
+        self.wait_until(lambda: any(e["type"] == "pong" and e["payload"] == payload for e in trace.events()))
+        returncode, stderr = trace.stop()
+        assert_equal(returncode, 0)
+        assert_equal(stderr, "")
+        events = trace.events()
+        assert any(e["dir"] == "in" and e["type"] == "ping" and e["payload"] == payload for e in events)
+        assert any(e["dir"] == "out" and e["type"] == "pong" and e["payload"] == payload for e in events)
+        summary = trace.summary()
+        assert_equal(summary["stream"], True)
+        assert_equal(summary["dropped"], 0)
+        assert_equal(summary["events"], len(events))
+        peer.peer_disconnect()
+
+    def test_streaming_large_payload(self):
+        self.log.info("Check that streaming delivers arena payloads intact and reuses slots")
+        node = self.nodes[0]
+        # Ten arena slots, sent in rounds of five, so the slots have to be
+        # recycled several times over: a slot only comes back once its batch
+        # has been delivered, so a burst larger than the arena would be dropped
+        # on purpose rather than buffered.
+        trace = self.start_trace(["-payload=100000", "-shm=1048576", "-shmmin=4096", "-stream"])
+        peer = node.add_p2p_connection(P2PInterface())
+        payload = NONCE.to_bytes(8, "little") + bytes(range(256)) * 40  # 10248 bytes
+        sent = 0
+        for _ in range(4):
+            for _ in range(5):
+                peer.send_raw_message(self.build_ping(peer, payload))
+                sent += 1
+            # Wait for this round to be delivered before filling the arena again.
+            self.wait_until(lambda: sum(1 for e in trace.events()
+                                        if e["type"] == "ping" and e["size"] == len(payload)) >= sent)
+        self.wait_until(lambda: sum(1 for e in trace.events()
+                                    if e["type"] == "ping" and e["size"] == len(payload)) >= 20)
+        returncode, stderr = trace.stop()
+        assert_equal(returncode, 0)
+        assert_equal(stderr, "")
+        pings = [e for e in trace.events() if e["type"] == "ping" and e["size"] == len(payload)]
+        assert_equal(len(pings), 20)
+        # Every one of them must carry the right bytes out of its arena slot.
+        for ping in pings:
+            assert ping["slot"] >= 0
+            assert_equal(bytes.fromhex(ping["payload"]), payload)
+        # Slots were reused rather than each event getting a fresh one.
+        assert len({ping["slot"] for ping in pings}) < 20
+        summary = trace.summary()
+        assert_equal(summary["dropped"], 0)
+        assert summary["shm_events"] >= 20
+        peer.peer_disconnect()
+
     def test_shared_memory_payload(self):
         self.log.info("Check that a large payload is delivered through the shared memory arena")
         node = self.nodes[0]
@@ -210,6 +267,8 @@ class TestBitcoinIpcTracing(BitcoinTestFramework):
         self.test_direction_filter()
         self.test_large_payload()
         self.test_shared_memory_payload()
+        self.test_streaming_delivery()
+        self.test_streaming_large_payload()
         self.test_node_shutdown_with_subscriber()
 
 

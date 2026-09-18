@@ -15,8 +15,10 @@
 #include <condition_variable>
 #include <cstdint>
 #include <future>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <atomic>
 #include <stdexcept>
 #include <string>
@@ -130,6 +132,48 @@ public:
 
     void messages(const std::vector<NetMessageInfo>& messages, uint64_t dropped) override
     {
+        Handle(messages, dropped);
+    }
+
+    //! Deliver by being drained, the way an IPC subscriber does it, instead of
+    //! being called. Runs drain() on its own thread and completes every batch
+    //! immediately, so arena slots must come back.
+    bool canStream() const override { return m_stream; }
+
+    bool startStreaming(uint32_t interval_us,
+                        std::function<bool(std::vector<NetMessageInfo>&, uint64_t&)> drain,
+                        std::function<void(std::vector<NetMessageInfo>&, bool)> complete) override
+    {
+        if (!m_stream) return false;
+        m_thread = std::thread([this, interval_us, drain = std::move(drain), complete = std::move(complete)] {
+            std::vector<NetMessageInfo> batch;
+            while (!m_stop.load(std::memory_order_relaxed)) {
+                batch.clear();
+                uint64_t dropped{0};
+                if (drain(batch, dropped)) {
+                    Handle(batch, dropped);
+                    complete(batch, /*ok=*/true);
+                } else {
+                    UninterruptibleSleep(std::chrono::microseconds{interval_us});
+                }
+            }
+        });
+        return true;
+    }
+
+    void stopStreaming() override
+    {
+        m_stop.store(true, std::memory_order_relaxed);
+        if (m_thread.joinable()) m_thread.join();
+    }
+
+    ~ArenaTrace() override { stopStreaming(); }
+
+    void SetStreaming() { m_stream = true; }
+
+private:
+    void Handle(const std::vector<NetMessageInfo>& messages, uint64_t dropped)
+    {
         std::lock_guard lock{m_mutex};
         m_dropped += dropped;
         for (const auto& m : messages) {
@@ -148,6 +192,7 @@ public:
         }
     }
 
+public:
     struct Event {
         std::string type;
         int32_t slot;
@@ -176,6 +221,9 @@ public:
     }
 
 private:
+    bool m_stream{false};
+    std::atomic<bool> m_stop{false};
+    std::thread m_thread;
     util::SharedMemory m_arena;
     uint64_t m_slot_bytes{0};
     uint32_t m_slot_count{0};
@@ -345,6 +393,65 @@ BOOST_AUTO_TEST_CASE(throwing_callback_removes_subscriber)
     Record(tracer, true, "ping", 0);
     handler.reset();
     BOOST_CHECK_EQUAL(tracer.subscriberCount(), 0U);
+}
+
+BOOST_AUTO_TEST_CASE(streaming_delivery_recycles_arena_slots)
+{
+    // A streaming subscriber drains the node itself instead of being called,
+    // and an arena slot only comes back once its batch has been completed.
+    // With far more events than slots, everything still has to arrive intact.
+    NetMessageTracer tracer;
+    auto trace{std::make_unique<ArenaTrace>()};
+    trace->SetStreaming();
+    auto* trace_ptr{trace.get()};
+    NetMessageTraceOptions opts;
+    opts.max_payload_bytes = 32 * 1024;
+    opts.shm_bytes = 256 * 1024; // 8 slots of 32 KiB
+    opts.shm_min_payload_bytes = 4096;
+    opts.max_batch_events = 4;
+    opts.max_batch_wait_us = 0;
+    opts.stream = true;
+    auto handler{tracer.subscribe(opts, std::move(trace))};
+
+    // Events recorded before the subscriber has been told about the arena
+    // travel inline, so warm up until the arena is actually in use and only
+    // measure what follows.
+    for (int i = 0; i < 1000; ++i) {
+        const auto warm{trace_ptr->Events()};
+        if (!warm.empty() && warm.back().slot >= 0) break;
+        Record(tracer, /*inbound=*/true, "warmup", 10000, /*peer=*/3, /*fill=*/0x11);
+        UninterruptibleSleep(std::chrono::milliseconds{1});
+    }
+    const size_t start{trace_ptr->Events().size()};
+
+    constexpr int TOTAL{200};
+    int sent{0};
+    while (sent < TOTAL) {
+        // Keep fewer events outstanding than the arena has slots, so nothing
+        // is dropped and the slots have to be reused many times over.
+        if (trace_ptr->Events().size() + 4 > start + static_cast<size_t>(sent)) {
+            Record(tracer, /*inbound=*/true, "big", 10000, /*peer=*/3, /*fill=*/0x77);
+            ++sent;
+        } else {
+            UninterruptibleSleep(std::chrono::milliseconds{1});
+        }
+    }
+    trace_ptr->WaitEvents(start + TOTAL);
+    BOOST_CHECK_EQUAL(trace_ptr->Dropped(), 0U);
+    const auto all{trace_ptr->Events()};
+    BOOST_REQUIRE(all.size() >= start + TOTAL);
+    const std::vector<ArenaTrace::Event> events{all.begin() + start, all.begin() + start + TOTAL};
+    std::set<int32_t> slots;
+    for (const auto& e : events) {
+        BOOST_CHECK_EQUAL(e.type, "big");
+        BOOST_CHECK(e.slot >= 0);
+        slots.insert(e.slot);
+        BOOST_CHECK_EQUAL(e.payload.size(), 10000U);
+        BOOST_CHECK(std::ranges::all_of(e.payload, [](unsigned char c) { return c == 0x77; }));
+    }
+    // Reused, not one slot per event.
+    BOOST_CHECK(slots.size() <= 8);
+    handler.reset();
 }
 
 BOOST_AUTO_TEST_CASE(subscriber_churn_under_load)
