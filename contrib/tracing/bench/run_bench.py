@@ -14,6 +14,7 @@ Examples:
   run_bench.py run --mode none
   run_bench.py run --mode ipc --payload 8
   run_bench.py run --mode ipc --ipc-client rust --payload 8
+  run_bench.py run --mode ipc --payload 4000000 --shm 67108864 --ping-size 1000000
   run_bench.py run --mode ebpf --payload 8   # prints a sudo command to run in another terminal
   run_bench.py run --mode ebpf --engine bpftrace --payload 8
   run_bench.py compare results/*.json
@@ -197,7 +198,8 @@ def run(args):
     stop_file = os.path.join(workdir, "stop")
     ready_file = os.path.join(workdir, "ready")
     result = {"mode": args.mode, "label": label, "node_args": node.args[1:], "stages": args.stages,
-              "total": args.total, "payload": args.payload, "ping_size": args.ping_size, "workdir": workdir}
+              "total": args.total, "payload": args.payload, "ping_size": args.ping_size, "shm": args.shm,
+              "checksum": args.checksum, "workdir": workdir}
     print(f"[bench] mode={args.mode} workdir={workdir} p2p_port={p2p_port} rpc_port={rpc_port}", flush=True)
     try:
         node.start()
@@ -209,11 +211,14 @@ def run(args):
             if args.ipc_client == "rust":
                 cmd = [args.ipc_rust_client, "--socket", node.socket_path, "--json", "--payload", str(args.payload),
                        "--queue", str(args.queue), "--batch", str(args.batch), "--batchwait", str(args.batchwait),
-                       "--out", receiver_out]
+                       "--shm", str(args.shm), "--shm-min", str(args.shm_min), "--out", receiver_out]
+                if args.checksum:
+                    cmd.append("--checksum")
             else:
                 cmd = [args.trace, "-regtest", f"-datadir={datadir}", f"-ipcconnect=unix:{node.socket_path}",
                        "-stats", "-json", f"-payload={args.payload}", f"-queue={args.queue}", f"-batch={args.batch}",
-                       f"-batchwait={args.batchwait}",
+                       f"-batchwait={args.batchwait}", f"-shm={args.shm}", f"-shmmin={args.shm_min}",
+                       f"-checksum={1 if args.checksum else 0}",
                        f"-out={receiver_out}"]
             receiver_log = open(os.path.join(workdir, "receiver.log"), "w", encoding="utf-8")
             receiver = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=receiver_log, text=True)
@@ -231,6 +236,8 @@ def run(args):
             else:
                 receiver_script = "bpftrace_net_msgs.py" if args.engine == "bpftrace" else "ebpf_net_msgs.py"
                 cmd = ["sudo", sys.executable, os.path.join(HERE, receiver_script)]
+            if args.checksum and args.engine == "libbpf":
+                cmd.append("--checksum")
             cmd += ["--pid", str(node.proc.pid), "--payload", str(args.payload), "--page-cnt", str(args.page_cnt),
                     "--ready-file", ready_file, "--stop-file", stop_file, "--out", receiver_out, "--json"]
             if args.engine == "bpftrace":
@@ -374,6 +381,13 @@ def main():
     p.add_argument("--queue", type=int, default=65536, help="ipc: node-side queue size")
     p.add_argument("--batch", type=int, default=1024, help="ipc: max events per IPC call")
     p.add_argument("--batchwait", type=int, default=1000, help="ipc: microseconds the node may wait for a batch to fill")
+    p.add_argument("--shm", type=int, default=0,
+                   help="ipc: bytes of shared memory the node may use to pass large payloads without copying them "
+                        "into the IPC messages (0 = off)")
+    p.add_argument("--shm-min", type=int, default=4096,
+                   help="ipc: smallest payload passed through shared memory when --shm is set")
+    p.add_argument("--checksum", action="store_true",
+                   help="ipc: sum every captured payload byte in the receiver, so reading them is measured too")
     p.add_argument("--ipc-client", choices=["cpp", "rust"], default="cpp",
                    help="ipc: receiver implementation: cpp (bitcoin-trace, libmultiprocess) or rust (capnp-rpc, "
                         "build ipc-receiver-rs first)")

@@ -106,5 +106,26 @@ and the event-loop thread ~150 µs/MB, mostly the kernel copy into the socket.
 The libbpf receiver uses a second ring buffer with 4 MiB records for large payloads
 (`--large-ring-mb`), like peer-observer's tiered rings.
 
+### Shared memory payloads
+
+Even as an external segment, a large payload is still copied twice more on the
+way out: node to kernel and kernel to client. `--shm <bytes>` (bitcoin-trace
+`-shm`, `net-msgs-ipc --shm`) asks the node for a POSIX shared memory arena
+instead. The node divides it into slots of `max_payload_bytes` (page aligned),
+tells the subscriber its name once with `NetMessageTrace.payloadArena()` and,
+for payloads of at least `--shm-min` bytes (default 4 KiB), copies the payload
+straight into a free slot from the net thread. The event then carries only a
+slot index, and the subscriber reads the bytes out of its own read-only mapping;
+the slot is handed back to the producers after `messages()` returns, so payload
+bytes are only valid for the duration of that call. That is one copy in total,
+the same number as the eBPF ring buffer, and it also takes the payload out of
+the IPC message entirely. Size the arena for the number of messages that may be
+in flight: `--shm 268435456` with 4 MB slots gives 64 of them. Events for which
+no slot is free are dropped and counted, like a full queue.
+
+`--checksum` makes the IPC and libbpf receivers sum every captured payload byte,
+so that the cost of actually reading the payload is part of the measurement
+instead of only the cost of delivering it.
+
 The IBD benchmark itself is only stubbed (`--mode ibd`); it needs a synced local
 node to download from. The large-ping flood covers the same message sizes.

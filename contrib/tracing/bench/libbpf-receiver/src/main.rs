@@ -51,6 +51,8 @@ struct MsgHeader {
 }
 unsafe impl Plain for MsgHeader {}
 
+const HEADER_SIZE: usize = std::mem::size_of::<MsgHeader>();
+
 #[derive(Default, Clone, Copy)]
 struct Counters {
     events: u64,
@@ -60,6 +62,8 @@ struct Counters {
     pong_out: u64,
     bytes: u64,
     dropped: u64,
+    payload_bytes_seen: u64,
+    checksum: u64,
     lat_sum_us: u64,
     lat_max_us: u64,
 }
@@ -73,6 +77,8 @@ impl Counters {
         self.pong_out += o.pong_out;
         self.bytes += o.bytes;
         self.dropped += o.dropped;
+        self.payload_bytes_seen += o.payload_bytes_seen;
+        self.checksum = self.checksum.wrapping_add(o.checksum);
         self.lat_sum_us += o.lat_sum_us;
         self.lat_max_us = self.lat_max_us.max(o.lat_max_us);
     }
@@ -89,9 +95,9 @@ impl Counters {
             0.0
         };
         format!(
-            "\"events\":{},\"events_in\":{},\"events_out\":{},\"ping_in\":{},\"pong_out\":{},\"bytes\":{},\"dropped\":{},\"batches\":0,\"duration_s\":{},\"events_per_s\":{},\"latency_us\":{{\"mean\":{},\"max\":{}}}",
+            "\"events\":{},\"events_in\":{},\"events_out\":{},\"ping_in\":{},\"pong_out\":{},\"bytes\":{},\"dropped\":{},\"batches\":0,\"payload_bytes_seen\":{},\"checksum\":{},\"duration_s\":{},\"events_per_s\":{},\"latency_us\":{{\"mean\":{},\"max\":{}}}",
             self.events, self.events_in, self.events_out, self.ping_in, self.pong_out, self.bytes, self.dropped,
-            seconds, rate, mean, self.lat_max_us
+            self.payload_bytes_seen, self.checksum, seconds, rate, mean, self.lat_max_us
         )
     }
 }
@@ -99,6 +105,7 @@ impl Counters {
 struct Args {
     pid: i32,
     payload: u32,
+    checksum: bool,
     page_cnt: u32,
     large_ring_mb: u32,
     duration: f64,
@@ -111,7 +118,7 @@ struct Args {
 
 fn usage() -> ! {
     eprintln!(
-        "usage: net-msgs-libbpf --pid <pid> [--payload <bytes, max {MAX_PAYLOAD}>] [--page-cnt <4KiB pages of small ring>] [--large-ring-mb <MiB>] \
+        "usage: net-msgs-libbpf --pid <pid> [--payload <bytes, max {MAX_PAYLOAD}>] [--page-cnt <4KiB pages of small ring>] [--large-ring-mb <MiB>] [--checksum] \
          [--duration <s>] [--ready-file <f>] [--stop-file <f>] [--out <f>] [--json] [--quiet]"
     );
     process::exit(2);
@@ -121,6 +128,7 @@ fn parse_args() -> Args {
     let mut args = Args {
         pid: 0,
         payload: 0,
+        checksum: false,
         page_cnt: 1024,
         large_ring_mb: 64,
         duration: 0.0,
@@ -136,6 +144,7 @@ fn parse_args() -> Args {
         match a.as_str() {
             "--pid" => args.pid = value().parse().unwrap_or_else(|_| usage()),
             "--payload" => args.payload = value().parse().unwrap_or_else(|_| usage()),
+            "--checksum" => args.checksum = true,
             "--page-cnt" => args.page_cnt = value().parse().unwrap_or_else(|_| usage()),
             "--large-ring-mb" => args.large_ring_mb = value().parse().unwrap_or_else(|_| usage()),
             "--duration" => args.duration = value().parse().unwrap_or_else(|_| usage()),
@@ -196,6 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let skel = open_skel.load()?;
 
     let interval = RefCell::new(Counters::default());
+    let checksum = args.checksum;
     let handle = |data: &[u8]| -> i32 {
         let now_ns = monotonic_ns();
         let Ok(e) = plain::from_bytes::<MsgHeader>(data) else {
@@ -205,6 +215,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut c = interval.borrow_mut();
         c.events += 1;
         c.bytes += e.msg_size;
+        let payload_len = (e.payload_len as usize).min(data.len().saturating_sub(HEADER_SIZE));
+        c.payload_bytes_seen += payload_len as u64;
+        if checksum {
+            // Actually read the payload out of the ring buffer, so that the
+            // cost of consuming it is part of the measurement.
+            let payload = &data[HEADER_SIZE..HEADER_SIZE + payload_len];
+            let mut sum: u64 = 0;
+            for chunk in payload.chunks(8) {
+                let mut word = [0u8; 8];
+                word[..chunk.len()].copy_from_slice(chunk);
+                sum = sum.wrapping_add(u64::from_le_bytes(word));
+            }
+            c.checksum = c.checksum.wrapping_add(sum);
+        }
         c.lat_sum_us += lat_us;
         c.lat_max_us = c.lat_max_us.max(lat_us);
         let msg_type = &e.msg_type[..e

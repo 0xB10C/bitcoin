@@ -28,6 +28,9 @@ on:
       large_total:
         description: 'Number of pings for the large-message runs'
         default: '20000'
+      large_shm_bytes:
+        description: 'Shared memory arena size for the large-message IPC runs'
+        default: '268435456'
   push:
     branches:
       - '2026-09-ipc-net-tracing'
@@ -55,6 +58,7 @@ jobs:
       REPEATS: ${{ github.event.inputs.repeats || '1' }}
       LARGE_PING_SIZE: ${{ github.event.inputs.large_ping_size || '1000000' }}
       LARGE_TOTAL: ${{ github.event.inputs.large_total || '20000' }}
+      LARGE_SHM_BYTES: ${{ github.event.inputs.large_shm_bytes || '268435456' }}
       LARGE_STAGES: '0:20'
       RESULTS: ${{ github.workspace }}/bench-results
     steps:
@@ -189,12 +193,25 @@ jobs:
         run: |
           B=contrib/tracing/bench/run_bench.py
           common=(--ping-size "$LARGE_PING_SIZE" --stages "$LARGE_STAGES" --total "$LARGE_TOTAL" --results "$RESULTS")
+          shm=(--shm "$LARGE_SHM_BYTES")
           $B run --mode none --label "big" "${common[@]}"
           $B run --mode ipc --payload 0 --label "big-meta" "${common[@]}"
           $B run --mode ipc --payload 4000000 --label "big-full" "${common[@]}"
+          $B run --mode ipc --payload 4000000 "${shm[@]}" --label "big-full-shm" "${common[@]}"
           $B run --mode ipc --ipc-client rust --payload 4000000 --label "rust-big-full" "${common[@]}"
+          $B run --mode ipc --ipc-client rust --payload 4000000 "${shm[@]}" --label "rust-big-full-shm" "${common[@]}"
           $B run --mode ebpf --engine libbpf --run-receiver --payload 0 --label "libbpf-big-meta" "${common[@]}"
           $B run --mode ebpf --engine libbpf --run-receiver --payload 4000000 --label "libbpf-big-full" "${common[@]}"
+
+      - name: Large messages, receivers reading every payload byte
+        if: env.LARGE_PING_SIZE != '0'
+        run: |
+          B=contrib/tracing/bench/run_bench.py
+          common=(--ping-size "$LARGE_PING_SIZE" --stages "$LARGE_STAGES" --total "$LARGE_TOTAL" --results "$RESULTS" --checksum)
+          $B run --mode ipc --payload 4000000 --label "big-full-sum" "${common[@]}"
+          $B run --mode ipc --payload 4000000 --shm "$LARGE_SHM_BYTES" --label "big-full-shm-sum" "${common[@]}"
+          $B run --mode ipc --ipc-client rust --payload 4000000 --shm "$LARGE_SHM_BYTES" --label "rust-big-full-shm-sum" "${common[@]}"
+          $B run --mode ebpf --engine libbpf --run-receiver --payload 4000000 --label "libbpf-big-full-sum" "${common[@]}"
 
       - name: Compare
         if: always()

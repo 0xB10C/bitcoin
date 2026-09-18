@@ -15,6 +15,7 @@
 //! `Init.construct`, so this client implements `ThreadMap` and `Thread` too.
 
 use std::cell::RefCell;
+use std::ffi::CString;
 use std::fs;
 use std::path::PathBuf;
 use std::process;
@@ -38,6 +39,60 @@ capnp::generated_code!(pub mod tracing_capnp);
 use proxy_capnp::{thread, thread_map};
 use tracing_capnp::net_message_trace;
 
+/// Read-only mapping of the node's shared payload arena. Large payloads are
+/// written straight into it by the node's net threads, so they never travel
+/// through the IPC socket; an event only carries the slot index.
+struct Arena {
+    addr: *const u8,
+    len: usize,
+    slot_bytes: u64,
+    slot_count: u32,
+}
+
+impl Arena {
+    fn open(name: &str, slot_bytes: u64, slot_count: u32) -> Result<Arena, String> {
+        let len = (slot_bytes * u64::from(slot_count)) as usize;
+        let cname = CString::new(name).map_err(|e| e.to_string())?;
+        // SAFETY: plain libc calls; cname is a valid NUL terminated string.
+        unsafe {
+            let fd = libc::shm_open(cname.as_ptr(), libc::O_RDONLY, 0);
+            if fd < 0 {
+                return Err(format!("shm_open({name}): {}", std::io::Error::last_os_error()));
+            }
+            let addr = libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
+            libc::close(fd);
+            if addr == libc::MAP_FAILED {
+                return Err(format!("mmap({name}): {}", std::io::Error::last_os_error()));
+            }
+            Ok(Arena { addr: addr as *const u8, len, slot_bytes, slot_count })
+        }
+    }
+
+    fn slot(&self, index: i32, len: u32) -> &[u8] {
+        if index < 0 || index as u32 >= self.slot_count || u64::from(len) > self.slot_bytes {
+            return &[];
+        }
+        let offset = (index as u64 * self.slot_bytes) as usize;
+        // SAFETY: offset + len is within the mapping (checked above), and the
+        // node does not touch the slot until messages() returns.
+        unsafe { std::slice::from_raw_parts(self.addr.add(offset), len as usize) }
+    }
+}
+
+impl Drop for Arena {
+    fn drop(&mut self) {
+        // SAFETY: addr/len come from a successful mmap above.
+        unsafe { libc::munmap(self.addr as *mut libc::c_void, self.len) };
+    }
+}
+
 #[derive(Default, Clone, Copy)]
 struct Counters {
     events: u64,
@@ -48,6 +103,9 @@ struct Counters {
     bytes: u64,
     dropped: u64,
     batches: u64,
+    shm_events: u64,
+    payload_bytes_seen: u64,
+    checksum: u64,
     lat_sum_us: u64,
     lat_max_us: u64,
 }
@@ -62,6 +120,9 @@ impl Counters {
         self.bytes += o.bytes;
         self.dropped += o.dropped;
         self.batches += o.batches;
+        self.shm_events += o.shm_events;
+        self.payload_bytes_seen += o.payload_bytes_seen;
+        self.checksum = self.checksum.wrapping_add(o.checksum);
         self.lat_sum_us += o.lat_sum_us;
         self.lat_max_us = self.lat_max_us.max(o.lat_max_us);
     }
@@ -78,9 +139,9 @@ impl Counters {
             0.0
         };
         format!(
-            "\"events\":{},\"events_in\":{},\"events_out\":{},\"ping_in\":{},\"pong_out\":{},\"bytes\":{},\"dropped\":{},\"batches\":{},\"duration_s\":{},\"events_per_s\":{},\"latency_us\":{{\"mean\":{},\"max\":{}}}",
+            "\"events\":{},\"events_in\":{},\"events_out\":{},\"ping_in\":{},\"pong_out\":{},\"bytes\":{},\"dropped\":{},\"batches\":{},\"shm_events\":{},\"payload_bytes_seen\":{},\"checksum\":{},\"duration_s\":{},\"events_per_s\":{},\"latency_us\":{{\"mean\":{},\"max\":{}}}",
             self.events, self.events_in, self.events_out, self.ping_in, self.pong_out, self.bytes, self.dropped,
-            self.batches, seconds, rate, mean, self.lat_max_us
+            self.batches, self.shm_events, self.payload_bytes_seen, self.checksum, seconds, rate, mean, self.lat_max_us
         )
     }
 }
@@ -140,6 +201,8 @@ impl thread_map::Server for ThreadMapImpl {
 /// The callback the node delivers batches to.
 struct TraceImpl {
     interval: Rc<RefCell<Counters>>,
+    arena: RefCell<Option<Arena>>,
+    checksum: bool,
 }
 
 impl net_message_trace::Server for TraceImpl {
@@ -148,6 +211,20 @@ impl net_message_trace::Server for TraceImpl {
         _params: net_message_trace::DestroyParams,
         _results: net_message_trace::DestroyResults,
     ) -> Result<(), Error> {
+        Ok(())
+    }
+
+    async fn payload_arena(
+        self: Rc<Self>,
+        params: net_message_trace::PayloadArenaParams,
+        _results: net_message_trace::PayloadArenaResults,
+    ) -> Result<(), Error> {
+        let p = params.get()?;
+        let name = p.get_name()?.to_string()?;
+        let arena = Arena::open(&name, p.get_slot_bytes(), p.get_slot_count())
+            // Returning an error tells the node to keep payloads inline.
+            .map_err(Error::failed)?;
+        *self.arena.borrow_mut() = Some(arena);
         Ok(())
     }
 
@@ -162,9 +239,31 @@ impl net_message_trace::Server for TraceImpl {
         let mut c = self.interval.borrow_mut();
         c.batches += 1;
         c.dropped += p.get_dropped();
+        let arena = self.arena.borrow();
         for m in list.iter() {
             c.events += 1;
             c.bytes += m.get_msg_size();
+            let payload: &[u8] = if m.get_payload_slot() >= 0 {
+                c.shm_events += 1;
+                arena
+                    .as_ref()
+                    .map(|a| a.slot(m.get_payload_slot(), m.get_payload_len()))
+                    .unwrap_or(&[])
+            } else {
+                m.get_payload()?
+            };
+            c.payload_bytes_seen += payload.len() as u64;
+            if self.checksum {
+                // Actually read the bytes, so that the cost of consuming them
+                // is part of the measurement on both delivery paths.
+                let mut sum: u64 = 0;
+                for chunk in payload.chunks(8) {
+                    let mut word = [0u8; 8];
+                    word[..chunk.len()].copy_from_slice(chunk);
+                    sum = sum.wrapping_add(u64::from_le_bytes(word));
+                }
+                c.checksum = c.checksum.wrapping_add(sum);
+            }
             let lat = (now_us - m.get_timestamp_us()).max(0) as u64;
             c.lat_sum_us += lat;
             c.lat_max_us = c.lat_max_us.max(lat);
@@ -193,6 +292,9 @@ struct Args {
     batchwait: u32,
     queue_bytes: u64,
     batch_bytes: u64,
+    shm_bytes: u64,
+    shm_min: u32,
+    checksum: bool,
     duration: f64,
     out: Option<PathBuf>,
     json: bool,
@@ -202,7 +304,8 @@ struct Args {
 fn usage() -> ! {
     eprintln!(
         "usage: net-msgs-ipc --socket <node.sock> [--payload <bytes>] [--queue <events>] [--batch <events>] \
-         [--batchwait <us>] [--queue-bytes <n>] [--batch-bytes <n>] [--duration <s>] [--out <f>] [--json] [--quiet]"
+         [--batchwait <us>] [--queue-bytes <n>] [--batch-bytes <n>] [--shm <bytes>] [--shm-min <bytes>] \
+         [--checksum] [--duration <s>] [--out <f>] [--json] [--quiet]"
     );
     process::exit(2);
 }
@@ -216,6 +319,9 @@ fn parse_args() -> Args {
         batchwait: 1000,
         queue_bytes: 64 * 1024 * 1024,
         batch_bytes: 4 * 1024 * 1024,
+        shm_bytes: 0,
+        shm_min: 4096,
+        checksum: false,
         duration: 0.0,
         out: None,
         json: false,
@@ -232,6 +338,9 @@ fn parse_args() -> Args {
             "--batchwait" => args.batchwait = value().parse().unwrap_or_else(|_| usage()),
             "--queue-bytes" => args.queue_bytes = value().parse().unwrap_or_else(|_| usage()),
             "--batch-bytes" => args.batch_bytes = value().parse().unwrap_or_else(|_| usage()),
+            "--shm" => args.shm_bytes = value().parse().unwrap_or_else(|_| usage()),
+            "--shm-min" => args.shm_min = value().parse().unwrap_or_else(|_| usage()),
+            "--checksum" => args.checksum = true,
             "--duration" => args.duration = value().parse().unwrap_or_else(|_| usage()),
             "--out" => args.out = Some(PathBuf::from(value())),
             "--json" => args.json = true,
@@ -306,8 +415,12 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         o.set_max_batch_wait_us(args.batchwait);
         o.set_max_queue_bytes(args.queue_bytes);
         o.set_max_batch_bytes(args.batch_bytes);
+        o.set_shm_bytes(args.shm_bytes);
+        o.set_shm_min_payload_bytes(args.shm_min);
         p.set_callback(capnp_rpc::new_client(TraceImpl {
             interval: interval.clone(),
+            arena: RefCell::new(None),
+            checksum: args.checksum,
         }));
     }
     let response = req.send().promise.await?;
@@ -367,12 +480,13 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let summary = format!(
-        "{{{},\"mode\":\"ipc\",\"engine\":\"rust\",\"event\":\"summary\",\"payload_bytes\":{},\"queue_events\":{},\"batch_events\":{},\"batch_wait_us\":{}}}",
+        "{{{},\"mode\":\"ipc\",\"engine\":\"rust\",\"event\":\"summary\",\"payload_cap_bytes\":{},\"queue_events\":{},\"batch_events\":{},\"batch_wait_us\":{},\"shm_bytes\":{}}}",
         total.to_json(duration),
         args.payload,
         args.queue,
         args.batch,
-        args.batchwait
+        args.batchwait,
+        args.shm_bytes
     );
     match &args.out {
         Some(path) => fs::write(path, format!("{summary}\n"))?,
