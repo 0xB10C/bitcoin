@@ -219,6 +219,15 @@ public:
         return true;
     }
 
+    //! Roughly how many slots are filled. Racy by design: the answer is
+    //! stale as soon as it is computed, which is fine for pacing decisions.
+    size_t SizeApprox() const
+    {
+        const size_t head{m_enqueue.load(std::memory_order_relaxed)};
+        const size_t tail{m_dequeue.load(std::memory_order_relaxed)};
+        return head >= tail ? head - tail : 0;
+    }
+
     //! Consume one slot with `consume(T&)`. Returns false if empty.
     template <typename Consume>
     bool TryPop(Consume&& consume)
@@ -498,13 +507,20 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
             auto self{shared_from_this()};
             streaming = callback->startStreaming(
                 opts.max_batch_wait_us > 0 ? opts.max_batch_wait_us : 50,
-                [self]() -> interfaces::NetMessageBatch* {
+                [self](bool only_full) -> interfaces::NetMessageBatch* {
                     // With every batch out, the subscriber gets nothing more
                     // until it completes one, so the ring fills and events are
                     // dropped and counted instead of piling up on the wire.
                     if (self->free_batches.empty()) return nullptr;
                     Batch& batch{*self->free_batches.back()};
+                    // Between ticks only a full batch is worth a send, and
+                    // the ring is not touched unless it holds one; draining
+                    // it partially would just move the coalescing from the
+                    // tick into here. A batch not handed out keeps what it
+                    // has drained and is topped up next time.
+                    if (only_full && batch.events.size() + self->ring.SizeApprox() < self->opts.max_batch_events) return nullptr;
                     if (!self->Drain(batch)) return nullptr;
+                    if (only_full && !self->Full(batch)) return nullptr;
                     self->free_batches.pop_back();
                     self->Present(batch);
                     self->in_flight.fetch_add(1, std::memory_order_acq_rel);

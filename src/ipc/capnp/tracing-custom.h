@@ -39,7 +39,7 @@ public:
     bool canStream() const override { return true; }
 
     bool startStreaming(uint32_t interval_us,
-                        std::function<interfaces::NetMessageBatch*()> drain,
+                        std::function<interfaces::NetMessageBatch*(bool only_full)> drain,
                         std::function<void(interfaces::NetMessageBatch&, bool ok)> complete) override;
     void stopStreaming() override;
 

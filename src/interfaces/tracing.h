@@ -140,16 +140,19 @@ public:
     //! loop thread, so sending a batch costs no thread handoff at all: the
     //! node never blocks and never wakes the loop.
     //!
-    //! `drain` is called every `interval_us` (and again as long as it keeps
-    //! returning batches) and hands out the next batch to send, or nullptr
-    //! when there is nothing to send or too many batches are still out.
-    //! `complete` gives a batch back once it has been delivered, so its
-    //! events, shared arena slots and payload buffers can be reused. Both
-    //! run on the delivering thread, never concurrently with each other.
-    //! Returns false if streaming is not available, in which case delivery
-    //! falls back to messages().
+    //! `drain` hands out the next batch to send, or nullptr when there is
+    //! nothing to send or too many batches are still out. It is called every
+    //! `interval_us` (and again as long as it keeps returning batches), which
+    //! is what coalesces events into batches; between those ticks it may be
+    //! called with `only_full` set, which hands out a batch only if it is
+    //! already full, so a busy connection is kept busy with full batches
+    //! without shrinking the batches of a quiet one. `complete` gives a batch
+    //! back once it has been delivered, so its events, shared arena slots
+    //! and payload buffers can be reused. Both run on the delivering thread,
+    //! never concurrently with each other. Returns false if streaming is not
+    //! available, in which case delivery falls back to messages().
     virtual bool startStreaming(uint32_t interval_us,
-                                std::function<NetMessageBatch*()> drain,
+                                std::function<NetMessageBatch*(bool only_full)> drain,
                                 std::function<void(NetMessageBatch&, bool ok)> complete)
     {
         return false;

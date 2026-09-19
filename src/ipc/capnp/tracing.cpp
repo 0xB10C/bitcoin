@@ -64,7 +64,7 @@ void BuildNetMessage(ipc::capnp::messages::NetMessage::Builder builder, const in
 //! trip that clientInvoke() pays.
 struct ProxyClientCustom<ipc::capnp::messages::NetMessageTrace, interfaces::NetMessageTrace>::Streamer {
     Streamer(ipc::capnp::messages::NetMessageTrace::Client client, EventLoop& loop, uint32_t interval_us,
-             std::function<interfaces::NetMessageBatch*()> drain,
+             std::function<interfaces::NetMessageBatch*(bool)> drain,
              std::function<void(interfaces::NetMessageBatch&, bool)> complete)
         : m_client{std::move(client)}, m_loop{loop},
           m_interval{interval_us * kj::MICROSECONDS}, m_drain{std::move(drain)}, m_complete{std::move(complete)}
@@ -76,7 +76,7 @@ struct ProxyClientCustom<ipc::capnp::messages::NetMessageTrace, interfaces::NetM
     ipc::capnp::messages::NetMessageTrace::Client m_client;
     EventLoop& m_loop;
     const kj::Duration m_interval;
-    const std::function<interfaces::NetMessageBatch*()> m_drain;
+    const std::function<interfaces::NetMessageBatch*(bool)> m_drain;
     const std::function<void(interfaces::NetMessageBatch&, bool)> m_complete;
     int m_in_flight{0};
     bool m_stopped{false};
@@ -91,12 +91,26 @@ struct ProxyClientCustom<ipc::capnp::messages::NetMessageTrace, interfaces::NetM
     void Tick(const std::shared_ptr<Streamer>& self)
     {
         if (m_stopped) return;
-        // Keep sending until the node has nothing left, or stops handing out
-        // batches because too many are already on the wire. One batch per
-        // tick would cap delivery at max_batch_events per interval, which
-        // silently drops events once the node produces them faster than that.
-        while (auto* batch{m_drain()}) Send(self, *batch);
+        // Whatever accumulated since the last tick goes out as one batch, and
+        // beyond that only full ones: draining until the node is empty would
+        // send a trickle of tiny batches behind the main one, each paying
+        // the per-batch cost.
+        if (auto* batch{m_drain(/*only_full=*/false)}) {
+            Send(self, *batch);
+            PumpFull(self);
+        }
         Schedule(self);
+    }
+
+    //! Send full batches until the node has none left, or stops handing them
+    //! out because too many are already on the wire. Also runs whenever a
+    //! batch completes: sending only from the tick would cap delivery at the
+    //! in-flight limit times the batch size per interval and silently drop
+    //! events beyond that, while sending everything on every completion
+    //! would shrink batches to whatever arrives within one round trip.
+    void PumpFull(const std::shared_ptr<Streamer>& self)
+    {
+        while (auto* batch{m_drain(/*only_full=*/true)}) Send(self, *batch);
     }
 
     void Send(const std::shared_ptr<Streamer>& self, interfaces::NetMessageBatch& batch)
@@ -111,15 +125,16 @@ struct ProxyClientCustom<ipc::capnp::messages::NetMessageTrace, interfaces::NetM
         // continuations can simply point at it.
         auto* sent{&batch};
         m_loop.m_task_set->add(request.send().then(
-            [self, sent](auto&&) { self->Finish(*sent, /*ok=*/true); },
-            [self, sent](const kj::Exception&) { self->Finish(*sent, /*ok=*/false); }));
+            [self, sent](auto&&) { self->Finish(self, *sent, /*ok=*/true); },
+            [self, sent](const kj::Exception&) { self->Finish(self, *sent, /*ok=*/false); }));
     }
 
-    void Finish(interfaces::NetMessageBatch& batch, bool ok)
+    void Finish(const std::shared_ptr<Streamer>& self, interfaces::NetMessageBatch& batch, bool ok)
     {
         --m_in_flight;
         // Hands the batch, its arena slots and payload buffers back to the node.
         m_complete(batch, ok);
+        if (!m_stopped) PumpFull(self);
     }
 };
 
@@ -130,7 +145,7 @@ ProxyClientCustom<ipc::capnp::messages::NetMessageTrace, interfaces::NetMessageT
 
 bool ProxyClientCustom<ipc::capnp::messages::NetMessageTrace, interfaces::NetMessageTrace>::startStreaming(
     uint32_t interval_us,
-    std::function<interfaces::NetMessageBatch*()> drain,
+    std::function<interfaces::NetMessageBatch*(bool only_full)> drain,
     std::function<void(interfaces::NetMessageBatch&, bool ok)> complete)
 {
     if (!m_context.connection) return false;

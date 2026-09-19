@@ -165,13 +165,13 @@ public:
     bool canStream() const override { return m_stream; }
 
     bool startStreaming(uint32_t interval_us,
-                        std::function<interfaces::NetMessageBatch*()> drain,
+                        std::function<interfaces::NetMessageBatch*(bool)> drain,
                         std::function<void(interfaces::NetMessageBatch&, bool)> complete) override
     {
         if (!m_stream) return false;
         m_thread = std::thread([this, interval_us, drain = std::move(drain), complete = std::move(complete)] {
             while (!m_stop.load(std::memory_order_relaxed)) {
-                if (auto* batch{drain()}) {
+                if (auto* batch{drain(/*only_full=*/false)}) {
                     Handle(batch->messages, batch->dropped);
                     complete(*batch, /*ok=*/true);
                 } else {
