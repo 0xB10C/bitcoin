@@ -222,6 +222,10 @@ jobs:
           $B run --mode ipc --payload 4000000 "${shm[@]}" --stream --batchwait 10000 --label "big-full-shm-stream-w10-sum" "${common[@]}"
           $B run --mode ipc --payload 4000000 "${shm[@]}" --batchwait 10000 --label "big-full-shm-sync-w10-sum" "${common[@]}"
           $B run --mode ipc --ipc-client rust --payload 4000000 "${shm[@]}" --stream --batchwait 10000 --label "rust-big-full-shm-stream-w10-sum" "${common[@]}"
+          # Streaming on its own, with payloads still going through the socket,
+          # to separate what streaming buys from what the arena buys.
+          $B run --mode ipc --payload 4000000 --stream --batchwait 10000 --label "big-full-stream-w10-sum" "${common[@]}"
+          $B run --mode ipc --payload 4000000 --batchwait 10000 --label "big-full-sync-w10-sum" "${common[@]}"
 
       - name: Compare
         if: always()
