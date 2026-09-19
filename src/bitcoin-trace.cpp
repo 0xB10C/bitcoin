@@ -192,7 +192,7 @@ public:
         return {reinterpret_cast<const unsigned char*>(m_arena.data()) + slot * m_slot_bytes, m.payload_len};
     }
 
-    void messages(const std::vector<interfaces::NetMessageInfo>& messages, uint64_t dropped) override
+    void messages(std::span<const interfaces::NetMessageInfo> messages, uint64_t dropped) override
     {
         const int64_t now_us{NowUs()};
         Counters c;
@@ -263,9 +263,9 @@ private:
             o.pushKV("t", m.timestamp_us);
             o.pushKV("dir", m.inbound ? "in" : "out");
             o.pushKV("peer", m.peer_id);
-            o.pushKV("addr", m.peer_addr);
-            o.pushKV("conn", m.conn_type);
-            o.pushKV("type", m.msg_type);
+            o.pushKV("addr", std::string{m.peer_addr});
+            o.pushKV("conn", std::string{m.conn_type});
+            o.pushKV("type", std::string{m.msg_type});
             o.pushKV("size", m.msg_size);
             o.pushKV("payload", HexStr(payload));
             o.pushKV("slot", m.payload_slot);

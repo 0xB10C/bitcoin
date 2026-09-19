@@ -10,8 +10,9 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <string>
-#include <vector>
+#include <string_view>
 
 namespace node {
 struct NodeContext;
@@ -21,22 +22,29 @@ namespace interfaces {
 
 //! One P2P message event. Mirrors the data passed to the
 //! net:inbound_message and net:outbound_message USDT tracepoints.
+//!
+//! This is a view. The strings and the payload point into memory owned by
+//! the node, valid only for the duration of the messages() call delivering
+//! the event (for a streaming subscriber, until it completes the batch). A
+//! subscriber that keeps an event has to copy what it needs.
 struct NetMessageInfo {
     //! True for a message received from a peer, false for a message sent to a peer.
     bool inbound{false};
     //! Peer id (CNode::GetId()).
     int64_t peer_id{0};
     //! Peer address and port (CNode::m_addr_name).
-    std::string peer_addr;
+    std::string_view peer_addr;
     //! Connection type (CNode::ConnectionTypeAsString()).
-    std::string conn_type;
+    std::string_view conn_type;
     //! Message type (e.g. "ping", "inv", "block").
-    std::string msg_type;
+    std::string_view msg_type;
     //! Full message payload size in bytes, even if payload below is truncated.
     uint64_t msg_size{0};
     //! First NetMessageTraceOptions::max_payload_bytes bytes of the payload,
-    //! unless payload_slot is set.
-    std::vector<unsigned char> payload;
+    //! unless payload_slot is set. The node keeps the buffer readable up to
+    //! the next multiple of 8 bytes past its end, so that the IPC layer can
+    //! attach it to an outgoing message as-is.
+    std::span<const unsigned char> payload;
     //! When >= 0, the captured payload is not in `payload` but in the shared
     //! memory arena announced by NetMessageTrace::payloadArena(), at byte
     //! offset payload_slot * slot_bytes, and is payload_len bytes long. The
@@ -92,6 +100,16 @@ struct NetMessageTraceOptions {
     uint32_t shm_min_payload_bytes{4096};
 };
 
+//! A batch of events as handed to a streaming subscriber (see
+//! NetMessageTrace::startStreaming()). The node owns it, and everything its
+//! events point at, until the subscriber completes it; the subscriber only
+//! reads it.
+struct NetMessageBatch {
+    std::span<const NetMessageInfo> messages;
+    //! Events discarded before this batch because the subscriber's buffer was full.
+    uint64_t dropped{0};
+};
+
 //! Callback interface implemented by a tracing client. Called from a
 //! dedicated node thread, one batch at a time, never concurrently.
 class NetMessageTrace
@@ -101,12 +119,13 @@ public:
 
     //! Deliver a batch of events. `dropped` is the number of events discarded
     //! since the previous batch because the subscriber's buffer was full.
-    virtual void messages(const std::vector<NetMessageInfo>& messages, uint64_t dropped) = 0;
+    //! The events are views into node memory that is reused after this returns.
+    virtual void messages(std::span<const NetMessageInfo> messages, uint64_t dropped) = 0;
 
     //! Streaming delivery. Same meaning as messages(), but the node does not
     //! wait for it to return, and over IPC it runs on the subscriber's event
     //! loop thread, so it must not block. Defaults to messages().
-    virtual void messagesStream(const std::vector<NetMessageInfo>& messages, uint64_t dropped)
+    virtual void messagesStream(std::span<const NetMessageInfo> messages, uint64_t dropped)
     {
         this->messages(messages, dropped);
     }
@@ -121,16 +140,17 @@ public:
     //! loop thread, so sending a batch costs no thread handoff at all: the
     //! node never blocks and never wakes the loop.
     //!
-    //! `drain` is called every `interval_us` to fill a batch and set the
-    //! dropped count, returning false when there is nothing to send.
-    //! `complete` is called when a batch has been delivered, so its shared
-    //! arena slots and payload buffers can be reused; the batch stays owned by
-    //! the caller of these callbacks. Both run on the delivering thread, never
-    //! concurrently with each other. Returns false if streaming is not
-    //! available, in which case delivery falls back to messages().
+    //! `drain` is called every `interval_us` (and again as long as it keeps
+    //! returning batches) and hands out the next batch to send, or nullptr
+    //! when there is nothing to send or too many batches are still out.
+    //! `complete` gives a batch back once it has been delivered, so its
+    //! events, shared arena slots and payload buffers can be reused. Both
+    //! run on the delivering thread, never concurrently with each other.
+    //! Returns false if streaming is not available, in which case delivery
+    //! falls back to messages().
     virtual bool startStreaming(uint32_t interval_us,
-                                std::function<bool(std::vector<NetMessageInfo>&, uint64_t&)> drain,
-                                std::function<void(std::vector<NetMessageInfo>&, bool ok)> complete)
+                                std::function<NetMessageBatch*()> drain,
+                                std::function<void(NetMessageBatch&, bool ok)> complete)
     {
         return false;
     }

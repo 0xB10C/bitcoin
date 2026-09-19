@@ -19,11 +19,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <exception>
+#include <memory>
 #include <mutex>
 #include <stdexcept>
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #if defined(__x86_64__) && defined(__SSE2__)
 #include <emmintrin.h>
@@ -149,12 +151,14 @@ int64_t NowUs()
     return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
 }
 
+//! Returns the number of characters copied (the string is truncated to fit).
 template <size_t N>
-void CopyString(std::array<char, N>& dst, std::string_view src)
+uint8_t CopyString(std::array<char, N>& dst, std::string_view src)
 {
     const size_t n{std::min(src.size(), N - 1)};
     std::memcpy(dst.data(), src.data(), n);
     dst[n] = '\0';
+    return static_cast<uint8_t>(n);
 }
 
 //! One event as stored in the ring. Plain data plus one optional heap buffer
@@ -168,6 +172,9 @@ struct Event {
     uint32_t payload_len;
     //! Arena slot holding the payload, or -1 when it is inline/on the heap.
     int32_t payload_slot;
+    uint8_t peer_addr_len;
+    uint8_t conn_type_len;
+    uint8_t msg_type_len;
     std::array<char, 80> peer_addr;
     std::array<char, 24> conn_type;
     std::array<char, 16> msg_type;
@@ -249,10 +256,20 @@ private:
 //! Number of large payload buffers kept for reuse per subscriber (at most
 //! PAYLOAD_POOL_SIZE * MAX_RETAINED_PAYLOAD bytes retained).
 constexpr size_t PAYLOAD_POOL_SIZE{16};
-//! Batches allowed in flight at once when streaming. Beyond this the delivery
-//! thread stops draining, so the subscriber's ring fills and events are
-//! dropped and counted, exactly as when a synchronous subscriber is too slow.
+//! Batches allowed in flight at once when streaming. Beyond this the
+//! subscriber gets no more batches, so its ring fills and events are dropped
+//! and counted, exactly as when a synchronous subscriber is too slow.
 constexpr int MAX_IN_FLIGHT{4};
+
+//! Storage behind one batch handed to the subscriber: the events moved out of
+//! the ring and the views into them. Reused from batch to batch, so steady
+//! state neither allocates nor frees anything for an event.
+struct Batch : interfaces::NetMessageBatch {
+    std::vector<Event> events;
+    std::vector<interfaces::NetMessageInfo> views;
+    //! Inline payload bytes in `events`, for max_batch_bytes.
+    uint64_t bytes{0};
+};
 } // namespace
 
 struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
@@ -262,6 +279,13 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
           ring{opts.max_queue_events}, free_slots{std::max<uint32_t>(plan.slot_count, 1)}, pool{PAYLOAD_POOL_SIZE},
           callback{std::move(cb)}
     {
+        for (int i{0}; i < MAX_IN_FLIGHT; ++i) {
+            auto batch{std::make_unique<Batch>()};
+            batch->events.reserve(opts.max_batch_events);
+            batch->views.reserve(opts.max_batch_events);
+            free_batches.push_back(batch.get());
+            batches.push_back(std::move(batch));
+        }
         if (!arena) return;
         for (uint32_t i{0}; i < plan.slot_count; ++i) {
             free_slots.TryPush([&](uint32_t& s) { s = i; });
@@ -295,9 +319,12 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
     //! Set by a completed streaming batch that failed; the delivery thread
     //! does the actual removal, so it never runs on the IPC event loop.
     std::atomic<bool> failed{false};
-    //! Batch vectors handed back by completed streaming calls, kept so that
-    //! steady-state delivery does not reallocate one per batch.
-    Ring<std::vector<interfaces::NetMessageInfo>> batch_pool{MAX_IN_FLIGHT * 2};
+    //! Batch storage. Only the delivering thread touches it: the delivery
+    //! thread when it calls messages() itself, or the subscriber's thread
+    //! when it streams (drain() and complete() never run concurrently).
+    std::vector<std::unique_ptr<Batch>> batches;
+    //! The ones not currently handed to the subscriber.
+    std::vector<Batch*> free_batches;
 
     //! Only for stopping the delivery thread. Producers never touch these.
     Mutex mutex;
@@ -340,9 +367,9 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
             s.timestamp_us = now_us;
             s.payload_len = copy;
             s.payload_slot = use_arena ? static_cast<int32_t>(slot) : -1;
-            CopyString(s.peer_addr, peer_addr);
-            CopyString(s.conn_type, conn_type);
-            CopyString(s.msg_type, msg_type);
+            s.peer_addr_len = CopyString(s.peer_addr, peer_addr);
+            s.conn_type_len = CopyString(s.conn_type, conn_type);
+            s.msg_type_len = CopyString(s.msg_type, msg_type);
             if (use_arena) {
                 // Payload already written to the arena.
             } else if (copy <= INLINE_PAYLOAD) {
@@ -370,93 +397,89 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
         }
     }
 
-    //! Delivery thread: move events out of the ring until the batch is full
-    //! (by count or payload bytes). Returns the batch's payload bytes.
-    uint64_t Drain(std::vector<interfaces::NetMessageInfo>& batch, uint64_t batch_bytes)
+    //! Delivery side: move events out of the ring into the batch until it is
+    //! full by count or by inline payload bytes. Returns false if the batch is
+    //! still empty.
+    bool Drain(Batch& batch)
     {
-        while (batch.size() < opts.max_batch_events && (batch.empty() || batch_bytes < opts.max_batch_bytes)) {
+        auto& events{batch.events};
+        while (!Full(batch)) {
             const bool got{ring.TryPop([&](Event& s) {
-                auto& info{batch.emplace_back()};
-                info.inbound = s.inbound;
-                info.peer_id = s.peer_id;
-                info.peer_addr = s.peer_addr.data();
-                info.conn_type = s.conn_type.data();
-                info.msg_type = s.msg_type.data();
-                info.msg_size = s.msg_size;
-                info.timestamp_us = s.timestamp_us;
-                info.payload_slot = s.payload_slot;
-                info.payload_len = s.payload_slot >= 0 ? s.payload_len : 0;
-                if (s.payload_slot >= 0) {
-                    // Payload stays in the arena; the batch carries only the slot.
-                } else if (s.payload_len <= INLINE_PAYLOAD) {
-                    info.payload.assign(s.payload_inline.begin(), s.payload_inline.begin() + s.payload_len);
-                } else {
-                    info.payload.swap(s.payload_heap);
-                    queued_bytes.fetch_sub(s.payload_len, std::memory_order_relaxed);
-                }
-                batch_bytes += info.payload.size();
+                // Copies the fixed part and takes the heap buffer, if any,
+                // leaving the ring slot without one.
+                events.push_back(std::move(s));
+                const Event& e{events.back()};
+                if (e.payload_slot >= 0) return;
+                batch.bytes += e.payload_len;
+                if (e.payload_len > INLINE_PAYLOAD) queued_bytes.fetch_sub(e.payload_len, std::memory_order_relaxed);
             })};
             if (!got) break;
         }
-        return batch_bytes;
+        return !events.empty();
     }
 
-    //! After delivery, hand the arena slots of a batch back to the producers.
-    //! Must run only once the subscriber is done reading them, i.e. after
-    //! messages() returned.
-    void ReleaseSlots(std::vector<interfaces::NetMessageInfo>& batch)
+    bool Full(const Batch& batch) const
     {
-        for (auto& info : batch) {
-            if (info.payload_slot < 0) continue;
-            free_slots.TryPush([&](uint32_t& s) { s = static_cast<uint32_t>(info.payload_slot); });
-            info.payload_slot = -1;
-        }
+        return batch.events.size() >= opts.max_batch_events ||
+               (!batch.events.empty() && batch.bytes >= opts.max_batch_bytes);
     }
 
-    //! After delivery, keep large payload buffers for reuse by producers.
-    void RecycleBuffers(std::vector<interfaces::NetMessageInfo>& batch)
+    //! Point the views at the drained events and stamp the drop count. The
+    //! events must not move after this, which they do not: the vector never
+    //! grows past the capacity reserved for max_batch_events.
+    void Present(Batch& batch)
     {
-        for (auto& info : batch) {
-            if (info.payload.capacity() <= INLINE_PAYLOAD) continue;
-            if (info.payload.capacity() > MAX_RETAINED_PAYLOAD) {
-                std::vector<unsigned char>().swap(info.payload);
-                continue;
+        batch.views.clear();
+        for (const Event& e : batch.events) {
+            auto& v{batch.views.emplace_back()};
+            v.inbound = e.inbound;
+            v.peer_id = e.peer_id;
+            v.peer_addr = {e.peer_addr.data(), e.peer_addr_len};
+            v.conn_type = {e.conn_type.data(), e.conn_type_len};
+            v.msg_type = {e.msg_type.data(), e.msg_type_len};
+            v.msg_size = e.msg_size;
+            v.timestamp_us = e.timestamp_us;
+            v.payload_slot = e.payload_slot;
+            if (e.payload_slot >= 0) {
+                // Payload stays in the arena; the batch carries only the slot.
+                v.payload_len = e.payload_len;
+            } else if (e.payload_len <= INLINE_PAYLOAD) {
+                v.payload = {e.payload_inline.data(), e.payload_len};
+            } else {
+                v.payload = {e.payload_heap.data(), e.payload_len};
             }
-            info.payload.clear();
-            pool.TryPush([&](std::vector<unsigned char>& buf) { buf.swap(info.payload); });
         }
+        batch.messages = batch.views;
+        batch.dropped = dropped.exchange(0, std::memory_order_relaxed);
     }
 
-    //! Called when a streaming batch has been delivered, on whichever thread
-    //! the IPC layer completes it. Gives the batch's arena slots and payload
-    //! buffers back to the producers and keeps the batch for reuse.
-    void Complete(std::vector<interfaces::NetMessageInfo> batch, bool ok)
+    //! After delivery: hand the batch's arena slots back to the producers,
+    //! keep its large payload buffers for reuse, and empty it. Must run only
+    //! once the subscriber is done reading, i.e. after messages() returned or
+    //! the streaming batch was completed.
+    void Reclaim(Batch& batch)
     {
-        ReleaseSlots(batch);
-        RecycleBuffers(batch);
-        batch.clear();
-        batch_pool.TryPush([&](std::vector<interfaces::NetMessageInfo>& slot) { slot.swap(batch); });
-        if (!ok) failed.store(true, std::memory_order_relaxed);
-        in_flight.fetch_sub(1, std::memory_order_acq_rel);
-    }
-
-    //! Take a batch vector to fill, reusing one returned by a completed
-    //! streaming call when there is one.
-    std::vector<interfaces::NetMessageInfo> TakeBatch()
-    {
-        std::vector<interfaces::NetMessageInfo> batch;
-        batch_pool.TryPop([&](std::vector<interfaces::NetMessageInfo>& slot) { batch.swap(slot); });
-        batch.clear();
-        if (batch.capacity() < opts.max_batch_events) batch.reserve(opts.max_batch_events);
-        return batch;
+        for (Event& e : batch.events) {
+            if (e.payload_slot >= 0) {
+                free_slots.TryPush([&](uint32_t& s) { s = static_cast<uint32_t>(e.payload_slot); });
+            } else if (e.payload_heap.capacity() > MAX_RETAINED_PAYLOAD) {
+                std::vector<unsigned char>().swap(e.payload_heap);
+            } else if (e.payload_heap.capacity() > 0) {
+                e.payload_heap.clear();
+                pool.TryPush([&](std::vector<unsigned char>& buf) { buf.swap(e.payload_heap); });
+            }
+        }
+        batch.events.clear();
+        batch.views.clear();
+        batch.messages = {};
+        batch.dropped = 0;
+        batch.bytes = 0;
     }
 
     //! Delivery loop, runs on `thread`. Polls the ring; producers never signal.
     void Run() EXCLUSIVE_LOCKS_REQUIRED(!mutex)
     {
         bool streaming{opts.stream && callback->canStream()};
-        std::vector<interfaces::NetMessageInfo> batch;
-        batch.reserve(opts.max_batch_events);
         if (arena) {
             // Only start using the arena once the subscriber has mapped it,
             // which it does in this call. If it cannot, the arena stays unused
@@ -475,16 +498,24 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
             auto self{shared_from_this()};
             streaming = callback->startStreaming(
                 opts.max_batch_wait_us > 0 ? opts.max_batch_wait_us : 50,
-                [self](std::vector<interfaces::NetMessageInfo>& batch, uint64_t& dropped_out) {
-                    self->Drain(batch, 0);
-                    if (batch.empty()) return false;
-                    dropped_out = self->dropped.exchange(0, std::memory_order_relaxed);
-                    return true;
+                [self]() -> interfaces::NetMessageBatch* {
+                    // With every batch out, the subscriber gets nothing more
+                    // until it completes one, so the ring fills and events are
+                    // dropped and counted instead of piling up on the wire.
+                    if (self->free_batches.empty()) return nullptr;
+                    Batch& batch{*self->free_batches.back()};
+                    if (!self->Drain(batch)) return nullptr;
+                    self->free_batches.pop_back();
+                    self->Present(batch);
+                    self->in_flight.fetch_add(1, std::memory_order_acq_rel);
+                    return &batch;
                 },
-                [self](std::vector<interfaces::NetMessageInfo>& batch, bool ok) {
-                    self->ReleaseSlots(batch);
-                    self->RecycleBuffers(batch);
+                [self](interfaces::NetMessageBatch& sent, bool ok) {
+                    Batch& batch{static_cast<Batch&>(sent)};
+                    self->Reclaim(batch);
+                    self->free_batches.push_back(&batch);
                     if (!ok) self->failed.store(true, std::memory_order_relaxed);
+                    self->in_flight.fetch_sub(1, std::memory_order_acq_rel);
                 });
         }
         while (true) {
@@ -501,23 +532,21 @@ struct NetMessageTracer::Subscriber : std::enable_shared_from_this<Subscriber> {
                 if (stop) break;
                 continue;
             }
-            RecycleBuffers(batch);
-            batch.clear();
-            uint64_t bytes{Drain(batch, 0)};
-            if (batch.size() < opts.max_batch_events && bytes < opts.max_batch_bytes) {
+            Batch& batch{*batches.front()};
+            Drain(batch);
+            if (!Full(batch)) {
                 // Not full: give the batch a moment to fill (or, when idle, just poll).
                 {
                     WAIT_LOCK(mutex, lock);
                     cv.wait_for(lock, wait, [this]() EXCLUSIVE_LOCKS_REQUIRED(mutex) { return stop; });
                     if (stop) break;
                 }
-                Drain(batch, bytes);
-                if (batch.empty()) continue;
+                if (!Drain(batch)) continue;
             }
-            const uint64_t dropped_now{dropped.exchange(0, std::memory_order_relaxed)};
+            Present(batch);
             try {
-                callback->messages(batch, dropped_now);
-                ReleaseSlots(batch);
+                callback->messages(batch.messages, batch.dropped);
+                Reclaim(batch);
             } catch (const std::exception& e) {
                 LogDebug(BCLog::IPC, "Net message trace subscriber failed, removing it: %s\n", e.what());
                 dead.store(true, std::memory_order_relaxed);

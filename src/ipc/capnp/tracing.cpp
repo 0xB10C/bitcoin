@@ -16,15 +16,16 @@
 #include <chrono>
 #include <cstring>
 #include <memory>
+#include <string_view>
 #include <thread>
 #include <utility>
-#include <vector>
 
 namespace mp {
 namespace {
-//! Batches allowed on the wire at once before delivery pauses and lets events
-//! queue (and, if the queue fills, drop) in the node instead.
-constexpr int MAX_IN_FLIGHT{4};
+void SetText(capnp::Text::Builder out, std::string_view text)
+{
+    std::memcpy(out.begin(), text.data(), text.size());
+}
 
 //! Fill one NetMessage from a NetMessageInfo. Written out by hand rather than
 //! going through the generated field machinery, because the streaming path
@@ -33,9 +34,9 @@ void BuildNetMessage(ipc::capnp::messages::NetMessage::Builder builder, const in
 {
     builder.setInbound(m.inbound);
     builder.setPeerId(m.peer_id);
-    builder.setPeerAddr(m.peer_addr);
-    builder.setConnType(m.conn_type);
-    builder.setMsgType(m.msg_type);
+    SetText(builder.initPeerAddr(m.peer_addr.size()), m.peer_addr);
+    SetText(builder.initConnType(m.conn_type.size()), m.conn_type);
+    SetText(builder.initMsgType(m.msg_type.size()), m.msg_type);
     builder.setMsgSize(m.msg_size);
     builder.setTimestampUs(m.timestamp_us);
     builder.setPayloadSlot(m.payload_slot);
@@ -44,8 +45,7 @@ void BuildNetMessage(ipc::capnp::messages::NetMessage::Builder builder, const in
     // Same zero-copy rule as CustomBuildField() in tracing-types.h: attach a
     // large payload as an external segment instead of copying it into the
     // message. The batch outlives the request, so the bytes stay valid.
-    const size_t padded{(m.payload.size() + 7) & ~size_t{7}};
-    if (m.payload.size() >= NET_MESSAGE_PAYLOAD_EXTERNAL_MIN && m.payload.capacity() >= padded &&
+    if (m.payload.size() >= NET_MESSAGE_PAYLOAD_EXTERNAL_MIN &&
         reinterpret_cast<uintptr_t>(m.payload.data()) % sizeof(capnp::word) == 0) {
         auto orphanage{capnp::Orphanage::getForMessageContaining(builder)};
         builder.adoptPayload(orphanage.referenceExternalData(
@@ -64,25 +64,20 @@ void BuildNetMessage(ipc::capnp::messages::NetMessage::Builder builder, const in
 //! trip that clientInvoke() pays.
 struct ProxyClientCustom<ipc::capnp::messages::NetMessageTrace, interfaces::NetMessageTrace>::Streamer {
     Streamer(ipc::capnp::messages::NetMessageTrace::Client client, EventLoop& loop, uint32_t interval_us,
-             std::function<bool(std::vector<interfaces::NetMessageInfo>&, uint64_t&)> drain,
-             std::function<void(std::vector<interfaces::NetMessageInfo>&, bool)> complete)
+             std::function<interfaces::NetMessageBatch*()> drain,
+             std::function<void(interfaces::NetMessageBatch&, bool)> complete)
         : m_client{std::move(client)}, m_loop{loop},
           m_interval{interval_us * kj::MICROSECONDS}, m_drain{std::move(drain)}, m_complete{std::move(complete)}
     {
     }
 
-    //! Everything below runs on the event loop thread only, so the batch pool
-    //! and the in-flight count need no synchronization.
+    //! Everything below runs on the event loop thread only, so the in-flight
+    //! count needs no synchronization.
     ipc::capnp::messages::NetMessageTrace::Client m_client;
     EventLoop& m_loop;
     const kj::Duration m_interval;
-    const std::function<bool(std::vector<interfaces::NetMessageInfo>&, uint64_t&)> m_drain;
-    const std::function<void(std::vector<interfaces::NetMessageInfo>&, bool)> m_complete;
-    //! Batches are held by shared_ptr because both continuations of a send
-    //! have to name the same one; capturing by move into each would give the
-    //! data to whichever lambda the compiler happens to construct first and
-    //! leave the other empty.
-    std::vector<std::shared_ptr<std::vector<interfaces::NetMessageInfo>>> m_pool;
+    const std::function<interfaces::NetMessageBatch*()> m_drain;
+    const std::function<void(interfaces::NetMessageBatch&, bool)> m_complete;
     int m_in_flight{0};
     bool m_stopped{false};
 
@@ -96,51 +91,35 @@ struct ProxyClientCustom<ipc::capnp::messages::NetMessageTrace, interfaces::NetM
     void Tick(const std::shared_ptr<Streamer>& self)
     {
         if (m_stopped) return;
-        // Cap outstanding batches so a subscriber that stops reading makes
-        // events queue in the node (and be dropped and counted) rather than
-        // pile up here.
-        // Keep sending until the node has nothing left or too much is already
-        // on the wire. One batch per tick would cap delivery at
-        // max_batch_events per interval, which silently drops events once the
-        // node produces them faster than that.
-        while (m_in_flight < MAX_IN_FLIGHT) {
-            std::shared_ptr<std::vector<interfaces::NetMessageInfo>> batch;
-            if (!m_pool.empty()) {
-                batch = std::move(m_pool.back());
-                m_pool.pop_back();
-            } else {
-                batch = std::make_shared<std::vector<interfaces::NetMessageInfo>>();
-            }
-            uint64_t dropped{0};
-            if (!m_drain(*batch, dropped)) {
-                if (m_pool.size() < static_cast<size_t>(MAX_IN_FLIGHT)) m_pool.push_back(std::move(batch));
-                break;
-            }
-            Send(self, std::move(batch), dropped);
-        }
+        // Keep sending until the node has nothing left, or stops handing out
+        // batches because too many are already on the wire. One batch per
+        // tick would cap delivery at max_batch_events per interval, which
+        // silently drops events once the node produces them faster than that.
+        while (auto* batch{m_drain()}) Send(self, *batch);
         Schedule(self);
     }
 
-    void Send(const std::shared_ptr<Streamer>& self,
-              std::shared_ptr<std::vector<interfaces::NetMessageInfo>> batch, uint64_t dropped)
+    void Send(const std::shared_ptr<Streamer>& self, interfaces::NetMessageBatch& batch)
     {
         auto request{m_client.messagesStreamRequest(nullptr)};
-        auto list{request.initMessages(batch->size())};
-        for (size_t i{0}; i < batch->size(); ++i) BuildNetMessage(list[i], (*batch)[i]);
-        request.setDropped(dropped);
+        auto list{request.initMessages(batch.messages.size())};
+        size_t i{0};
+        for (const auto& m : batch.messages) BuildNetMessage(list[i++], m);
+        request.setDropped(batch.dropped);
         ++m_in_flight;
+        // The node owns the batch until Finish() gives it back, so both
+        // continuations can simply point at it.
+        auto* sent{&batch};
         m_loop.m_task_set->add(request.send().then(
-            [self, batch](auto&&) { self->Finish(batch, /*ok=*/true); },
-            [self, batch](const kj::Exception&) { self->Finish(batch, /*ok=*/false); }));
+            [self, sent](auto&&) { self->Finish(*sent, /*ok=*/true); },
+            [self, sent](const kj::Exception&) { self->Finish(*sent, /*ok=*/false); }));
     }
 
-    void Finish(const std::shared_ptr<std::vector<interfaces::NetMessageInfo>>& batch, bool ok)
+    void Finish(interfaces::NetMessageBatch& batch, bool ok)
     {
         --m_in_flight;
-        // Hands the batch's arena slots and payload buffers back to the node.
-        m_complete(*batch, ok);
-        batch->clear();
-        if (m_pool.size() < static_cast<size_t>(MAX_IN_FLIGHT)) m_pool.push_back(batch);
+        // Hands the batch, its arena slots and payload buffers back to the node.
+        m_complete(batch, ok);
     }
 };
 
@@ -151,8 +130,8 @@ ProxyClientCustom<ipc::capnp::messages::NetMessageTrace, interfaces::NetMessageT
 
 bool ProxyClientCustom<ipc::capnp::messages::NetMessageTrace, interfaces::NetMessageTrace>::startStreaming(
     uint32_t interval_us,
-    std::function<bool(std::vector<interfaces::NetMessageInfo>&, uint64_t&)> drain,
-    std::function<void(std::vector<interfaces::NetMessageInfo>&, bool ok)> complete)
+    std::function<interfaces::NetMessageBatch*()> drain,
+    std::function<void(interfaces::NetMessageBatch&, bool ok)> complete)
 {
     if (!m_context.connection) return false;
     auto streamer{std::make_shared<Streamer>(m_client, *m_context.loop, std::max<uint32_t>(interval_us, 1),

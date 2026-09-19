@@ -12,7 +12,6 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <vector>
 
 namespace mp {
 //! Streaming delivery of net message trace batches.
@@ -40,8 +39,8 @@ public:
     bool canStream() const override { return true; }
 
     bool startStreaming(uint32_t interval_us,
-                        std::function<bool(std::vector<interfaces::NetMessageInfo>&, uint64_t&)> drain,
-                        std::function<void(std::vector<interfaces::NetMessageInfo>&, bool ok)> complete) override;
+                        std::function<interfaces::NetMessageBatch*()> drain,
+                        std::function<void(interfaces::NetMessageBatch&, bool ok)> complete) override;
     void stopStreaming() override;
 
 private:

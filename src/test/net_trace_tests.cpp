@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <set>
+#include <span>
 #include <atomic>
 #include <stdexcept>
 #include <string>
@@ -31,6 +32,28 @@ using node::NetMessageTracer;
 
 namespace {
 
+//! An event copied out of the view the node hands over, which is only valid
+//! during delivery.
+struct OwnedEvent {
+    bool inbound;
+    int64_t peer_id;
+    std::string peer_addr;
+    std::string conn_type;
+    std::string msg_type;
+    uint64_t msg_size;
+    std::vector<unsigned char> payload;
+    int32_t payload_slot;
+    uint32_t payload_len;
+    int64_t timestamp_us;
+};
+
+OwnedEvent Copy(const NetMessageInfo& m)
+{
+    return {m.inbound, m.peer_id, std::string{m.peer_addr}, std::string{m.conn_type}, std::string{m.msg_type},
+            m.msg_size, std::vector<unsigned char>{m.payload.begin(), m.payload.end()}, m.payload_slot,
+            m.payload_len, m.timestamp_us};
+}
+
 //! Collects delivered batches. Optionally blocks the delivery thread on the
 //! first batch until Release() is called, so tests can fill the queue.
 class CollectingTrace : public interfaces::NetMessageTrace
@@ -38,10 +61,11 @@ class CollectingTrace : public interfaces::NetMessageTrace
 public:
     explicit CollectingTrace(bool block_first = false) : m_block_first{block_first} {}
 
-    void messages(const std::vector<NetMessageInfo>& messages, uint64_t dropped) override
+    void messages(std::span<const NetMessageInfo> messages, uint64_t dropped) override
     {
         std::unique_lock lock{m_mutex};
-        m_batches.push_back(messages);
+        auto& batch{m_batches.emplace_back()};
+        for (const auto& m : messages) batch.push_back(Copy(m));
         m_dropped += dropped;
         m_delivered += messages.size();
         m_cv.notify_all();
@@ -81,7 +105,7 @@ public:
         std::lock_guard lock{m_mutex};
         return m_dropped;
     }
-    std::vector<std::vector<NetMessageInfo>> Batches()
+    std::vector<std::vector<OwnedEvent>> Batches()
     {
         std::lock_guard lock{m_mutex};
         return m_batches;
@@ -91,7 +115,7 @@ private:
     const bool m_block_first;
     std::mutex m_mutex;
     std::condition_variable m_cv;
-    std::vector<std::vector<NetMessageInfo>> m_batches;
+    std::vector<std::vector<OwnedEvent>> m_batches;
     size_t m_delivered{0};
     uint64_t m_dropped{0};
     bool m_blocked{false};
@@ -101,7 +125,7 @@ private:
 class ThrowingTrace : public interfaces::NetMessageTrace
 {
 public:
-    void messages(const std::vector<NetMessageInfo>&, uint64_t) override
+    void messages(std::span<const NetMessageInfo>, uint64_t) override
     {
         m_called.set_value();
         throw std::runtime_error{"client gone"};
@@ -130,7 +154,7 @@ public:
         m_slot_count = slot_count;
     }
 
-    void messages(const std::vector<NetMessageInfo>& messages, uint64_t dropped) override
+    void messages(std::span<const NetMessageInfo> messages, uint64_t dropped) override
     {
         Handle(messages, dropped);
     }
@@ -141,18 +165,15 @@ public:
     bool canStream() const override { return m_stream; }
 
     bool startStreaming(uint32_t interval_us,
-                        std::function<bool(std::vector<NetMessageInfo>&, uint64_t&)> drain,
-                        std::function<void(std::vector<NetMessageInfo>&, bool)> complete) override
+                        std::function<interfaces::NetMessageBatch*()> drain,
+                        std::function<void(interfaces::NetMessageBatch&, bool)> complete) override
     {
         if (!m_stream) return false;
         m_thread = std::thread([this, interval_us, drain = std::move(drain), complete = std::move(complete)] {
-            std::vector<NetMessageInfo> batch;
             while (!m_stop.load(std::memory_order_relaxed)) {
-                batch.clear();
-                uint64_t dropped{0};
-                if (drain(batch, dropped)) {
-                    Handle(batch, dropped);
-                    complete(batch, /*ok=*/true);
+                if (auto* batch{drain()}) {
+                    Handle(batch->messages, batch->dropped);
+                    complete(*batch, /*ok=*/true);
                 } else {
                     UninterruptibleSleep(std::chrono::microseconds{interval_us});
                 }
@@ -172,7 +193,7 @@ public:
     void SetStreaming() { m_stream = true; }
 
 private:
-    void Handle(const std::vector<NetMessageInfo>& messages, uint64_t dropped)
+    void Handle(std::span<const NetMessageInfo> messages, uint64_t dropped)
     {
         std::lock_guard lock{m_mutex};
         m_dropped += dropped;
@@ -186,9 +207,9 @@ private:
                 base += static_cast<uint64_t>(m.payload_slot) * m_slot_bytes;
                 payload.assign(base, base + m.payload_len);
             } else {
-                payload = m.payload;
+                payload.assign(m.payload.begin(), m.payload.end());
             }
-            m_events.emplace_back(m.msg_type, m.payload_slot, std::move(payload));
+            m_events.emplace_back(std::string{m.msg_type}, m.payload_slot, std::move(payload));
         }
     }
 
@@ -254,7 +275,7 @@ BOOST_AUTO_TEST_CASE(subscribe_and_deliver)
     Record(tracer, /*inbound=*/false, "pong", 8, /*peer=*/9);
     trace_ptr->WaitDelivered(2);
 
-    std::vector<NetMessageInfo> all;
+    std::vector<OwnedEvent> all;
     for (const auto& batch : trace_ptr->Batches()) all.insert(all.end(), batch.begin(), batch.end());
     BOOST_REQUIRE_EQUAL(all.size(), 2U);
     BOOST_CHECK(all[0].inbound);
