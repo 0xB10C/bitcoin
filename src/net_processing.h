@@ -34,6 +34,7 @@ class DataStream;
 class uint256;
 
 namespace node {
+class NetMessageTracer;
 class Warnings;
 } // namespace node
 
@@ -109,6 +110,8 @@ public:
         bool private_broadcast{DEFAULT_PRIVATE_BROADCAST};
         //! Maximum per-second rate for sending transaction inventory to peers.
         unsigned int tx_send_rate{DEFAULT_TX_SEND_RATE};
+        //! Optional hub receiving P2P message trace events (see node/net_trace.h).
+        node::NetMessageTracer* net_tracer{nullptr};
     };
 
     static std::unique_ptr<PeerManager> make(CConnman& connman, AddrMan& addrman,

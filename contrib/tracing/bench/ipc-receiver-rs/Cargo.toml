@@ -1,0 +1,21 @@
+[package]
+name = "net-msgs-ipc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Rust (capnp-rpc) client for the Bitcoin Core IPC tracing interface (IPC vs eBPF benchmark)"
+license = "MIT"
+
+[dependencies]
+capnp = "0.27"
+capnp-rpc = "0.27"
+futures = "0.3"
+libc = "0.2"
+tokio = { version = "1", features = ["rt", "net", "time", "signal", "macros", "fs"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+
+[build-dependencies]
+capnpc = "0.27"
+
+[profile.release]
+debug = 1

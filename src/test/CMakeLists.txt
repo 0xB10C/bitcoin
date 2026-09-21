@@ -72,6 +72,7 @@ add_executable(test_bitcoin
   net_peer_connection_tests.cpp
   net_peer_eviction_tests.cpp
   net_tests.cpp
+  net_trace_tests.cpp
   netbase_tests.cpp
   node_init_tests.cpp
   node_warnings_tests.cpp

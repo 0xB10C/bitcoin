@@ -32,6 +32,7 @@
 #include <netmessagemaker.h>
 #include <node/blockstorage.h>
 #include <node/connection_types.h>
+#include <node/net_trace.h>
 #include <node/protocol_version.h>
 #include <node/timeoffsets.h>
 #include <node/txdownloadman.h>
@@ -5469,6 +5470,10 @@ bool PeerManagerImpl::ProcessMessages(CNode& node, std::atomic<bool>& interruptM
         msg.m_recv.size(),
         msg.m_recv.data()
     );
+    if (m_opts.net_tracer && m_opts.net_tracer->active()) {
+        m_opts.net_tracer->record(/*inbound=*/true, node.GetId(), node.m_addr_name,
+                                  node.ConnectionTypeAsString(), msg.m_type, MakeUCharSpan(msg.m_recv));
+    }
 
     if (m_opts.capture_messages) {
         CaptureMessage(node.addr, msg.m_type, MakeUCharSpan(msg.m_recv), /*is_incoming=*/true);

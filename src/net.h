@@ -54,6 +54,9 @@ class CChainParams;
 class CNode;
 class CScheduler;
 struct bilingual_str;
+namespace node {
+class NetMessageTracer;
+} // namespace node
 
 /** Time after which to disconnect, after waiting for a ping response (or inactivity). */
 inline constexpr std::chrono::minutes TIMEOUT_INTERVAL{20};
@@ -1113,6 +1116,8 @@ public:
         bool whitelist_forcerelay = DEFAULT_WHITELISTFORCERELAY;
         bool whitelist_relay = DEFAULT_WHITELISTRELAY;
         bool m_capture_messages = false;
+        //! Optional hub receiving P2P message trace events (see node/net_trace.h).
+        node::NetMessageTracer* m_net_tracer{nullptr};
     };
 
     void Init(const Options& connOptions) EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex, !m_total_bytes_sent_mutex)
@@ -1152,6 +1157,7 @@ public:
         whitelist_forcerelay = connOptions.whitelist_forcerelay;
         whitelist_relay = connOptions.whitelist_relay;
         m_capture_messages = connOptions.m_capture_messages;
+        m_net_tracer = connOptions.m_net_tracer;
     }
 
     // test only
@@ -1812,6 +1818,7 @@ private:
      * flag for whether messages are captured
      */
     bool m_capture_messages{false};
+    node::NetMessageTracer* m_net_tracer{nullptr};
 
     /**
      * Mutex protecting m_i2p_sam_sessions.
