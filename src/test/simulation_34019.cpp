@@ -29,9 +29,13 @@ struct PeersDatFile {
     // this is useful when the node was using asmap before
     // to retain (most of) the bucketing of the addrman entries.
     bool asmap;
-    // size of the new table
+    // number of occupied slots in the new table. Note that this counts
+    // slots, not addresses: a new-table address can be referenced from up
+    // to ADDRMAN_NEW_BUCKETS_PER_ADDRESS (8) slots, and Select() picks a
+    // random slot, so this is the right denominator for the raw share.
+    // AddrMan::Size() counts (deduplicated) vRandom entries instead.
     uint new_;
-    // size of the tried table
+    // number of occupied slots in the tried table (one slot per address)
     uint tried;
     // number of ipv4 entries
     uint ipv4;
@@ -47,9 +51,9 @@ struct PeersDatFile {
     int64_t oldest_tried;
     int64_t youngest_tried;
 
-    // number of Bitprojects IPs in new table
+    // number of new table slots occupied by Bitprojects IPs
     uint bitprojects_new;
-    // number of Bitprojects IPs in tried table
+    // number of tried table slots occupied by Bitprojects IPs
     uint bitprojects_tried;
 
     std::unique_ptr<AddrMan> load(NetGroupManager& netgroupmanager) const
@@ -61,15 +65,19 @@ struct PeersDatFile {
         int64_t youngest_new_ = 0;
         int64_t oldest_tried_ = std::numeric_limits<int64_t>::max();
         int64_t youngest_tried_ = 0;
-        for (const auto& e : addrman->GetEntries(/*tried=*/false)) {
-            AddrInfo info = e.first;
+        // GetEntries() walks the table slots, so an address that is
+        // referenced from multiple new buckets is returned once per slot.
+        const auto new_entries{addrman->GetEntries(/*tried=*/false)};
+        const auto tried_entries{addrman->GetEntries(/*tried=*/true)};
+        for (const auto& e : new_entries) {
+            const AddrInfo& info = e.first;
             oldest_new_ = std::min(oldest_new_, static_cast<int64_t>(TicksSinceEpoch<std::chrono::seconds>(info.nTime)));
             youngest_new_ = std::max(youngest_new_, static_cast<int64_t>(TicksSinceEpoch<std::chrono::seconds>(info.nTime)));
             if (info.IsBitprojects()) {
                 bitprojects_addr_in_new++;
             };
         }
-        for (const auto& e : addrman->GetEntries(/*tried=*/true)) {
+        for (const auto& e : tried_entries) {
             const AddrInfo& info = e.first;
             oldest_tried_ = std::min(oldest_tried_, static_cast<int64_t>(TicksSinceEpoch<std::chrono::seconds>(info.nTime)));
             youngest_tried_ = std::max(youngest_tried_, static_cast<int64_t>(TicksSinceEpoch<std::chrono::seconds>(info.nTime)));
@@ -78,8 +86,8 @@ struct PeersDatFile {
             };
         }
 
-        BOOST_CHECK_EQUAL(addrman->Size(/*net=*/std::nullopt, /*in_new=*/true), new_);
-        BOOST_CHECK_EQUAL(addrman->Size(/*net=*/std::nullopt, /*in_new=*/false), tried);
+        BOOST_CHECK_EQUAL(new_entries.size(), new_);
+        BOOST_CHECK_EQUAL(tried_entries.size(), tried);
         BOOST_CHECK_EQUAL(addrman->Size(/*net=*/NET_IPV4, /*in_new=*/std::nullopt), ipv4);
         BOOST_CHECK_EQUAL(addrman->Size(/*net=*/NET_IPV6, /*in_new=*/std::nullopt), ipv6);
         BOOST_CHECK_EQUAL(addrman->Size(/*net=*/NET_ONION, /*in_new=*/std::nullopt), onion);
@@ -254,7 +262,7 @@ BOOST_AUTO_TEST_CASE(sim_20250815_dea)
     PeersDatFile file {
         .path = "../../../simulation_data/2025-08-15-dea-peers.dat",
         .asmap = false,
-        .new_ = 64612,
+        .new_ = 65424,
         .tried = 3915,
         .ipv4 = 57572,
         .ipv6 = 10955,
@@ -278,7 +286,7 @@ BOOST_AUTO_TEST_CASE(sim_20260114_dar)
     PeersDatFile file {
         .path = "../../../simulation_data/2026-01-14-dar-peers.dat",
         .asmap = false,
-        .new_ = 26808,
+        .new_ = 27563,
         .tried = 167,
         .ipv4 = 23906,
         .ipv6 = 3069,
@@ -302,7 +310,7 @@ BOOST_AUTO_TEST_CASE(sim_20260210_dan)
     PeersDatFile file {
         .path = "../../../simulation_data/2026-02-10-dan-peers.dat",
         .asmap = false,
-        .new_ = 46304,
+        .new_ = 48755,
         .tried = 83,
         .ipv4 = 40953,
         .ipv6 = 5434,
@@ -326,7 +334,7 @@ BOOST_AUTO_TEST_CASE(sim_20260315_dea)
     PeersDatFile file {
         .path = "../../../simulation_data/2026-03-15-dea-peers.dat",
         .asmap = false,
-        .new_ = 63778,
+        .new_ = 65333,
         .tried = 8361,
         .ipv4 = 61926,
         .ipv6 = 10213,
@@ -350,7 +358,7 @@ BOOST_AUTO_TEST_CASE(sim_20260326_wil)
     PeersDatFile file {
         .path = "../../../simulation_data/2026-03-26-wil-peers.dat",
         .asmap = false,
-        .new_ = 63267,
+        .new_ = 65170,
         .tried = 7902,
         .ipv4 = 49088,
         .ipv6 = 7390,
@@ -374,7 +382,7 @@ BOOST_AUTO_TEST_CASE(sim_20260403_dar)
     PeersDatFile file {
         .path = "../../../simulation_data/2026-04-03-dar-peers.dat",
         .asmap = false,
-        .new_ = 26176,
+        .new_ = 26945,
         .tried = 35,
         .ipv4 = 22830,
         .ipv6 = 3381,
@@ -398,7 +406,7 @@ BOOST_AUTO_TEST_CASE(sim_20250424_dan)
     PeersDatFile file {
         .path = "../../../simulation_data/2025-04-24-dan-peers.dat",
         .asmap = false,
-        .new_ = 49334,
+        .new_ = 51377,
         .tried = 199,
         .ipv4 = 35684,
         .ipv6 = 6718,
@@ -422,7 +430,7 @@ BOOST_AUTO_TEST_CASE(sim_20260624_cha)
     PeersDatFile file {
         .path = "../../../simulation_data/2026-06-24-cha-peers.dat",
         .asmap = false,
-        .new_ = 65532,
+        .new_ = 65535,
         .tried = 9991,
         .ipv4 = 63520,
         .ipv6 = 12003,
