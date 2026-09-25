@@ -75,3 +75,37 @@ Going Further
 --------------------
 
 To monitor Bitcoin Core performance more in depth (like reindex or IBD): https://github.com/bitcoin-dev-tools/benchcoin
+
+Per-block deserialization over a real block store
+--------------------
+
+`bench_blocks` is a separate binary that does not run for a fixed duration like
+the `bench_bitcoin` benchmarks, but measures `CBlock` deserialization for every
+single block in a node's `blocks/` directory. It is meant for finding out
+*which* blocks are expensive, as a starting point for optimization work.
+
+    cmake -B build -DBUILD_BENCH=ON
+    cmake --build build -t bench_blocks
+    build/bin/bench_blocks -blocksdir=~/.bitcoin/blocks -csv=blocks.csv
+
+The block files are read directly, so no node has to run (and none should be
+writing to the directory while the scan is in progress). Since v28 they are
+XOR-obfuscated, so `blocks/xor.dat` has to be present and readable next to them
+(keep in mind that the blocksdir of a node running as a system user may only be
+readable by that user). Block files are
+processed in parallel (`-par`), each block is deserialized `-reps` times and the
+fastest run is reported. The summary lists the slowest blocks in absolute terms,
+the slowest per byte, and the mean cost per byte per month; `-csv` additionally
+writes one row per block.
+
+Since the timings of a parallel run are affected by the other threads, use it to
+find candidates and then re-measure those single threaded, for example:
+
+    build/bin/bench_blocks -par=8 -reps=1 -csv=scan.csv
+    taskset -c 4 build/bin/bench_blocks -par=1 -reps=10 -fromheight=800000 -toheight=800100
+
+    build/bin/bench_blocks -h
+
+Note that block files also contain stale blocks, so more than one block may be
+reported for a height. Heights are read from the coinbase (BIP34) and are shown
+as `-1` for blocks predating its activation.

@@ -91,3 +91,18 @@ if(ENABLE_WALLET)
 endif()
 
 install_binary_component(bench_bitcoin INTERNAL)
+
+# Standalone benchmark that measures CBlock deserialization for every block in a
+# node's blocks/ directory. Not part of bench_bitcoin: it has its own main() and
+# is driven by a real block store instead of running for a fixed duration.
+add_executable(bench_blocks
+  bench_blocks.cpp
+)
+add_windows_application_manifest(bench_blocks)
+target_link_libraries(bench_blocks
+  core_interface
+  bitcoin_common
+  bitcoin_util
+  univalue
+)
+install_binary_component(bench_blocks INTERNAL)
