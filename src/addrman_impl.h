@@ -266,6 +266,21 @@ private:
 
     void Attempt_(const CService& addr, bool fCountFailure, NodeSeconds time) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
+    /** Pick the table (new or tried) to select an address from.
+     *
+     * @param[in] new_only Only consider the new table.
+     * @param[in] networks Only consider addresses of these networks (empty = all).
+     * @return    true to search the tried table, false for the new table, or
+     *            std::nullopt if neither holds an eligible address.
+     */
+    std::optional<bool> SelectTable_(bool new_only, const std::unordered_set<Network>& networks) const EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    /** Accept a selected entry with probability GetChance() * chance_factor.
+     *
+     * @return the entry, or nullptr if it was not accepted.
+     */
+    const AddrInfo* TryAcceptEntry_(nid_type node_id, double chance_factor) const EXCLUSIVE_LOCKS_REQUIRED(cs);
+
     std::pair<CAddress, NodeSeconds> Select_(bool new_only, const std::unordered_set<Network>& networks) const EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     /** Helper to generalize looking up an addrman entry from either table.
