@@ -150,6 +150,9 @@ public:
     std::pair<CAddress, NodeSeconds> Select(bool new_only, const std::unordered_set<Network>& networks) const
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
+    std::pair<CAddress, NodeSeconds> SelectByNetgroup(const std::unordered_set<Network>& networks) const
+        EXCLUSIVE_LOCKS_REQUIRED(!cs);
+
     std::vector<CAddress> GetAddr(size_t max_addresses, size_t max_pct, std::optional<Network> network, bool filtered = true) const
         EXCLUSIVE_LOCKS_REQUIRED(!cs);
 
@@ -325,6 +328,8 @@ private:
     const AddrInfo* TryAcceptEntry_(nid_type node_id, double chance_factor) const EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     std::pair<CAddress, NodeSeconds> Select_(bool new_only, const std::unordered_set<Network>& networks) const EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    std::pair<CAddress, NodeSeconds> SelectByNetgroup_(const std::unordered_set<Network>& networks) const EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     /** Helper to generalize looking up an addrman entry from either table.
      *

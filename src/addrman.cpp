@@ -23,6 +23,7 @@
 #include <util/time.h>
 
 #include <cmath>
+#include <limits>
 #include <optional>
 
 
@@ -876,6 +877,57 @@ std::pair<CAddress, NodeSeconds> AddrManImpl::Select_(bool new_only, const std::
     }
 }
 
+/** How many netgroups to draw in SelectByNetgroup_() before giving up, when
+ *  only one of IPv4/IPv6 is allowed and the drawn entries are of the other. */
+static constexpr int SELECT_BY_NETGROUP_MAX_TRIES{100};
+
+std::pair<CAddress, NodeSeconds> AddrManImpl::SelectByNetgroup_(const std::unordered_set<Network>& networks) const
+{
+    AssertLockHeld(cs);
+
+    // Only IPv4/IPv6 entries are indexed by netgroup, see SelectByNetgroup() in addrman.h.
+    std::unordered_set<Network> ipv46_networks;
+    for (const Network net : {NET_IPV4, NET_IPV6}) {
+        if (networks.empty() || networks.contains(net)) ipv46_networks.insert(net);
+    }
+    if (ipv46_networks.empty()) return {};
+
+    const auto search_tried{SelectTable_(/*new_only=*/false, ipv46_networks)};
+    if (!search_tried.has_value()) return {};
+
+    const NetgroupIndex& index{m_netgroup_index[*search_tried]};
+    if (!Assume(!index.order.empty())) return {};
+
+    // Entries of the network that is not allowed have to be drawn over. This
+    // can only happen when just one of IPv4/IPv6 is allowed, as every indexed
+    // entry is of one of the two.
+    const bool all_networks{ipv46_networks.size() == 2};
+    int tries_left{all_networks ? std::numeric_limits<int>::max() : SELECT_BY_NETGROUP_MAX_TRIES};
+
+    double chance_factor = 1.0;
+    while (tries_left-- > 0) {
+        // Draw a netgroup uniformly at random, and then one of its entries.
+        const auto& group{index.order[insecure_rand.randrange(index.order.size())]->second};
+        const nid_type node_id{group.nids[insecure_rand.randrange(group.nids.size())]};
+
+        if (!all_networks) {
+            const auto it{mapInfo.find(node_id)};
+            if (!Assume(it != mapInfo.end()) || !ipv46_networks.contains(it->second.GetNetwork())) continue;
+        }
+
+        // Return the entry if it is accepted.
+        if (const AddrInfo* info{TryAcceptEntry_(node_id, chance_factor)}) {
+            LogDebug(BCLog::ADDRMAN, "Selected %s from %s (netgroup randomized)\n", info->ToStringAddrPort(), *search_tried ? "tried" : "new");
+            return {*info, info->m_last_try};
+        }
+
+        // Otherwise start over with a (likely) different entry, and increased chance factor.
+        chance_factor *= 1.2;
+    }
+
+    return {};
+}
+
 nid_type AddrManImpl::GetEntry(bool use_tried, size_t bucket, size_t position) const
 {
     AssertLockHeld(cs);
@@ -1346,6 +1398,15 @@ std::pair<CAddress, NodeSeconds> AddrManImpl::Select(bool new_only, const std::u
     return addrRet;
 }
 
+std::pair<CAddress, NodeSeconds> AddrManImpl::SelectByNetgroup(const std::unordered_set<Network>& networks) const
+{
+    LOCK(cs);
+    Check();
+    auto addrRet = SelectByNetgroup_(networks);
+    Check();
+    return addrRet;
+}
+
 std::vector<CAddress> AddrManImpl::GetAddr(size_t max_addresses, size_t max_pct, std::optional<Network> network, const bool filtered) const
 {
     LOCK(cs);
@@ -1447,6 +1508,11 @@ std::pair<CAddress, NodeSeconds> AddrMan::SelectTriedCollision()
 std::pair<CAddress, NodeSeconds> AddrMan::Select(bool new_only, const std::unordered_set<Network>& networks) const
 {
     return m_impl->Select(new_only, networks);
+}
+
+std::pair<CAddress, NodeSeconds> AddrMan::SelectByNetgroup(const std::unordered_set<Network>& networks) const
+{
+    return m_impl->SelectByNetgroup(networks);
 }
 
 std::vector<CAddress> AddrMan::GetAddr(size_t max_addresses, size_t max_pct, std::optional<Network> network, const bool filtered) const
