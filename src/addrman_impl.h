@@ -14,7 +14,9 @@
 #include <util/log.h>
 #include <util/time.h>
 
+#include <array>
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <set>
 #include <unordered_map>
@@ -74,6 +76,12 @@ public:
 
     //! position in vRandom
     mutable int nRandomPos{-1};
+
+    //! identifier of the netgroup this entry is in, packed (memory only)
+    uint64_t m_netgroup_key{0};
+
+    //! position in the netgroup index of the table this entry is in (memory only)
+    uint32_t m_netgroup_pos{0};
 
     SERIALIZE_METHODS(AddrInfo, obj)
     {
@@ -238,6 +246,31 @@ private:
     /** Number of entries in addrman per network and new/tried table. */
     std::unordered_map<Network, NewTriedCount> m_network_counts GUARDED_BY(cs);
 
+    /** The entries of one of the tables, indexed by netgroup, maintained
+     *  wherever m_network_counts is. Only IPv4/IPv6 entries are indexed: for
+     *  other networks the netgroup carries no topology information. */
+    struct NetgroupIndex {
+        struct Group {
+            //! The nids of the table's entries in this netgroup. The position
+            //! of an entry here is its AddrInfo::m_netgroup_pos.
+            std::vector<nid_type> nids;
+            //! The position of this netgroup in `order`.
+            size_t order_pos;
+        };
+        using GroupMap = std::unordered_map<uint64_t, Group>;
+
+        //! The netgroups, keyed by AddrInfo::m_netgroup_key.
+        GroupMap groups;
+        //! The netgroups in `groups`, to be able to draw one uniformly at
+        //! random. References into a std::unordered_map stay valid, so entries
+        //! only move here when a netgroup is added or removed.
+        std::vector<GroupMap::iterator> order;
+    };
+
+    /** The entries of the new (index 0) and the tried (index 1) table, indexed
+     *  by netgroup, to be able to draw a netgroup uniformly at random. */
+    std::array<NetgroupIndex, 2> m_netgroup_index GUARDED_BY(cs);
+
     //! Find an entry.
     AddrInfo* Find(const CService& addr, nid_type* pnId = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
@@ -255,6 +288,16 @@ private:
 
     //! Move an entry from the "new" table(s) to the "tried" table
     void MakeTried(AddrInfo& info, nid_type nId) EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    /** The packed netgroup identifier of an entry (AddrInfo::m_netgroup_key),
+     *  using the AS number cached in the entry to avoid an asmap lookup. */
+    uint64_t GetNetgroupKey_(const AddrInfo& info) const EXCLUSIVE_LOCKS_REQUIRED(cs);
+
+    /** Add an entry to / remove an entry from the netgroup index of the new
+     *  (tried = false) or the tried (tried = true) table. Entries of networks
+     *  other than IPv4/IPv6 are not indexed and are ignored here. */
+    void AddToNetgroupIndex_(nid_type nid, AddrInfo& info, bool tried) EXCLUSIVE_LOCKS_REQUIRED(cs);
+    void RemoveFromNetgroupIndex_(nid_type nid, const AddrInfo& info, bool tried) EXCLUSIVE_LOCKS_REQUIRED(cs);
 
     /** Attempt to add a single address to addrman's new table.
      *  @see AddrMan::Add() for parameters. */

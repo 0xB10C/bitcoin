@@ -266,10 +266,12 @@ void AddrManImpl::Unserialize(Stream& s_)
         s >> info;
         info.mapped_as = m_netgroupman.GetMappedAS(info);
         info.source_mapped_as = m_netgroupman.GetMappedAS(info.source);
+        info.m_netgroup_key = GetNetgroupKey_(info);
         mapAddr[info] = n;
         info.nRandomPos = vRandom.size();
         vRandom.push_back(n);
         m_network_counts[info.GetNetwork()].n_new++;
+        AddToNetgroupIndex_(n, info, /*tried=*/false);
     }
     nIdCount = nNew;
 
@@ -280,6 +282,7 @@ void AddrManImpl::Unserialize(Stream& s_)
         s >> info;
         info.mapped_as = m_netgroupman.GetMappedAS(info);
         info.source_mapped_as = m_netgroupman.GetMappedAS(info.source);
+        info.m_netgroup_key = GetNetgroupKey_(info);
         int nKBucket = info.GetTriedBucket(nKey, m_netgroupman);
         int nKBucketPos = info.GetBucketPosition(nKey, false, nKBucket);
         if (info.IsValid()
@@ -290,6 +293,7 @@ void AddrManImpl::Unserialize(Stream& s_)
             mapInfo[nIdCount] = info;
             mapAddr[info] = nIdCount;
             vvTried[nKBucket][nKBucketPos] = nIdCount;
+            AddToNetgroupIndex_(nIdCount, mapInfo[nIdCount], /*tried=*/true);
             nIdCount++;
             m_network_counts[info.GetNetwork()].n_tried++;
         } else {
@@ -398,20 +402,99 @@ AddrInfo* AddrManImpl::Find(const CService& addr, nid_type* pnId)
     return nullptr;
 }
 
+//! Whether an entry is indexed by netgroup, see AddrManImpl::NetgroupIndex.
+static bool IsIndexedByNetgroup(const AddrInfo& info)
+{
+    const Network net{info.GetNetwork()};
+    return net == NET_IPV4 || net == NET_IPV6;
+}
+
+/** Pack a netgroup identifier as returned by NetGroupManager::GetGroup() into
+ *  a uint64_t. The length is packed along with the bytes, so that identifiers
+ *  of different lengths never collide. Only identifiers of IPv4/IPv6
+ *  addresses, which are at most 6 bytes long, fit. */
+static uint64_t PackNetgroup(std::span<const unsigned char> group)
+{
+    assert(group.size() < sizeof(uint64_t));
+    uint64_t key{group.size()};
+    for (size_t i{0}; i < group.size(); ++i) {
+        key |= uint64_t{group[i]} << (8 * (i + 1));
+    }
+    return key;
+}
+
+uint64_t AddrManImpl::GetNetgroupKey_(const AddrInfo& info) const
+{
+    AssertLockHeld(cs);
+
+    // Entries of other networks are not indexed and have no key. Their
+    // netgroup identifier can also be longer than a packed key (NET_INTERNAL).
+    if (!IsIndexedByNetgroup(info)) return 0;
+
+    // Use the AS number cached in the entry to avoid an asmap lookup.
+    return PackNetgroup(info.mapped_as != 0 ? NetGroupManager::GetGroupFromASN(info.mapped_as)
+                                            : m_netgroupman.GetGroup(info));
+}
+
+void AddrManImpl::AddToNetgroupIndex_(nid_type nid, AddrInfo& info, bool tried)
+{
+    AssertLockHeld(cs);
+
+    if (!IsIndexedByNetgroup(info)) return;
+
+    NetgroupIndex& index{m_netgroup_index[tried]};
+    const auto [it_group, inserted]{index.groups.try_emplace(info.m_netgroup_key)};
+    if (inserted) {
+        it_group->second.order_pos = index.order.size();
+        index.order.push_back(it_group);
+    }
+    info.m_netgroup_pos = it_group->second.nids.size();
+    it_group->second.nids.push_back(nid);
+}
+
+void AddrManImpl::RemoveFromNetgroupIndex_(nid_type nid, const AddrInfo& info, bool tried)
+{
+    AssertLockHeld(cs);
+
+    if (!IsIndexedByNetgroup(info)) return;
+
+    NetgroupIndex& index{m_netgroup_index[tried]};
+    const auto it_group{index.groups.find(info.m_netgroup_key)};
+    assert(it_group != index.groups.end());
+    std::vector<nid_type>& nids{it_group->second.nids};
+    assert(info.m_netgroup_pos < nids.size() && nids[info.m_netgroup_pos] == nid);
+
+    // Move the netgroup's last entry into the removed entry's position.
+    nids[info.m_netgroup_pos] = nids.back();
+    const auto it_moved{mapInfo.find(nids.back())};
+    assert(it_moved != mapInfo.end());
+    it_moved->second.m_netgroup_pos = info.m_netgroup_pos;
+    nids.pop_back();
+    if (!nids.empty()) return;
+
+    // The netgroup is empty now: move the last netgroup into its position.
+    index.order[it_group->second.order_pos] = index.order.back();
+    index.order.back()->second.order_pos = it_group->second.order_pos;
+    index.order.pop_back();
+    index.groups.erase(it_group);
+}
+
 AddrInfo* AddrManImpl::Create(const CAddress& addr, const CNetAddr& addrSource, nid_type* pnId)
 {
     AssertLockHeld(cs);
 
     nid_type nId = nIdCount++;
-    mapInfo[nId] = AddrInfo(addr, m_netgroupman.GetMappedAS(addr), addrSource, m_netgroupman.GetMappedAS(addrSource));
+    AddrInfo& info{mapInfo[nId] = AddrInfo(addr, m_netgroupman.GetMappedAS(addr), addrSource, m_netgroupman.GetMappedAS(addrSource))};
+    info.m_netgroup_key = GetNetgroupKey_(info);
     mapAddr[addr] = nId;
-    mapInfo[nId].nRandomPos = vRandom.size();
+    info.nRandomPos = vRandom.size();
     vRandom.push_back(nId);
     nNew++;
     m_network_counts[addr.GetNetwork()].n_new++;
+    AddToNetgroupIndex_(nId, info, /*tried=*/false);
     if (pnId)
         *pnId = nId;
-    return &mapInfo[nId];
+    return &info;
 }
 
 void AddrManImpl::SwapRandom(unsigned int nRndPos1, unsigned int nRndPos2) const
@@ -449,6 +532,7 @@ void AddrManImpl::Delete(nid_type nId)
 
     SwapRandom(info.nRandomPos, vRandom.size() - 1);
     m_network_counts[info.GetNetwork()].n_new--;
+    RemoveFromNetgroupIndex_(nId, info, /*tried=*/false);
     vRandom.pop_back();
     mapAddr.erase(info);
     mapInfo.erase(nId);
@@ -490,6 +574,7 @@ void AddrManImpl::MakeTried(AddrInfo& info, nid_type nId)
     }
     nNew--;
     m_network_counts[info.GetNetwork()].n_new--;
+    RemoveFromNetgroupIndex_(nId, info, /*tried=*/false);
 
     assert(info.nRefCount == 0);
 
@@ -509,6 +594,7 @@ void AddrManImpl::MakeTried(AddrInfo& info, nid_type nId)
         vvTried[nKBucket][nKBucketPos] = -1;
         nTried--;
         m_network_counts[infoOld.GetNetwork()].n_tried--;
+        RemoveFromNetgroupIndex_(nIdEvict, infoOld, /*tried=*/true);
 
         // find which new bucket it belongs to
         int nUBucket = infoOld.GetNewBucket(nKey, m_netgroupman);
@@ -521,6 +607,7 @@ void AddrManImpl::MakeTried(AddrInfo& info, nid_type nId)
         vvNew[nUBucket][nUBucketPos] = nIdEvict;
         nNew++;
         m_network_counts[infoOld.GetNetwork()].n_new++;
+        AddToNetgroupIndex_(nIdEvict, infoOld, /*tried=*/false);
         LogDebug(BCLog::ADDRMAN, "Moved %s from tried[%i][%i] to new[%i][%i] to make space\n",
                  infoOld.ToStringAddrPort(), nKBucket, nKBucketPos, nUBucket, nUBucketPos);
     }
@@ -530,6 +617,7 @@ void AddrManImpl::MakeTried(AddrInfo& info, nid_type nId)
     nTried++;
     info.fInTried = true;
     m_network_counts[info.GetNetwork()].n_tried++;
+    AddToNetgroupIndex_(nId, info, /*tried=*/true);
 }
 
 bool AddrManImpl::AddSingle(const CAddress& addr, const CNetAddr& source, std::chrono::seconds time_penalty)
@@ -1156,6 +1244,41 @@ int AddrManImpl::CheckAddrman() const
     for (const auto& [net, count] : m_network_counts) {
         if (local_counts[net].n_new != count.n_new || local_counts[net].n_tried != count.n_tried) {
             return -21;
+        }
+    }
+
+    // The netgroup index of a table must hold exactly the IPv4/IPv6 entries of
+    // that table, each in its netgroup and at the position recorded in it.
+    for (const bool tried : {false, true}) {
+        const NetgroupIndex& index{m_netgroup_index[tried]};
+        if (index.groups.size() != index.order.size()) {
+            return -22;
+        }
+        size_t indexed{0};
+        for (size_t order_pos = 0; order_pos < index.order.size(); ++order_pos) {
+            const auto it_group{index.order[order_pos]};
+            if (it_group->second.order_pos != order_pos || it_group->second.nids.empty()) {
+                return -22;
+            }
+            for (size_t pos = 0; pos < it_group->second.nids.size(); ++pos) {
+                const auto it_info{mapInfo.find(it_group->second.nids[pos])};
+                if (it_info == mapInfo.end()) {
+                    return -23;
+                }
+                const AddrInfo& info{it_info->second};
+                if (info.fInTried != tried || info.m_netgroup_pos != pos ||
+                    info.m_netgroup_key != it_group->first || info.m_netgroup_key != GetNetgroupKey_(info)) {
+                    return -23;
+                }
+            }
+            indexed += it_group->second.nids.size();
+        }
+        size_t expected{0};
+        for (const auto& [nid, info] : mapInfo) {
+            if (info.fInTried == tried && IsIndexedByNetgroup(info)) ++expected;
+        }
+        if (indexed != expected) {
+            return -24;
         }
     }
 
