@@ -49,6 +49,13 @@ public:
     std::vector<unsigned char> GetGroup(const CNetAddr& address) const;
 
     /**
+     * Get the canonical network group identifier for a known AS number,
+     * without an asmap lookup. Returns the same identifier as GetGroup()
+     * does for an address mapped to this ASN.
+     */
+    static std::vector<unsigned char> GetGroupFromASN(uint32_t asn);
+
+    /**
      *  Get the autonomous system on the BGP path to address.
      *
      *  The ip->AS mapping depends on how asmap is constructed.
