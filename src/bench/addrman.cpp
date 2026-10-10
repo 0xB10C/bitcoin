@@ -105,6 +105,18 @@ static void AddrManSelect(benchmark::Bench& bench)
 // The worst case performance of the Select() function is when there is only
 // one address on the table, because it linearly searches every position of
 // several buckets before identifying the correct bucket
+static void AddrManSelectByNetgroup(benchmark::Bench& bench)
+{
+    AddrMan addrman{EMPTY_NETGROUPMAN, /*deterministic=*/false, ADDRMAN_CONSISTENCY_CHECK_RATIO};
+
+    FillAddrMan(addrman);
+
+    bench.run([&] {
+        const auto& address = addrman.SelectByNetgroup();
+        assert(address.first.GetPort() > 0);
+    });
+}
+
 static void AddrManSelectFromAlmostEmpty(benchmark::Bench& bench)
 {
     AddrMan addrman{EMPTY_NETGROUPMAN, /*deterministic=*/false, ADDRMAN_CONSISTENCY_CHECK_RATIO};
@@ -171,6 +183,7 @@ static void AddrManAddThenGood(benchmark::Bench& bench)
 
 BENCHMARK(AddrManAdd);
 BENCHMARK(AddrManSelect);
+BENCHMARK(AddrManSelectByNetgroup);
 BENCHMARK(AddrManSelectFromAlmostEmpty);
 BENCHMARK(AddrManSelectByNetwork);
 BENCHMARK(AddrManGetAddr);
