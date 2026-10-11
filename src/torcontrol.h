@@ -116,13 +116,23 @@ private:
 
 /****** Bitcoin specific TorController implementation ********/
 
+/** How a TorController runs its onion service. */
+struct TorServiceOptions {
+    /** Generate a fresh key every time and keep nothing on disk. */
+    bool ephemeral{false};
+    /** Add the service to the local addresses advertised to peers. */
+    bool advertise{true};
+    /** Called with the service address once it is up, and with an invalid one when it is gone. */
+    std::function<void(const CService&)> on_service;
+};
+
 /** Controller that connects to Tor control socket, authenticate, then create
  * and maintain an ephemeral onion service.
  */
 class TorController
 {
 public:
-    TorController(const std::string& tor_control_center, const CService& target);
+    TorController(const std::string& tor_control_center, const CService& target, TorServiceOptions options = {});
     TorController() : m_conn(m_interrupt) {
         // Used for testing only.
     }
@@ -147,6 +157,7 @@ private:
     std::chrono::duration<double> m_reconnect_timeout;
     CService m_service;
     const CService m_target;
+    const TorServiceOptions m_options;
     /** Cookie for SAFECOOKIE auth */
     std::vector<uint8_t> m_cookie;
     /** ClientNonce for SAFECOOKIE auth */

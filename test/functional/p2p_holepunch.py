@@ -695,6 +695,13 @@ class HolePunchTest(BitcoinTestFramework):
         node.assert_start_raises_init_error(
             ["-holepunch=1", "-v2transport=1", "-holepunchport=70000"],
             "Error: Invalid port specified in -holepunchport: '70000'")
+        self.log.info("-holepunchcoordonion sets the coordination service by hand")
+        node.assert_start_raises_init_error(
+            ["-holepunch=1", "-v2transport=1", "-holepunchcoordonion=1.2.3.4"],
+            "Error: -holepunchcoordonion must be an onion address")
+        with node.assert_debug_log([f"Hole punch coordination service is {ONION}:18444 (-holepunchcoordonion)"]):
+            self.start_node(0, extra_args=self.extra_args[0] + [f"-holepunchcoordonion={ONION}"])
+        self.stop_node(0)
         self.log.info("Without -holepunch, outbound connections use an ephemeral port and no feature is sent")
         self.start_node(0, extra_args=["-v2transport=1"])
         peer = node.add_outbound_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR), p2p_idx=0)

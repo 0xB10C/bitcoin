@@ -1209,6 +1209,10 @@ public:
     std::optional<holepunch::Announcement> HolePunchTakeAnnouncement(const std::function<bool(const holepunch::Announcement&)>& eligible);
     /** Open a coordination connection to `coordinator` (R-7.3), from the hole punch coordination thread. */
     void HolePunchOpenCoordination(const CService& coordinator) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
+    /** The onion service through which we coordinate our own punches is up (or, if invalid, gone). */
+    void SetHolePunchCoordinationService(const CService& service) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
+    /** Our coordination service, if it is up (R-12.1). */
+    std::optional<CService> GetHolePunchCoordinationService() const EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
     /** Whether an automatic outbound peer is in the same network group as `addr` (R-7.1). */
     bool HasOutboundPeerInGroup(const CNetAddr& addr) const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
@@ -1877,9 +1881,11 @@ private:
     std::unique_ptr<holepunch::SessionManager> m_holepunch_sessions;
     holepunch::AnnouncementCache m_holepunch_announcements;
     FastRandomContext m_holepunch_rng;
+    mutable Mutex m_holepunch_coord_mutex;
     /** Coordinators to open a coordination connection to. */
-    Mutex m_holepunch_coord_mutex;
     std::deque<CService> m_holepunch_coord_queue GUARDED_BY(m_holepunch_coord_mutex);
+    /** Our coordination onion service, while Tor has it up. */
+    std::optional<CService> m_holepunch_coord_service GUARDED_BY(m_holepunch_coord_mutex);
     /** Opens the queued coordination connections. Connecting blocks, and the outbound
      * thread waits for a free slot when the node is full, so this has its own thread. */
     void ThreadHolePunchCoordination() EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex, !m_nodes_mutex, !m_unused_i2p_sessions_mutex);

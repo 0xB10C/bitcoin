@@ -128,6 +128,9 @@ struct Options {
     /** Where coordination connections are accepted (R-12.1); the target of
      * the coordination onion service. */
     std::optional<CService> coordination_bind;
+    /** Test networks only: take this onion address as our coordination
+     * service instead of asking Tor for one (-holepunchcoordonion). */
+    std::optional<CService> coordination_service;
 };
 
 /** The wildcard address of `family` (NET_IPV4 or NET_IPV6) with `port`. */

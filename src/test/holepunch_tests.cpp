@@ -462,7 +462,7 @@ void MockClock(std::chrono::seconds step = std::chrono::seconds{0})
 
 Options LocalOptions(uint16_t port)
 {
-    return Options{.enabled = true, .port = port, .allow_local = true, .coordination_bind = {}};
+    return Options{.enabled = true, .port = port, .allow_local = true, .coordination_bind = {}, .coordination_service = {}};
 }
 
 //! Send a few bytes one way and read them on the other side.

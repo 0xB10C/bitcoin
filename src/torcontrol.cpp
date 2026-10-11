@@ -348,18 +348,21 @@ std::map<std::string,std::string> ParseTorReplyMapping(const std::string &s)
     return mapping;
 }
 
-TorController::TorController(const std::string& tor_control_center, const CService& target)
+TorController::TorController(const std::string& tor_control_center, const CService& target, TorServiceOptions options)
     : m_tor_control_center(tor_control_center),
       m_conn(m_interrupt),
       m_reconnect(true),
       m_reconnect_timeout(RECONNECT_TIMEOUT_START),
-      m_target(target)
+      m_target(target),
+      m_options(std::move(options))
 {
     // Read service private key if cached
-    std::pair<bool,std::string> pkf = ReadBinaryFile(GetPrivateKeyFile());
-    if (pkf.first) {
-        LogDebug(BCLog::TOR, "Reading cached private key from %s", fs::PathToString(GetPrivateKeyFile()));
-        m_private_key = pkf.second;
+    if (!m_options.ephemeral) {
+        std::pair<bool,std::string> pkf = ReadBinaryFile(GetPrivateKeyFile());
+        if (pkf.first) {
+            LogDebug(BCLog::TOR, "Reading cached private key from %s", fs::PathToString(GetPrivateKeyFile()));
+            m_private_key = pkf.second;
+        }
     }
     m_thread = std::thread(&util::TraceThread, "torcontrol", [this] { ThreadControl(); });
 }
@@ -368,7 +371,7 @@ TorController::~TorController()
 {
     Interrupt();
     Join();
-    if (m_service.IsValid()) {
+    if (m_service.IsValid() && m_options.advertise) {
         RemoveLocal(m_service);
     }
 }
@@ -511,13 +514,16 @@ void TorController::add_onion_cb(TorControlConnection& _conn, const TorControlRe
             return;
         }
         m_service = LookupNumeric(std::string(m_service_id+".onion"), Params().GetDefaultPort());
-        LogInfo("Got tor service ID %s, advertising service %s", m_service_id, m_service.ToStringAddrPort());
-        if (WriteBinaryFile(GetPrivateKeyFile(), m_private_key)) {
-            LogDebug(BCLog::TOR, "Cached service private key to %s", fs::PathToString(GetPrivateKeyFile()));
-        } else {
-            LogWarning("tor: Error writing service private key to %s", fs::PathToString(GetPrivateKeyFile()));
+        LogInfo("Got tor service ID %s, %s service %s", m_service_id, m_options.advertise ? "advertising" : "running", m_service.ToStringAddrPort());
+        if (!m_options.ephemeral) {
+            if (WriteBinaryFile(GetPrivateKeyFile(), m_private_key)) {
+                LogDebug(BCLog::TOR, "Cached service private key to %s", fs::PathToString(GetPrivateKeyFile()));
+            } else {
+                LogWarning("tor: Error writing service private key to %s", fs::PathToString(GetPrivateKeyFile()));
+            }
         }
-        AddLocal(m_service, LOCAL_MANUAL);
+        if (m_options.advertise) AddLocal(m_service, LOCAL_MANUAL);
+        if (m_options.on_service) m_options.on_service(m_service);
         // ... onion requested - keep connection open
     } else if (reply.code == TOR_REPLY_UNRECOGNIZED) {
         LogWarning("tor: Add onion failed with unrecognized command (You probably need to upgrade Tor)");
@@ -710,8 +716,10 @@ void TorController::connected_cb(TorControlConnection& _conn)
 void TorController::disconnected_cb(TorControlConnection& _conn)
 {
     // Stop advertising service when disconnected
-    if (m_service.IsValid())
-        RemoveLocal(m_service);
+    if (m_service.IsValid()) {
+        if (m_options.advertise) RemoveLocal(m_service);
+        if (m_options.on_service) m_options.on_service(CService{});
+    }
     m_service = CService();
     if (!m_reconnect)
         return;

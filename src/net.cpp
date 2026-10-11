@@ -3437,6 +3437,25 @@ void CConnman::HolePunchOpenCoordination(const CService& coordinator)
     m_holepunch_coord_queue.push_back(coordinator);
 }
 
+void CConnman::SetHolePunchCoordinationService(const CService& service)
+{
+    LOCK(m_holepunch_coord_mutex);
+    if (service.IsValid()) {
+        m_holepunch_coord_service = service;
+        LogInfo("Hole punch coordination service is %s", service.ToStringAddrPort());
+    } else {
+        m_holepunch_coord_service.reset();
+        LogInfo("Hole punch coordination service is gone");
+    }
+}
+
+std::optional<CService> CConnman::GetHolePunchCoordinationService() const
+{
+    LOCK(m_holepunch_coord_mutex);
+    if (m_holepunch_coord_service) return m_holepunch_coord_service;
+    return m_holepunch_opts.coordination_service;
+}
+
 void CConnman::ThreadHolePunchCoordination()
 {
     AssertLockNotHeld(m_nodes_mutex);
