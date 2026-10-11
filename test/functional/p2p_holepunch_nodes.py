@@ -73,6 +73,9 @@ class HolePunchNodesTest(BitcoinTestFramework):
         assert_equal(a_at_c["addr"], f"127.0.0.1:{holepunch_port(A)}")
         assert_equal(a_at_c["holepunch_caps"], ["COORDINATOR", "ADVERTISED", "PUNCHPORT"])
 
+        self.log.info("Without Tor there is no coordination service")
+        assert_equal(a.getholepunchinfo()["coordination"], {"bind": f"127.0.0.1:{holepunch_coord_port(A)}"})
+
         self.log.info("A announces itself through C; C relays it to B; B asks C; both get punched")
         with c.assert_debug_log(["punch sent to it as initiator"], timeout=90):
             self.wait_until(lambda: len(self.punched_peers(b)) == 1 and self.punched_peers(b)[0]["version"] != 0, timeout=90)

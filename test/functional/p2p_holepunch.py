@@ -305,6 +305,8 @@ class HolePunchTest(BitcoinTestFramework):
     def test_coordination_bind(self):
         node = self.nodes[0]
         coord_port = holepunch_coord_port(0)
+        self.log.info("getholepunchinfo shows the coordination bind and the onion service")
+        assert_equal(node.getholepunchinfo()["coordination"], {"bind": f"127.0.0.1:{coord_port}", "onion": f"{ONION}:18444"})
         self.log.info("A connection to the coordination bind is a coordination connection reached through Tor")
         peer = node.add_p2p_connection(CoordinationPeer(caps=0), dstport=coord_port)
         info = next(p for p in node.getpeerinfo() if p["connection_type"] == "holepunch-coordination")

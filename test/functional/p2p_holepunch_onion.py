@@ -88,6 +88,9 @@ class HolePunchOnionTest(BitcoinTestFramework):
             self.wait_until(lambda: "address" in self.external(node))
             assert_equal(self.external(node)["address"], f"127.0.0.1:{holepunch_port(index)}")
 
+        assert_equal(a.getholepunchinfo()["coordination"]["onion"], f"{ONION}:18444")
+        assert "onion" not in b.getholepunchinfo()["coordination"]
+
         self.log.info("A announces its onion service; D relays it; B asks A through the onion; both get punched")
         with a.assert_debug_log(["on our coordination service: punch sent to it as initiator"], timeout=90), \
              b.assert_debug_log([f"opened a coordination connection to {ONION}:18444", "coordination finished"], timeout=90):

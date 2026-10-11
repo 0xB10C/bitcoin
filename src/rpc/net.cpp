@@ -1395,6 +1395,11 @@ static RPCMethod getholepunchinfo()
             {
                 {RPCResult::Type::BOOL, "enabled", "Whether hole punching is enabled"},
                 {RPCResult::Type::NUM, "port", /*optional=*/true, "The punch port: the local port of all outbound clearnet connections and of the punch listener"},
+                {RPCResult::Type::OBJ, "coordination", /*optional=*/true, "How this node coordinates punches to itself",
+                    {
+                        {RPCResult::Type::STR, "bind", "(ip:port) The local address that accepts coordination connections, the target of the onion service"},
+                        {RPCResult::Type::STR, "onion", /*optional=*/true, "(address:port) The onion service through which this node can be asked for a rendezvous, if it is up"},
+                    }},
                 {RPCResult::Type::ARR, "external", /*optional=*/true, "Our external address and port per address family, as reported by peers",
                     {
                         {RPCResult::Type::OBJ, "", "",
@@ -1441,6 +1446,12 @@ static RPCMethod getholepunchinfo()
             obj.pushKV("enabled", opts.enabled);
             if (!opts.enabled) return obj;
             obj.pushKV("port", opts.port);
+            if (opts.coordination_bind) {
+                UniValue coordination(UniValue::VOBJ);
+                coordination.pushKV("bind", opts.coordination_bind->ToStringAddrPort());
+                if (const auto service{connman.GetHolePunchCoordinationService()}) coordination.pushKV("onion", service->ToStringAddrPort());
+                obj.pushKV("coordination", std::move(coordination));
+            }
             UniValue external(UniValue::VARR);
             for (const Network net : {NET_IPV4, NET_IPV6}) {
                 const auto info{connman.HolePunchExternalAddressInfo(net)};
