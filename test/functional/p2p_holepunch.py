@@ -400,6 +400,27 @@ class HolePunchTest(BitcoinTestFramework):
 
         node.disconnect_p2ps()
 
+    def test_relay(self):
+        node = self.nodes[0]
+        self.log.info("A fresh announcement is relayed to addrv2 peers and never stored")
+        receivers = [node.add_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR, support_addrv2=True)) for _ in range(2)]
+        legacy = node.add_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR, support_addrv2=False))
+        source = node.add_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR))
+        element = announcement(endpoint("1.2.3.4", 8333), endpoint("5.6.7.8", 8335))
+        source.send_and_ping(addrv2([element]))
+        self.wait_until(lambda: any(len(r.announcements) > 0 for r in receivers))
+        relayed = next(r.announcements[0] for r in receivers if r.announcements)
+        assert_equal(relayed.ip, "5.6.7.8")
+        assert_equal(relayed.port, 8335)
+        assert_equal(relayed.coordinator, endpoint("1.2.3.4", 8333))
+        for receiver in receivers:
+            receiver.sync_with_ping()
+        legacy.sync_with_ping()
+        assert_equal(legacy.announcements, [])
+        assert_equal(node.getnodeaddresses(0), [])
+        node.disconnect_p2ps()
+        self.wait_until(lambda: len(node.getpeerinfo()) == 0)
+
     def test_advertiser(self):
         node = self.nodes[0]
         punch_port = holepunch_port(0)
@@ -483,6 +504,7 @@ class HolePunchTest(BitcoinTestFramework):
         self.test_punch_as_responder()
         self.test_coordinator()
         self.test_announcement_cache()
+        self.test_relay()
         self.test_advertiser()
         self.test_connector()
         self.test_options()

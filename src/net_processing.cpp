@@ -2606,6 +2606,11 @@ void PeerManagerImpl::RelayAddress(NodeId originator,
 
     for (unsigned int i = 0; i < nRelayNodes && best[i].first != 0; i++) {
         PushAddress(*best[i].second, addr);
+        if (addr.IsHolePunch()) {
+            // Announcements are short-lived: send them with the next addr batch, now.
+            LOCK(best[i].second->m_addr_send_times_mutex);
+            best[i].second->m_next_addr_send = 0us;
+        }
     }
 }
 
@@ -6399,7 +6404,9 @@ void PeerManagerImpl::ProcessAddrs(std::string_view msg_type, CNode& pfrom, Peer
             m_connman.HolePunchAddAnnouncement(pfrom.GetId(), addr);
         }
         const bool reachable{g_reachable_nets.Contains(addr)};
-        if (addr.nTime > current_time - 10min && vAddr.size() <= 10 && addr.IsRoutable()) {
+        // On test networks, hole punching announcements of loopback nodes are relayed too (R-2.5).
+        const bool relayable_announcement{addr.IsHolePunch() && m_connman.GetHolePunchOptions().allow_local && addr.IsValid()};
+        if (addr.nTime > current_time - 10min && vAddr.size() <= 10 && (addr.IsRoutable() || relayable_announcement)) {
             // Relay to a limited number of other nodes
             RelayAddress(pfrom.GetId(), addr, reachable);
         }

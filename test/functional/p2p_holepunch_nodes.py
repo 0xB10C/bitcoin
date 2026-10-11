@@ -10,10 +10,12 @@ Four nodes, none connected to each other at the start:
   external address from two reporting peers.
 
 A and B connect to C from their punch ports; C sees them at those ports and
-they announce ADVERTISED and PUNCHPORT. B then asks C for a rendezvous with
-A's endpoint. C sends punch to both, they connect to each other by TCP
-simultaneous open, and the result is an inbound peer at A and a hole-punched
-outbound peer at B that relays blocks like any other peer.
+they announce ADVERTISED and PUNCHPORT. A announces itself through C, C
+relays the announcement to B, B asks C for a rendezvous with A's endpoint,
+C sends punch to both, and they connect to each other by TCP simultaneous
+open. The result is an inbound peer at A and a hole-punched outbound peer
+at B that relays blocks like any other peer. The limits are then checked
+with the manual rendezvous RPC.
 """
 
 import time
@@ -35,6 +37,9 @@ class HolePunchNodesTest(BitcoinTestFramework):
             "-holepunch=1",
             f"-holepunchport={holepunch_port(i)}",
         ] for i in range(self.num_nodes)]
+        # B gets no inbound slots, so it never announces itself and the punch
+        # always goes from B to A.
+        self.extra_args[B].append("-maxconnections=10")
 
     def setup_network(self):
         self.setup_nodes()
@@ -66,15 +71,12 @@ class HolePunchNodesTest(BitcoinTestFramework):
         assert_equal(a_at_c["addr"], f"127.0.0.1:{holepunch_port(A)}")
         assert_equal(a_at_c["holepunch_caps"], ["COORDINATOR", "ADVERTISED", "PUNCHPORT"])
 
-        self.log.info("B asks C for a rendezvous with A; C punches both")
-        with a.assert_debug_log([f"session with 127.0.0.1:{holepunch_port(B)} started as responder"], timeout=10), \
-             b.assert_debug_log([f"session with 127.0.0.1:{holepunch_port(A)} started as initiator (answers our rendezvous)"], timeout=10), \
-             c.assert_debug_log(["punch sent to it as initiator"], timeout=10):
-            b.holepunchrendezvous(c_at_b, f"127.0.0.1:{holepunch_port(A)}")
+        self.log.info("A announces itself through C; C relays it to B; B asks C; both get punched")
+        with c.assert_debug_log(["punch sent to it as initiator"], timeout=90):
+            self.wait_until(lambda: len(self.punched_peers(b)) == 1 and self.punched_peers(b)[0]["version"] != 0, timeout=90)
+        self.wait_until(lambda: len(self.punched_peers(a)) == 1 and self.punched_peers(a)[0]["version"] != 0)
 
         self.log.info("A and B are connected to each other through the punched connection")
-        self.wait_until(lambda: len(self.punched_peers(a)) == 1 and self.punched_peers(a)[0]["version"] != 0)
-        self.wait_until(lambda: len(self.punched_peers(b)) == 1 and self.punched_peers(b)[0]["version"] != 0)
         at_a = self.punched_peers(a)[0]
         at_b = self.punched_peers(b)[0]
         assert_equal(at_a["inbound"], True)
@@ -92,7 +94,7 @@ class HolePunchNodesTest(BitcoinTestFramework):
         assert_equal(b.getholepunchinfo()["sessions"], [])
 
         self.log.info("C refuses a second request for the same pair within the window")
-        with c.assert_debug_log(["a punch was sent to the requester recently"], timeout=10):
+        with c.assert_debug_log(["ignoring rendezvous from peer=", "recently"], timeout=10):
             b.holepunchrendezvous(c_at_b, f"127.0.0.1:{holepunch_port(A)}")
 
         self.log.info("After the window: B's hole punch slot is taken and A refuses a repeat session")
