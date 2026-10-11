@@ -381,6 +381,13 @@ struct Peer {
 
     /** Whether we sent the hole punching feature to this peer. */
     bool m_holepunch_feature_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){false};
+    /** The capabilities we announced to this peer. */
+    uint32_t m_holepunch_caps_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0};
+    /** Target of the rendezvous we sent on this connection, while it is outstanding (R-4.4). */
+    std::optional<CService> m_holepunch_rendezvous_target GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
+    NodeClock::time_point m_holepunch_rendezvous_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
+    /** When we last sent a punch to this peer as coordinator (R-4.4). */
+    NodeClock::time_point m_holepunch_punch_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
     /** Whether the peer sent us the hole punching feature. */
     std::atomic_bool m_holepunch_feature_received{false};
     /** The feature data version the peer sent. */
@@ -612,6 +619,11 @@ public:
     util::Expected<void, std::string> FetchBlock(NodeId peer_id, const CBlockIndex& block_index) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     bool GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+
+    /** Whether both sides negotiated hole punching version 0 on this connection (R-3.1). */
+    bool HolePunchNegotiated(const Peer& peer) const EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+    /** Handle a `punch` message: validate it (R-5.1) and start a session. */
+    void ProcessPunch(CNode& pfrom, Peer& peer, DataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
     std::vector<node::TxOrphanage::OrphanInfo> GetOrphanTransactions() override EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
     PeerManagerInfo GetInfo() const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_inv_to_send_mutex);
     std::vector<PrivateBroadcast::TxBroadcastInfo> GetPrivateBroadcastInfo() const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
@@ -3839,6 +3851,91 @@ void PeerManagerImpl::PushPrivateBroadcastTx(CNode& node)
     MakeAndPushMessage(node, NetMsgType::INV, std::vector<CInv>{{CInv{MSG_TX, tx->GetHash().ToUint256()}}});
 }
 
+bool PeerManagerImpl::HolePunchNegotiated(const Peer& peer) const
+{
+    return peer.m_holepunch_feature_sent && peer.m_holepunch_feature_received &&
+           peer.m_holepunch_version == holepunch::FEATURE_DATA_VERSION;
+}
+
+void PeerManagerImpl::ProcessPunch(CNode& pfrom, Peer& peer, DataStream& vRecv)
+{
+    if (!HolePunchNegotiated(peer)) {
+        LogDebug(BCLog::HOLEPUNCH, "punch without negotiated feature, %s", pfrom.DisconnectMsg());
+        pfrom.fDisconnect = true;
+        return;
+    }
+    holepunch::PunchMsg msg;
+    try {
+        vRecv >> msg;
+    } catch (const std::exception&) {
+        msg.role = 0xff; // marks it as malformed below
+    }
+    if (!vRecv.empty() || !msg.IsWellFormed()) {
+        LogDebug(BCLog::HOLEPUNCH, "malformed punch, %s", pfrom.DisconnectMsg());
+        pfrom.fDisconnect = true;
+        return;
+    }
+    const auto role{static_cast<holepunch::Role>(msg.role)};
+    const char* role_name{role == holepunch::Role::INITIATOR ? "initiator" : "responder"};
+    const auto& opts{m_connman.GetHolePunchOptions()};
+
+    // Does this punch answer a rendezvous we sent on this connection (R-4.4)?
+    const auto now{NodeClock::now()};
+    std::optional<CService> answered_target;
+    if (peer.m_holepunch_rendezvous_target && now - peer.m_holepunch_rendezvous_sent <= holepunch::COORD_TIMEOUT) {
+        answered_target = peer.m_holepunch_rendezvous_target;
+    }
+    peer.m_holepunch_rendezvous_target.reset();
+
+    std::string reject;
+    if (!opts.enabled) {
+        reject = "hole punching is off";
+    } else if (!opts.allow_local && !msg.peer.IsRoutable()) {
+        reject = "peer is not routable";
+    } else if (msg.peer.GetPort() == 0) {
+        reject = "peer has port 0";
+    } else if (IsBadPort(msg.peer.GetPort())) {
+        reject = "peer has a bad port";
+    } else if (IsLocal(msg.peer)) {
+        reject = "peer is our own address";
+    } else if (answered_target) {
+        if (role != holepunch::Role::INITIATOR) {
+            reject = "the answer to our rendezvous names us responder";
+        } else if (msg.peer != *answered_target) {
+            reject = strprintf("the answer to our rendezvous names %s, not the target %s", msg.peer.ToStringAddrPort(), answered_target->ToStringAddrPort());
+        }
+    } else if (role == holepunch::Role::RESPONDER) {
+        if (!(peer.m_holepunch_caps_sent & holepunch::CAP_ADVERTISED)) reject = "unsolicited punch without ADVERTISED on this connection";
+    } else {
+        reject = "unsolicited punch with initiator role"; // POOL_OK and HANDOFF_OK are not supported
+    }
+    if (reject.empty()) {
+        for (const Network net : {NET_IPV4, NET_IPV6}) {
+            const auto external{m_connman.HolePunchExternalAddress(net)};
+            if (!external) continue;
+            // A peer behind the same NAT shares our external address. On test networks
+            // everyone does, so only the exact endpoint counts there.
+            const bool same{opts.allow_local ? *external == msg.peer : static_cast<CNetAddr>(*external) == static_cast<CNetAddr>(msg.peer)};
+            if (same) reject = "peer is our own external address";
+        }
+    }
+    if (reject.empty()) {
+        if (role == holepunch::Role::RESPONDER && m_connman.GetNodeCount(ConnectionDirection::In) >= static_cast<size_t>(m_connman.GetMaxInbound())) {
+            reject = "no free inbound slot";
+        } else if (role == holepunch::Role::INITIATOR && m_connman.GetHolePunchOutboundCount() >= holepunch::HP_OUTBOUND_MAX) {
+            reject = "the hole punch slot is taken";
+        }
+    }
+    if (reject.empty()) {
+        if (const auto refused{m_connman.HolePunch(role, msg.peer)}) reject = *refused;
+    }
+    if (!reject.empty()) {
+        LogDebug(BCLog::HOLEPUNCH, "ignoring punch from peer=%d (%s with %s): %s\n", pfrom.GetId(), role_name, msg.peer.ToStringAddrPort(), reject);
+        return;
+    }
+    LogDebug(BCLog::HOLEPUNCH, "punch from peer=%d: session with %s started as %s%s\n", pfrom.GetId(), msg.peer.ToStringAddrPort(), role_name, answered_target ? " (answers our rendezvous)" : "");
+}
+
 void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string& msg_type, DataStream& vRecv,
                                      const NodeClock::time_point time_received,
                                      const std::atomic<bool>& interruptMsgProc)
@@ -4020,6 +4117,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
                 }
                 MakeAndPushFeature(pfrom, NetMsgFeature::HOLEPUNCH, holepunch::FeatureData{.caps = caps});
                 peer.m_holepunch_feature_sent = true;
+                peer.m_holepunch_caps_sent = caps;
                 LogDebug(BCLog::HOLEPUNCH, "sent feature with caps %s to peer=%d\n", util::Join(holepunch::CapNames(caps), "|"), pfrom.GetId());
             }
         }
@@ -4372,6 +4470,11 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             LogDebug(BCLog::PRIVBROADCAST, "Ignoring incoming message '%s', %s", msg_type, pfrom.LogPeer());
             return;
         }
+    }
+
+    if (msg_type == NetMsgType::PUNCH) {
+        ProcessPunch(pfrom, peer, vRecv);
+        return;
     }
 
     if (msg_type == NetMsgType::ADDR || msg_type == NetMsgType::ADDRV2) {

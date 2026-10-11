@@ -4,12 +4,23 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test TCP hole punching (-holepunch)."""
 
-from test_framework.messages import msg_feature
-from test_framework.p2p import P2PInterface
+import threading
+
+from test_framework.messages import (
+    CAddress,
+    msg_feature,
+    msg_punch,
+)
+from test_framework.p2p import (
+    EncryptedP2PState,
+    P2PInterface,
+)
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    MAX_NODES,
     assert_equal,
     holepunch_port,
+    p2p_port,
 )
 
 
@@ -23,29 +34,12 @@ def feature_data(caps, version=0):
     return version.to_bytes(1, "little") + caps.to_bytes(4, "little")
 
 
-class HolePunchPeer(P2PInterface):
-    """A test peer that announces hole punching capabilities and records the node's feature."""
-
-    def __init__(self, caps=None, raw_feature_data=None):
-        super().__init__()
-        self.caps = caps
-        self.raw_feature_data = raw_feature_data
-        self.holepunch_feature = None
-
-    def on_version(self, message):
-        # The feature has to go out after our version and before our verack, which
-        # super().on_version() sends.
-        if not self.p2p_connected_to_node:
-            self.send_version()
-        if self.raw_feature_data is not None:
-            self.send_without_ping(msg_feature(HOLEPUNCH_FEATURE_ID, self.raw_feature_data))
-        elif self.caps is not None:
-            self.send_without_ping(msg_feature(HOLEPUNCH_FEATURE_ID, feature_data(self.caps)))
-        super().on_version(message)
-
-    def on_feature(self, message):
-        if message.feature_id == HOLEPUNCH_FEATURE_ID:
-            self.holepunch_feature = message.feature_data
+def endpoint(ip, port):
+    addr = CAddress()
+    addr.net = CAddress.NET_IPV4
+    addr.ip = ip
+    addr.port = port
+    return addr
 
 
 class ReportingPeer(P2PInterface):
@@ -67,6 +61,43 @@ class ReportingPeer(P2PInterface):
             self.on_connection_send_msg.addrTo.ip = ip
             self.on_connection_send_msg.addrTo.port = port
         super().connection_made(transport)
+
+
+class HolePunchPeer(ReportingPeer):
+    """A test peer that announces hole punching capabilities and records the node's feature."""
+
+    def __init__(self, caps=None, raw_feature_data=None, report=None):
+        super().__init__(report=report)
+        self.caps = caps
+        self.raw_feature_data = raw_feature_data
+        self.holepunch_feature = None
+
+    def on_version(self, message):
+        # The feature has to go out after our version and before our verack, which
+        # super().on_version() sends.
+        if not self.p2p_connected_to_node:
+            self.send_version()
+        if self.raw_feature_data is not None:
+            self.send_without_ping(msg_feature(HOLEPUNCH_FEATURE_ID, self.raw_feature_data))
+        elif self.caps is not None:
+            self.send_without_ping(msg_feature(HOLEPUNCH_FEATURE_ID, feature_data(self.caps)))
+        super().on_version(message)
+
+    def on_feature(self, message):
+        if message.feature_id == HOLEPUNCH_FEATURE_ID:
+            self.holepunch_feature = message.feature_data
+
+
+class PunchInitiatorPeer(HolePunchPeer):
+    """A test peer at the other end of a punched connection, in the initiator
+    role: it accepts the node's TCP connection but speaks first, as the BIP 324
+    initiator, and sends version first."""
+
+    def peer_accept_connection(self, *args, net, **kwargs):
+        create = super().peer_accept_connection(*args, net=net, **kwargs)
+        self.v2_state = EncryptedP2PState(initiating=True, net=net)
+        self.p2p_connected_to_node = True
+        return create
 
 
 class HolePunchTest(BitcoinTestFramework):
@@ -177,11 +208,80 @@ class HolePunchTest(BitcoinTestFramework):
         assert "holepunch_caps" not in node.getpeerinfo()[-1]
 
         self.log.info("Truncated feature data disconnects the peer")
-        with node.assert_debug_log(["invalid hole punching feature data"]):
+        with node.assert_debug_log(["invalid hole punching feature data"], timeout=5):
             peer = node.add_p2p_connection(HolePunchPeer(raw_feature_data=b"\x00\x01"), wait_for_verack=False)
             peer.wait_for_disconnect()
 
         node.disconnect_p2ps()
+
+    def listen_for_punch(self, idx):
+        """Start a PunchInitiatorPeer listening where the node will punch to. Returns it and its port."""
+        peer = PunchInitiatorPeer()
+        listening = threading.Event()
+        peer.peer_accept_connection(
+            connect_cb=lambda address, port: listening.set(), connect_id=idx, net=self.chain,
+            timeout_factor=self.options.timeout_factor, supports_v2_p2p=True, reconnect=False)()
+        assert listening.wait(timeout=10 * self.options.timeout_factor)
+        return peer, p2p_port(MAX_NODES - idx)
+
+    def wait_for_punched_connection(self, peer):
+        peer.wait_for_connect()
+        peer.wait_until(lambda: peer.v2_state.tried_v2_handshake)
+        peer.wait_for_verack()
+        peer.sync_with_ping()
+
+    def test_punch_as_responder(self):
+        node = self.nodes[0]
+        punch_port = holepunch_port(0)
+        # On this connection the node announced ADVERTISED, so it accepts punch requests.
+        coordinator = node.add_outbound_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR), p2p_idx=0)
+        # A second reporting peer, so that the node knows its external address.
+        node.add_outbound_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR), p2p_idx=1)
+        assert_equal(self.external(node)["address"], f"127.0.0.1:{punch_port}")
+        listener, port = self.listen_for_punch(idx=5)
+
+        self.log.info("A punch as responder starts a session; the node connects from its punch port")
+        with node.assert_debug_log([f"session with 127.0.0.1:{port} started as responder"], timeout=5):
+            coordinator.send_without_ping(msg_punch(msg_punch.ROLE_RESPONDER, endpoint("127.0.0.1", port)))
+        self.wait_for_punched_connection(listener)
+        assert_equal(listener.dstport, punch_port)
+        punched = [p for p in node.getpeerinfo() if p["hole_punched"]]
+        assert_equal(len(punched), 1)
+        assert_equal(punched[0]["inbound"], True)
+        assert_equal(punched[0]["addr"], f"127.0.0.1:{port}")
+        assert_equal(punched[0]["transport_protocol_type"], "v2")
+        self.log.info("The punched peer negotiates the feature like any other")
+        assert_equal(listener.holepunch_feature, feature_data(CAP_COORDINATOR))
+
+        self.log.info("Punch requests that fail validation are ignored")
+        for punch, reason in [
+            (msg_punch(msg_punch.ROLE_INITIATOR, endpoint("127.0.0.1", 40000)), "unsolicited punch with initiator role"),
+            (msg_punch(msg_punch.ROLE_RESPONDER, endpoint("127.0.0.1", 0)), "peer has port 0"),
+            (msg_punch(msg_punch.ROLE_RESPONDER, endpoint("127.0.0.1", 6667)), "peer has a bad port"),
+            (msg_punch(msg_punch.ROLE_RESPONDER, endpoint("127.0.0.1", punch_port)), "peer is our own external address"),
+        ]:
+            with node.assert_debug_log(["ignoring punch from peer=", reason], timeout=5):
+                coordinator.send_and_ping(punch)
+
+        self.log.info("A punch as responder on a connection without ADVERTISED is ignored")
+        inbound = node.add_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR))
+        with node.assert_debug_log(["unsolicited punch without ADVERTISED"], timeout=5):
+            inbound.send_and_ping(msg_punch(msg_punch.ROLE_RESPONDER, endpoint("127.0.0.1", 40000)))
+
+        self.log.info("A malformed punch disconnects the peer")
+        with node.assert_debug_log(["malformed punch"], timeout=5):
+            inbound.send_without_ping(msg_punch(5, endpoint("127.0.0.1", 40000)))
+            inbound.wait_for_disconnect()
+
+        self.log.info("A punch without negotiated feature disconnects the peer")
+        plain = node.add_p2p_connection(P2PInterface())
+        with node.assert_debug_log(["punch without negotiated feature"], timeout=5):
+            plain.send_without_ping(msg_punch(msg_punch.ROLE_RESPONDER, endpoint("127.0.0.1", 40000)))
+            plain.wait_for_disconnect()
+
+        listener.peer_disconnect()
+        node.disconnect_p2ps()
+        self.wait_until(lambda: len(node.getpeerinfo()) == 0)
 
     def test_options(self):
         node = self.nodes[0]
@@ -204,6 +304,7 @@ class HolePunchTest(BitcoinTestFramework):
         self.test_outbound_from_punch_port()
         self.test_external_address()
         self.test_feature_negotiation()
+        self.test_punch_as_responder()
         self.test_options()
 
 
