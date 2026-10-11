@@ -1213,8 +1213,12 @@ public:
     void SetHolePunchCoordinationService(const CService& service) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
     /** Our coordination service, if it is up (R-12.1). */
     std::optional<CService> GetHolePunchCoordinationService() const EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
-    /** Whether an automatic outbound peer is in the same network group as `addr` (R-7.1). */
-    bool HasOutboundPeerInGroup(const CNetAddr& addr) const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+    /**
+     * Whether an automatic outbound peer is in the same network group as `addr` (R-7.1).
+     * A peer at exactly `except` does not count: the coordinator named in an announcement
+     * is in its own group, and an existing connection to it must not rule it out.
+     */
+    bool HasOutboundPeerInGroup(const CNetAddr& addr, const std::optional<CService>& except = std::nullopt) const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
     // test only
     void SetCaptureMessages(bool cap) { m_capture_messages = cap; }

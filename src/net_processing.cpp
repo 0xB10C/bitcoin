@@ -4253,11 +4253,12 @@ void PeerManagerImpl::HolePunchConnect()
     const auto taken{m_connman.HolePunchTakeAnnouncement([&](const holepunch::Announcement& a) {
         // With an external address in the target's family (R-7.1), not to ourselves,
         // within the outbound diversity rules with the coordinator and target as one
-        // group, and through a coordinator we are connected to or can reach (R-7.3).
+        // group, where an existing connection to the coordinator itself does not count,
+        // and through a coordinator we are connected to or can reach (R-7.3).
         const auto external{m_connman.HolePunchExternalAddress(a.target.IsIPv4() ? NET_IPV4 : NET_IPV6)};
         if (!external) return false;
         if (opts.allow_local ? *external == a.target : static_cast<CNetAddr>(*external) == static_cast<CNetAddr>(a.target)) return false;
-        if (!opts.allow_local && (m_connman.HasOutboundPeerInGroup(a.target) || m_connman.HasOutboundPeerInGroup(a.coordinator))) return false;
+        if (!opts.allow_local && (m_connman.HasOutboundPeerInGroup(a.target, a.coordinator) || m_connman.HasOutboundPeerInGroup(a.coordinator, a.coordinator))) return false;
         return coordinators.contains(a.coordinator) || CanOpenHolePunchCoordination(a.coordinator);
     })};
     if (!taken) return;

@@ -4066,13 +4066,14 @@ std::optional<holepunch::Announcement> CConnman::HolePunchTakeAnnouncement(const
     return m_holepunch_announcements.Take(NodeClock::now(), eligible, m_holepunch_rng);
 }
 
-bool CConnman::HasOutboundPeerInGroup(const CNetAddr& addr) const
+bool CConnman::HasOutboundPeerInGroup(const CNetAddr& addr, const std::optional<CService>& except) const
 {
     const auto group{m_netgroupman.GetGroup(addr)};
     LOCK(m_nodes_mutex);
     for (const CNode* pnode : m_nodes) {
         if (pnode->IsInboundConn() || pnode->m_hole_punched || pnode->IsHolePunchCoordConn() || pnode->fDisconnect) continue;
         if (!pnode->IsFullOutboundConn() && !pnode->IsBlockOnlyConn() && !pnode->IsManualConn()) continue;
+        if (except && pnode->addr == *except) continue;
         if (m_netgroupman.GetGroup(pnode->addr) == group) return true;
     }
     return false;
