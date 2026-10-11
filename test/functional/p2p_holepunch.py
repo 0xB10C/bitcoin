@@ -404,6 +404,44 @@ class HolePunchTest(BitcoinTestFramework):
         node.disconnect_p2ps()
         self.wait_until(lambda: len(node.getpeerinfo()) == 0)
 
+    def test_own_coordinator(self):
+        node = self.nodes[0]
+        coord_port = holepunch_coord_port(0)
+        # Two reporting peers, so that the node knows its external address.
+        node.add_outbound_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR), p2p_idx=0)
+        node.add_outbound_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR), p2p_idx=1)
+        external = endpoint_from_str(self.external(node)["address"])
+        listener, port = self.listen_for_punch(idx=9)
+
+        self.log.info("A rendezvous on the coordination bind is answered by the node itself")
+        requester = node.add_p2p_connection(CoordinationPeer(caps=0), dstport=coord_port)
+        with node.assert_debug_log([f"session with 127.0.0.1:{port} started as responder", "punch sent, disconnecting"], timeout=5):
+            requester.send_without_ping(msg_rendezvous(external, endpoint("127.0.0.1", port)))
+            requester.wait_for_disconnect()
+        punch = requester.last_message["punch"]
+        assert_equal(punch.role, msg_punch.ROLE_INITIATOR)
+        assert_equal((punch.peer.ip, punch.peer.port), (external.ip, external.port))
+        self.wait_for_punched_connection(listener)
+        punched = [p for p in node.getpeerinfo() if p["hole_punched"]]
+        assert_equal(len(punched), 1)
+        assert_equal(punched[0]["inbound"], True)
+        assert_equal(punched[0]["addr"], f"127.0.0.1:{port}")
+
+        self.log.info("Rendezvous that fail validation are ignored")
+        for target, who, reason in [
+            (endpoint("127.0.0.1", 40000), endpoint("127.0.0.1", 40001), "target 127.0.0.1:40000 is not our external address"),
+            (external, endpoint("127.0.0.1", 0), "peer has port 0"),
+            (external, external, "peer is our own external address"),
+            (external, endpoint("127.0.0.1", port), "a session with this address was started recently"),
+        ]:
+            requester = node.add_p2p_connection(CoordinationPeer(caps=0), dstport=coord_port)
+            with node.assert_debug_log(["ignoring rendezvous from peer=", reason], timeout=5):
+                requester.send_and_ping(msg_rendezvous(target, who))
+            requester.peer_disconnect()
+        listener.peer_disconnect()
+        node.disconnect_p2ps()
+        self.wait_until(lambda: len(node.getpeerinfo()) == 0)
+
     def test_coordinator(self):
         node = self.nodes[0]
 
@@ -591,6 +629,7 @@ class HolePunchTest(BitcoinTestFramework):
         self.test_coordination_bind()
         self.test_feature_negotiation()
         self.test_punch_as_responder()
+        self.test_own_coordinator()
         self.test_coordinator()
         self.test_announcement_cache()
         self.test_relay()
