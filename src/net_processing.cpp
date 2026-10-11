@@ -59,6 +59,7 @@
 #include <util/check.h>
 #include <util/hasher.h>
 #include <util/strencodings.h>
+#include <util/string.h>
 #include <util/time.h>
 #include <util/tokenbucket.h>
 #include <util/trace.h>
@@ -377,6 +378,15 @@ struct Peer {
     std::atomic_bool m_wants_addrv2{false};
     /** Whether this peer has already sent us a getaddr message. */
     bool m_getaddr_recvd GUARDED_BY(NetEventsInterface::g_msgproc_mutex){false};
+
+    /** Whether we sent the hole punching feature to this peer. */
+    bool m_holepunch_feature_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){false};
+    /** Whether the peer sent us the hole punching feature. */
+    std::atomic_bool m_holepunch_feature_received{false};
+    /** The feature data version the peer sent. */
+    std::atomic<uint8_t> m_holepunch_version{0};
+    /** The capabilities the peer announced in its feature data. */
+    std::atomic<uint32_t> m_holepunch_caps{0};
     /** Number of addresses that can be processed from this peer. Start at 1 to
      *  permit self-announcement. */
     double m_addr_token_bucket GUARDED_BY(NetEventsInterface::g_msgproc_mutex){1.0};
@@ -1953,6 +1963,7 @@ bool PeerManagerImpl::GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) c
     stats.m_addr_processed = peer->m_addr_processed.load();
     stats.m_addr_rate_limited = peer->m_addr_rate_limited.load();
     stats.m_addr_relay_enabled = peer->m_addr_relay_enabled.load();
+    if (peer->m_holepunch_feature_received) stats.m_holepunch_caps = peer->m_holepunch_caps.load();
     {
         LOCK(peer->m_headers_sync_mutex);
         if (peer->m_headers_sync) {
@@ -3999,6 +4010,18 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         if (greatest_common_version >= FEATURE_VERSION) {
             // announce supported features
             // MakeAndPushFeature(pfrom, NetMsgFeature::FOO, uint32_t{1});
+            if (const auto& opts{m_connman.GetHolePunchOptions()}; opts.enabled) {
+                // Any node with hole punching on acts as coordinator. On a connection we
+                // opened from the punch port, the peer observes our external address, and
+                // we accept being advertised through it (R-3.1).
+                uint32_t caps{holepunch::CAP_COORDINATOR};
+                if (!pfrom.IsInboundConn() && pfrom.addrBind.GetPort() == opts.port) {
+                    caps |= holepunch::CAP_ADVERTISED | holepunch::CAP_PUNCHPORT;
+                }
+                MakeAndPushFeature(pfrom, NetMsgFeature::HOLEPUNCH, holepunch::FeatureData{.caps = caps});
+                peer.m_holepunch_feature_sent = true;
+                LogDebug(BCLog::HOLEPUNCH, "sent feature with caps %s to peer=%d\n", util::Join(holepunch::CapNames(caps), "|"), pfrom.GetId());
+            }
         }
 
         // If we have too many tx-relaying inbound peers, attempt to evict an existing one.
@@ -4258,6 +4281,25 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         //     ...
         //     return;
         // }
+
+        if (feature_id == NetMsgFeature::HOLEPUNCH) {
+            holepunch::FeatureData data;
+            try {
+                feature_data >> data;
+            } catch (const std::exception&) {
+                LogDebug(BCLog::HOLEPUNCH, "invalid hole punching feature data, %s", pfrom.DisconnectMsg());
+                pfrom.fDisconnect = true;
+                return;
+            }
+            // Bytes after the known fields may belong to a future version and are ignored.
+            peer.m_holepunch_version = data.version;
+            peer.m_holepunch_caps = data.caps;
+            peer.m_holepunch_feature_received = true;
+            LogDebug(BCLog::HOLEPUNCH, "peer=%d supports hole punching version %d with caps %s%s\n",
+                     pfrom.GetId(), data.version, util::Join(holepunch::CapNames(data.caps), "|"),
+                     m_connman.GetHolePunchOptions().enabled ? "" : " (hole punching is off here)");
+            return;
+        }
 
         // ignore unknown feature_id
         LogDebug(BCLog::NET, "unknown feature advertised: %s", SanitizeString(feature_id));

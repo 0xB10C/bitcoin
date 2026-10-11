@@ -4,12 +4,48 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test TCP hole punching (-holepunch)."""
 
+from test_framework.messages import msg_feature
 from test_framework.p2p import P2PInterface
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
     holepunch_port,
 )
+
+
+HOLEPUNCH_FEATURE_ID = "https://delvingbitcoin.org/t/2497"
+CAP_COORDINATOR = 1 << 0
+CAP_ADVERTISED = 1 << 1
+CAP_PUNCHPORT = 1 << 4
+
+
+def feature_data(caps, version=0):
+    return version.to_bytes(1, "little") + caps.to_bytes(4, "little")
+
+
+class HolePunchPeer(P2PInterface):
+    """A test peer that announces hole punching capabilities and records the node's feature."""
+
+    def __init__(self, caps=None, raw_feature_data=None):
+        super().__init__()
+        self.caps = caps
+        self.raw_feature_data = raw_feature_data
+        self.holepunch_feature = None
+
+    def on_version(self, message):
+        # The feature has to go out after our version and before our verack, which
+        # super().on_version() sends.
+        if not self.p2p_connected_to_node:
+            self.send_version()
+        if self.raw_feature_data is not None:
+            self.send_without_ping(msg_feature(HOLEPUNCH_FEATURE_ID, self.raw_feature_data))
+        elif self.caps is not None:
+            self.send_without_ping(msg_feature(HOLEPUNCH_FEATURE_ID, feature_data(self.caps)))
+        super().on_version(message)
+
+    def on_feature(self, message):
+        if message.feature_id == HOLEPUNCH_FEATURE_ID:
+            self.holepunch_feature = message.feature_data
 
 
 class ReportingPeer(P2PInterface):
@@ -113,6 +149,40 @@ class HolePunchTest(BitcoinTestFramework):
         node.disconnect_p2ps()
         self.wait_until(lambda: self.external(node)["reports"] == 0)
 
+    def test_feature_negotiation(self):
+        node = self.nodes[0]
+
+        self.log.info("The node announces COORDINATOR to inbound peers")
+        peer = node.add_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR))
+        assert_equal(peer.holepunch_feature, feature_data(CAP_COORDINATOR))
+        self.log.info("A peer's capabilities show up in getpeerinfo")
+        assert_equal(node.getpeerinfo()[-1]["holepunch_caps"], ["COORDINATOR"])
+
+        self.log.info("The node announces COORDINATOR, ADVERTISED and PUNCHPORT on outbound connections from the punch port")
+        peer = node.add_outbound_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR | CAP_PUNCHPORT), p2p_idx=0)
+        assert_equal(peer.holepunch_feature, feature_data(CAP_COORDINATOR | CAP_ADVERTISED | CAP_PUNCHPORT))
+        outbound = [p for p in node.getpeerinfo() if not p["inbound"]]
+        assert_equal(outbound[0]["holepunch_caps"], ["COORDINATOR", "PUNCHPORT"])
+
+        self.log.info("Unknown capability bits are ignored")
+        node.add_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR | (1 << 31)))
+        assert_equal(node.getpeerinfo()[-1]["holepunch_caps"], ["COORDINATOR"])
+
+        self.log.info("Bytes after the known fields are ignored (future versions)")
+        node.add_p2p_connection(HolePunchPeer(raw_feature_data=feature_data(CAP_COORDINATOR) + b"\x00\x01"))
+        assert_equal(node.getpeerinfo()[-1]["holepunch_caps"], ["COORDINATOR"])
+
+        self.log.info("A peer without the feature has no holepunch_caps")
+        node.add_p2p_connection(P2PInterface())
+        assert "holepunch_caps" not in node.getpeerinfo()[-1]
+
+        self.log.info("Truncated feature data disconnects the peer")
+        with node.assert_debug_log(["invalid hole punching feature data"]):
+            peer = node.add_p2p_connection(HolePunchPeer(raw_feature_data=b"\x00\x01"), wait_for_verack=False)
+            peer.wait_for_disconnect()
+
+        node.disconnect_p2ps()
+
     def test_options(self):
         node = self.nodes[0]
         self.log.info("-holepunch needs -v2transport")
@@ -122,14 +192,18 @@ class HolePunchTest(BitcoinTestFramework):
         node.assert_start_raises_init_error(
             ["-holepunch=1", "-v2transport=1", "-holepunchport=70000"],
             "Error: Invalid port specified in -holepunchport: '70000'")
-        self.log.info("Without -holepunch, outbound connections use an ephemeral port")
+        self.log.info("Without -holepunch, outbound connections use an ephemeral port and no feature is sent")
         self.start_node(0, extra_args=["-v2transport=1"])
-        peer = node.add_outbound_p2p_connection(P2PInterface(), p2p_idx=0)
+        peer = node.add_outbound_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR), p2p_idx=0)
         assert peer.dstport != holepunch_port(0)
+        assert_equal(peer.holepunch_feature, None)
+        self.log.info("A peer's feature is still recorded")
+        assert_equal(node.getpeerinfo()[-1]["holepunch_caps"], ["COORDINATOR"])
 
     def run_test(self):
         self.test_outbound_from_punch_port()
         self.test_external_address()
+        self.test_feature_negotiation()
         self.test_options()
 
 

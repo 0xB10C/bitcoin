@@ -196,6 +196,10 @@ static RPCMethod getpeerinfo()
                         {RPCResult::Type::NUM, "n", "The heights of blocks we're currently asking from this peer"},
                     }},
                     {RPCResult::Type::BOOL, "addr_relay_enabled", "Whether we participate in address relay with this peer"},
+                    {RPCResult::Type::ARR, "holepunch_caps", /*optional=*/true, "Hole punching capabilities the peer announced, if it supports hole punching",
+                    {
+                        {RPCResult::Type::STR, "capability", "COORDINATOR, ADVERTISED, POOL_OK, HANDOFF_OK or PUNCHPORT"},
+                    }},
                     {RPCResult::Type::NUM, "addr_processed", "The total number of addresses processed, excluding those dropped due to rate limiting"},
                     {RPCResult::Type::NUM, "addr_rate_limited", "The total number of addresses dropped due to rate limiting"},
                     {RPCResult::Type::ARR, "permissions", "Any special permissions that have been granted to this peer",
@@ -304,6 +308,11 @@ static RPCMethod getpeerinfo()
         }
         obj.pushKV("inflight", std::move(heights));
         obj.pushKV("addr_relay_enabled", statestats.m_addr_relay_enabled);
+        if (statestats.m_holepunch_caps) {
+            UniValue caps(UniValue::VARR);
+            for (const auto& name : holepunch::CapNames(*statestats.m_holepunch_caps)) caps.push_back(name);
+            obj.pushKV("holepunch_caps", std::move(caps));
+        }
         obj.pushKV("addr_processed", statestats.m_addr_processed);
         obj.pushKV("addr_rate_limited", statestats.m_addr_rate_limited);
         UniValue permissions(UniValue::VARR);

@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <string>
 #include <vector>
 
 /**
@@ -70,6 +71,37 @@ struct PunchMsg {
 
     /** Known role and well formed endpoint (R-4.2). */
     bool IsWellFormed() const;
+};
+
+/** Version of the protocol carried in the feature data (R-3.1, R-3.2). */
+inline constexpr uint8_t FEATURE_DATA_VERSION{0};
+
+/** Capability bits in the feature data (R-3.1). Unknown bits are ignored. */
+enum Caps : uint32_t {
+    /** The sender acts as coordinator (Profile A). */
+    CAP_COORDINATOR = 1 << 0,
+    /** The sender is advertised through the receiver and accepts `punch` as responder. */
+    CAP_ADVERTISED = 1 << 1,
+    /** The sender may be paired with another pool member by the receiver. */
+    CAP_POOL_OK = 1 << 2,
+    /** The sender accepts a handoff instead of eviction on this connection. */
+    CAP_HANDOFF_OK = 1 << 3,
+    /** This connection is from the sender's punch port: the endpoint the receiver observes is the sender's external address. */
+    CAP_PUNCHPORT = 1 << 4,
+};
+
+/** Names of the set capability bits, for logs and RPC. */
+std::vector<std::string> CapNames(uint32_t caps);
+
+/** Payload of the BIP 434 feature message for hole punching. */
+struct FeatureData {
+    uint8_t version{FEATURE_DATA_VERSION};
+    uint32_t caps{0};
+
+    SERIALIZE_METHODS(FeatureData, obj)
+    {
+        READWRITE(obj.version, obj.caps);
+    }
 };
 
 /** Settings, filled in from the command line options. */

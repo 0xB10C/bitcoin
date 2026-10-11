@@ -328,6 +328,8 @@ inline constexpr size_t MAX_FEATUREID_LENGTH{80};
 inline constexpr size_t MAX_FEATUREDATA_LENGTH{512};
 
 namespace NetMsgFeature {
+/** TCP hole punching (draft BIP); the id becomes "BIP<n>" once a number is assigned. */
+inline constexpr const char* HOLEPUNCH{"https://delvingbitcoin.org/t/2497"};
 //inline constexpr std::string_view FOO{"BIP-FOO"};
 }
 

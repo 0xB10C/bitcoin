@@ -20,6 +20,17 @@ static Network Family(const CNetAddr& addr)
     return NET_UNROUTABLE;
 }
 
+std::vector<std::string> CapNames(uint32_t caps)
+{
+    std::vector<std::string> names;
+    if (caps & CAP_COORDINATOR) names.push_back("COORDINATOR");
+    if (caps & CAP_ADVERTISED) names.push_back("ADVERTISED");
+    if (caps & CAP_POOL_OK) names.push_back("POOL_OK");
+    if (caps & CAP_HANDOFF_OK) names.push_back("HANDOFF_OK");
+    if (caps & CAP_PUNCHPORT) names.push_back("PUNCHPORT");
+    return names;
+}
+
 bool IsWellFormedEndpoint(const CService& endpoint)
 {
     // Unknown BIP 155 network ids and IPv4-mapped IPv6 addresses (R-1.4) both
