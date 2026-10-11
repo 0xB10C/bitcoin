@@ -12,6 +12,27 @@ from test_framework.util import (
 )
 
 
+class ReportingPeer(P2PInterface):
+    """A test peer that reports the node's address in version.addr_recv.
+
+    By default it reports what it sees on the socket, which is what a real
+    peer does. A different report can be given to play a lying peer."""
+
+    def __init__(self, report=None):
+        super().__init__()
+        self.report = report
+
+    def connection_made(self, transport):
+        # The version message is prepared before the socket exists; fill in the
+        # node's address as seen from this side before it is sent.
+        them = transport.get_extra_info("socket").getpeername()
+        ip, port = self.report or (them[0], them[1])
+        if self.on_connection_send_msg is not None:
+            self.on_connection_send_msg.addrTo.ip = ip
+            self.on_connection_send_msg.addrTo.port = port
+        super().connection_made(transport)
+
+
 class HolePunchTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
@@ -46,6 +67,52 @@ class HolePunchTest(BitcoinTestFramework):
 
         node.disconnect_p2ps()
 
+    def external(self, node, network="ipv4"):
+        return next(e for e in node.getholepunchinfo()["external"] if e["network"] == network)
+
+    def test_external_address(self):
+        node = self.nodes[0]
+        punch_port = holepunch_port(0)
+        info = node.getholepunchinfo()
+        assert_equal(info["enabled"], True)
+        assert_equal(info["port"], punch_port)
+        assert_equal(self.external(node)["reports"], 0)
+        assert "address" not in self.external(node)
+
+        self.log.info("One peer reporting our address is not enough")
+        node.add_outbound_p2p_connection(ReportingPeer(), p2p_idx=0)
+        assert_equal(self.external(node)["reports"], 1)
+        assert "address" not in self.external(node)
+
+        self.log.info("Two peers agreeing on our address yield the external address")
+        node.add_outbound_p2p_connection(ReportingPeer(), p2p_idx=1)
+        assert_equal(self.external(node)["address"], f"127.0.0.1:{punch_port}")
+        assert_equal(self.external(node)["reporters"], 2)
+
+        self.log.info("A single peer reporting a different port is ignored")
+        liar1 = node.add_outbound_p2p_connection(ReportingPeer(report=("127.0.0.1", 40001)), p2p_idx=2)
+        assert_equal(self.external(node)["address"], f"127.0.0.1:{punch_port}")
+        assert_equal(self.external(node)["reports"], 3)
+        assert_equal(self.external(node)["conflicting"], False)
+
+        self.log.info("Two peers agreeing on a different port rule out an external address")
+        liar2 = node.add_outbound_p2p_connection(ReportingPeer(report=("127.0.0.1", 40001)), p2p_idx=3)
+        assert "address" not in self.external(node)
+        assert_equal(self.external(node)["conflicting"], True)
+
+        self.log.info("Reports of disconnected peers are dropped")
+        liar1.peer_disconnect()
+        liar2.peer_disconnect()
+        self.wait_until(lambda: self.external(node)["reports"] == 2)
+        assert_equal(self.external(node)["address"], f"127.0.0.1:{punch_port}")
+
+        self.log.info("Reports from inbound peers do not count")
+        node.add_p2p_connection(ReportingPeer(report=("127.0.0.1", 40001)))
+        assert_equal(self.external(node)["reports"], 2)
+
+        node.disconnect_p2ps()
+        self.wait_until(lambda: self.external(node)["reports"] == 0)
+
     def test_options(self):
         node = self.nodes[0]
         self.log.info("-holepunch needs -v2transport")
@@ -62,6 +129,7 @@ class HolePunchTest(BitcoinTestFramework):
 
     def run_test(self):
         self.test_outbound_from_punch_port()
+        self.test_external_address()
         self.test_options()
 
 

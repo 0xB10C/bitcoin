@@ -1158,9 +1158,24 @@ public:
         whitelist_relay = connOptions.whitelist_relay;
         m_capture_messages = connOptions.m_capture_messages;
         m_holepunch_opts = connOptions.m_holepunch;
+        if (m_holepunch_opts.enabled) {
+            m_holepunch_tracker = std::make_unique<holepunch::ExternalAddressTracker>(m_holepunch_opts.allow_local);
+        }
     }
 
     const holepunch::Options& GetHolePunchOptions() const { return m_holepunch_opts; }
+
+    /**
+     * Record what `node` reports as our address and port in version.addr_recv.
+     * Only outbound connections made from the punch port count (hole punching).
+     */
+    void HolePunchReport(const CNode& node, const CService& reported);
+    /** Forget the report of a disconnected peer. */
+    void HolePunchForgetPeer(NodeId id);
+    /** Our external address and port for hole punching in `net` (NET_IPV4 or NET_IPV6), if known. */
+    std::optional<CService> HolePunchExternalAddress(Network net) const;
+    /** Details about the external address for `net`; empty when hole punching is off. */
+    std::optional<holepunch::ExternalAddressTracker::Info> HolePunchExternalAddressInfo(Network net) const;
 
     // test only
     void SetCaptureMessages(bool cap) { m_capture_messages = cap; }
@@ -1808,6 +1823,7 @@ private:
     std::vector<CService> m_onion_binds;
 
     holepunch::Options m_holepunch_opts;
+    std::unique_ptr<holepunch::ExternalAddressTracker> m_holepunch_tracker;
 
     /**
      * The local address to connect from when hole punching is enabled and the

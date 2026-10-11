@@ -3832,6 +3832,45 @@ CConnman::~CConnman()
     Stop();
 }
 
+void CConnman::HolePunchReport(const CNode& node, const CService& reported)
+{
+    if (!m_holepunch_tracker) return;
+    // Reports are meaningful only from peers we reached from the punch port without
+    // a proxy (R-2.1). A proxied connection has an ephemeral local port, so checking
+    // the local port covers both conditions.
+    if (node.IsInboundConn() || node.addrBind.GetPort() != m_holepunch_opts.port) return;
+    if (!m_holepunch_tracker->AddReport(node.GetId(), m_netgroupman.GetGroup(node.addr), reported)) {
+        LogDebug(BCLog::HOLEPUNCH, "ignoring unusable address report %s from peer=%d\n", reported.ToStringAddrPort(), node.GetId());
+        return;
+    }
+    for (const Network net : {NET_IPV4, NET_IPV6}) {
+        const auto info{m_holepunch_tracker->GetInfo(net)};
+        if (info.address) {
+            LogDebug(BCLog::HOLEPUNCH, "external address for %s is %s (%d reporting peers)\n", GetNetworkName(net), info.address->ToStringAddrPort(), info.reporters);
+        } else if (info.conflicting) {
+            LogDebug(BCLog::HOLEPUNCH, "no external address for %s: peers disagree, NAT mapping is not endpoint-independent\n", GetNetworkName(net));
+        }
+    }
+}
+
+void CConnman::HolePunchForgetPeer(NodeId id)
+{
+    if (!m_holepunch_tracker) return;
+    m_holepunch_tracker->RemovePeer(id);
+}
+
+std::optional<CService> CConnman::HolePunchExternalAddress(Network net) const
+{
+    if (!m_holepunch_tracker) return std::nullopt;
+    return m_holepunch_tracker->Get(net);
+}
+
+std::optional<holepunch::ExternalAddressTracker::Info> CConnman::HolePunchExternalAddressInfo(Network net) const
+{
+    if (!m_holepunch_tracker) return std::nullopt;
+    return m_holepunch_tracker->GetInfo(net);
+}
+
 std::optional<CService> CConnman::HolePunchBindAddress(const CService& target) const
 {
     if (!m_holepunch_opts.enabled) return std::nullopt;

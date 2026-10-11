@@ -1789,6 +1789,7 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
         PeerRef peer = RemovePeer(nodeid);
         assert(peer != nullptr);
         m_wtxid_relay_peers -= peer->m_wtxid_relay;
+        m_connman.HolePunchForgetPeer(nodeid);
         assert(m_wtxid_relay_peers >= 0);
     }
     CNodeState *state = State(nodeid);
@@ -3926,6 +3927,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         pfrom.m_has_all_wanted_services = HasAllDesirableServiceFlags(nServices);
         peer.m_their_services = nServices;
         pfrom.SetAddrLocal(addrMe);
+        m_connman.HolePunchReport(pfrom, addrMe);
         {
             LOCK(pfrom.m_subver_mutex);
             pfrom.cleanSubVer = cleanSubVer;
