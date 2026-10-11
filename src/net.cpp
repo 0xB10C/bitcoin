@@ -3944,6 +3944,40 @@ int CConnman::GetHolePunchOutboundCount() const
     return count;
 }
 
+std::optional<holepunch::Announcement> CConnman::HolePunchAddAnnouncement(NodeId from, const CAddress& element)
+{
+    if (!m_holepunch_opts.enabled) return std::nullopt;
+    const auto added{m_holepunch_announcements.Add(from, element, NodeClock::now(), m_holepunch_opts.allow_local)};
+    if (added) {
+        LogDebug(BCLog::HOLEPUNCH, "announcement from peer=%d: %s via coordinator %s\n", from, added->target.ToStringAddrPort(), added->coordinator.ToStringAddrPort());
+    } else {
+        LogDebug(BCLog::HOLEPUNCH, "ignoring announcement %s from peer=%d\n", element.ToStringAddrPort(), from);
+    }
+    return added;
+}
+
+std::vector<holepunch::Announcement> CConnman::GetHolePunchAnnouncements() const
+{
+    return m_holepunch_announcements.Get(NodeClock::now());
+}
+
+std::optional<holepunch::Announcement> CConnman::HolePunchTakeAnnouncement(const std::function<bool(const holepunch::Announcement&)>& eligible)
+{
+    return m_holepunch_announcements.Take(NodeClock::now(), eligible, m_holepunch_rng);
+}
+
+bool CConnman::HasOutboundPeerInGroup(const CNetAddr& addr) const
+{
+    const auto group{m_netgroupman.GetGroup(addr)};
+    LOCK(m_nodes_mutex);
+    for (const CNode* pnode : m_nodes) {
+        if (pnode->IsInboundConn() || pnode->m_hole_punched || pnode->fDisconnect) continue;
+        if (!pnode->IsFullOutboundConn() && !pnode->IsBlockOnlyConn() && !pnode->IsManualConn()) continue;
+        if (m_netgroupman.GetGroup(pnode->addr) == group) return true;
+    }
+    return false;
+}
+
 void CConnman::HolePunchReport(const CNode& node, const CService& reported)
 {
     if (!m_holepunch_tracker) return;

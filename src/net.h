@@ -1188,6 +1188,13 @@ public:
     std::vector<holepunch::SessionManager::SessionInfo> GetHolePunchSessions() const;
     /** Number of hole-punched outbound peers. */
     int GetHolePunchOutboundCount() const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+    /** Put a received HOLEPUNCH address element into the announcement cache (R-6.2). */
+    std::optional<holepunch::Announcement> HolePunchAddAnnouncement(NodeId from, const CAddress& element);
+    std::vector<holepunch::Announcement> GetHolePunchAnnouncements() const;
+    /** Remove and return a random eligible announcement, for one coordination attempt (R-7.2). */
+    std::optional<holepunch::Announcement> HolePunchTakeAnnouncement(const std::function<bool(const holepunch::Announcement&)>& eligible);
+    /** Whether an automatic outbound peer is in the same network group as `addr` (R-7.1). */
+    bool HasOutboundPeerInGroup(const CNetAddr& addr) const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
     // test only
     void SetCaptureMessages(bool cap) { m_capture_messages = cap; }
@@ -1851,6 +1858,8 @@ private:
     holepunch::Options m_holepunch_opts;
     std::unique_ptr<holepunch::ExternalAddressTracker> m_holepunch_tracker;
     std::unique_ptr<holepunch::SessionManager> m_holepunch_sessions;
+    holepunch::AnnouncementCache m_holepunch_announcements;
+    FastRandomContext m_holepunch_rng;
 
     /**
      * The local address to connect from when hole punching is enabled and the

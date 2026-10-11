@@ -1372,6 +1372,16 @@ static RPCMethod getholepunchinfo()
                                 {RPCResult::Type::BOOL, "conflicting", "Whether peers disagree in a way that rules out an external address (NAT mapping not endpoint-independent)"},
                             }},
                     }},
+                {RPCResult::Type::ARR, "announcements", /*optional=*/true, "Cached announcements of nodes reachable by hole punching",
+                    {
+                        {RPCResult::Type::OBJ, "", "",
+                            {
+                                {RPCResult::Type::STR, "target", "(ip:port) The announced node's endpoint"},
+                                {RPCResult::Type::STR, "coordinator", "(address:port) The coordinator to ask for a rendezvous"},
+                                {RPCResult::Type::NUM_TIME, "time", "The announcement's time (seconds since epoch)"},
+                                {RPCResult::Type::NUM, "from", "The id of the peer the announcement came from"},
+                            }},
+                    }},
                 {RPCResult::Type::ARR, "sessions", /*optional=*/true, "Punch sessions in progress",
                     {
                         {RPCResult::Type::OBJ, "", "",
@@ -1410,6 +1420,16 @@ static RPCMethod getholepunchinfo()
                 external.push_back(std::move(o));
             }
             obj.pushKV("external", std::move(external));
+            UniValue announcements(UniValue::VARR);
+            for (const auto& a : connman.GetHolePunchAnnouncements()) {
+                UniValue o(UniValue::VOBJ);
+                o.pushKV("target", a.target.ToStringAddrPort());
+                o.pushKV("coordinator", a.coordinator.ToStringAddrPort());
+                o.pushKV("time", TicksSinceEpoch<std::chrono::seconds>(a.time));
+                o.pushKV("from", a.from);
+                announcements.push_back(std::move(o));
+            }
+            obj.pushKV("announcements", std::move(announcements));
             UniValue sessions(UniValue::VARR);
             const auto now{NodeClock::now()};
             for (const auto& session : connman.GetHolePunchSessions()) {
