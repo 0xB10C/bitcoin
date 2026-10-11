@@ -587,16 +587,23 @@ static void LogConnectFailure(bool manual_connection, util::ConstevalFormatStrin
     }
 }
 
+/**
+ * @param[out] connect_error If not null, receives the error code of a failed connect
+ * (0 on success or when the failure was not a connect error).
+ */
 static bool ConnectToSocket(const Sock& sock,
                             struct sockaddr* sockaddr,
                             socklen_t len,
                             const std::string& dest_str,
                             bool manual_connection,
-                            std::chrono::milliseconds timeout)
+                            std::chrono::milliseconds timeout,
+                            int* connect_error = nullptr)
 {
+    if (connect_error) *connect_error = 0;
     // Connect to `sockaddr` using `sock`.
     if (sock.Connect(sockaddr, len) == SOCKET_ERROR) {
         int nErr = WSAGetLastError();
+        if (connect_error) *connect_error = nErr;
         // WSAEINVAL is here because some legacy version of winsock uses it
         if (nErr == WSAEINPROGRESS || nErr == WSAEWOULDBLOCK || nErr == WSAEINVAL)
         {
@@ -627,12 +634,14 @@ static bool ConnectToSocket(const Sock& sock,
                 return false;
             }
             if (sockerr != 0) {
+                if (connect_error) *connect_error = sockerr;
                 LogConnectFailure(manual_connection,
                                   "connect() to %s failed after wait: %s",
                                   dest_str,
                                   NetworkErrorString(sockerr));
                 return false;
             }
+            if (connect_error) *connect_error = 0;
         }
 #ifdef WIN32
         else if (WSAGetLastError() != WSAEISCONN)
@@ -652,13 +661,50 @@ std::unique_ptr<Sock> ConnectDirectly(const CService& dest, bool manual_connecti
     return ConnectDirectly(dest, manual_connection, std::chrono::milliseconds{nConnectTimeout});
 }
 
-std::unique_ptr<Sock> ConnectDirectly(const CService& dest,
-                                      bool manual_connection,
-                                      std::chrono::milliseconds timeout)
+bool BindToSharedPort(const Sock& sock, const CService& local)
 {
+    const int one{1};
+    if (sock.SetSockOpt(SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) == SOCKET_ERROR) {
+        LogDebug(BCLog::NET, "Cannot set SO_REUSEADDR for binding to %s: %s", local.ToStringAddrPort(), NetworkErrorString(WSAGetLastError()));
+        return false;
+    }
+#ifdef SO_REUSEPORT
+    if (sock.SetSockOpt(SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) == SOCKET_ERROR) {
+        LogDebug(BCLog::NET, "Cannot set SO_REUSEPORT for binding to %s: %s", local.ToStringAddrPort(), NetworkErrorString(WSAGetLastError()));
+        return false;
+    }
+#endif
+    struct sockaddr_storage sockaddr;
+    socklen_t len = sizeof(sockaddr);
+    if (!local.GetSockAddr((struct sockaddr*)&sockaddr, &len)) {
+        LogDebug(BCLog::NET, "Cannot get sockaddr for %s: unsupported network", local.ToStringAddrPort());
+        return false;
+    }
+    if (sock.Bind((struct sockaddr*)&sockaddr, len) == SOCKET_ERROR) {
+        LogDebug(BCLog::NET, "Cannot bind to %s: %s", local.ToStringAddrPort(), NetworkErrorString(WSAGetLastError()));
+        return false;
+    }
+    return true;
+}
+
+/**
+ * One connection attempt. With `bind_addr` set, the socket is bound to it first.
+ * @param[out] connect_error The error code if `connect()` itself failed, 0 otherwise.
+ */
+static std::unique_ptr<Sock> ConnectDirectlyOnce(const CService& dest,
+                                                 bool manual_connection,
+                                                 std::chrono::milliseconds timeout,
+                                                 const CService* bind_addr,
+                                                 int& connect_error)
+{
+    connect_error = 0;
     auto sock = CreateSock(dest.GetSAFamily(), SOCK_STREAM, IPPROTO_TCP);
     if (!sock) {
         LogDebug(BCLog::NET, "Cannot create a socket for connecting to %s", dest.ToStringAddrPort());
+        return {};
+    }
+
+    if (bind_addr && !BindToSharedPort(*sock, *bind_addr)) {
         return {};
     }
 
@@ -670,11 +716,30 @@ std::unique_ptr<Sock> ConnectDirectly(const CService& dest,
         return {};
     }
 
-    if (!ConnectToSocket(*sock, (struct sockaddr*)&sockaddr, len, dest.ToStringAddrPort(), manual_connection, timeout)) {
+    if (!ConnectToSocket(*sock, (struct sockaddr*)&sockaddr, len, dest.ToStringAddrPort(), manual_connection, timeout, &connect_error)) {
         return {};
     }
 
     return sock;
+}
+
+std::unique_ptr<Sock> ConnectDirectly(const CService& dest,
+                                      bool manual_connection,
+                                      std::chrono::milliseconds timeout,
+                                      const std::optional<CService>& bind_addr)
+{
+    int connect_error{0};
+    if (bind_addr) {
+        auto sock = ConnectDirectlyOnce(dest, manual_connection, timeout, &*bind_addr, connect_error);
+        if (sock) return sock;
+        // The chosen local port cannot be used for this destination, typically because a
+        // previous connection to the same peer is still in TIME_WAIT. Fall back to an
+        // ephemeral port rather than failing the connection.
+        if (connect_error != WSAEADDRINUSE && connect_error != WSAEADDRNOTAVAIL) return {};
+        LogDebug(BCLog::NET, "connect() to %s from %s failed (%s), retrying from an ephemeral port",
+                 dest.ToStringAddrPort(), bind_addr->ToStringAddrPort(), NetworkErrorString(connect_error));
+    }
+    return ConnectDirectlyOnce(dest, manual_connection, timeout, nullptr, connect_error);
 }
 
 std::unique_ptr<Sock> Proxy::Connect() const
