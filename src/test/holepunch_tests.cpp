@@ -11,6 +11,7 @@
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
+#include <future>
 #include <span>
 
 using namespace holepunch;
@@ -228,6 +229,188 @@ BOOST_AUTO_TEST_CASE(message_vectors_invalid)
     BOOST_CHECK(Rejected<PunchMsg>("010104cb007101208f00"_hex));
     // punch: empty payload (R-4.1)
     BOOST_CHECK(Rejected<PunchMsg>(""_hex));
+}
+
+// Session manager tests with real loopback sockets.
+
+namespace {
+//! A free TCP port on loopback: bind to port 0 and read back what the kernel chose.
+uint16_t FreePort()
+{
+    auto sock{CreateSock(AF_INET, SOCK_STREAM, IPPROTO_TCP)};
+    BOOST_REQUIRE(sock);
+    BOOST_REQUIRE(BindToSharedPort(*sock, LookupNumeric("127.0.0.1", 0)));
+    return GetBindAddress(*sock).GetPort();
+}
+
+//! Collects the results of a SessionManager.
+struct Results {
+    struct Entry {
+        CService peer;
+        Role role;
+        std::shared_ptr<Sock> sock;
+    };
+    Mutex mutex;
+    std::vector<Entry> entries GUARDED_BY(mutex);
+
+    SessionManager::ResultFn Fn()
+    {
+        return [this](const CService& peer, Role role, std::shared_ptr<Sock> sock) {
+            LOCK(mutex);
+            entries.push_back({peer, role, std::move(sock)});
+        };
+    }
+    size_t Count() EXCLUSIVE_LOCKS_REQUIRED(!mutex) { return WITH_LOCK(mutex, return entries.size()); }
+    Entry Get(size_t i) EXCLUSIVE_LOCKS_REQUIRED(!mutex) { return WITH_LOCK(mutex, return entries.at(i)); }
+};
+
+//! Poll `pred` for up to `timeout`.
+template <typename Pred>
+bool WaitFor(Pred pred, std::chrono::milliseconds timeout = std::chrono::seconds{10})
+{
+    const auto end{std::chrono::steady_clock::now() + timeout};
+    while (std::chrono::steady_clock::now() < end) {
+        if (pred()) return true;
+        UninterruptibleSleep(std::chrono::milliseconds{10});
+    }
+    return pred();
+}
+
+//! Mock the clock to now, or move the mocked clock forward by `step`.
+void MockClock(std::chrono::seconds step = std::chrono::seconds{0})
+{
+    SetMockTime(std::chrono::duration_cast<std::chrono::seconds>(NodeClock::now().time_since_epoch()) + step);
+}
+
+Options LocalOptions(uint16_t port)
+{
+    return Options{.enabled = true, .port = port, .allow_local = true};
+}
+
+//! Send a few bytes one way and read them on the other side.
+void CheckDataFlows(Sock& from, Sock& to)
+{
+    const std::string msg{"punched"};
+    BOOST_REQUIRE_EQUAL(from.Send(msg.data(), msg.size(), 0), static_cast<ssize_t>(msg.size()));
+    BOOST_REQUIRE(to.Wait(std::chrono::seconds{5}, Sock::RecvEvent));
+    char buf[16];
+    BOOST_REQUIRE_EQUAL(to.Recv(buf, sizeof(buf), 0), static_cast<ssize_t>(msg.size()));
+    BOOST_CHECK_EQUAL(std::string(buf, msg.size()), msg);
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(session_punch_on_loopback)
+{
+    const uint16_t port_a{FreePort()};
+    const uint16_t port_b{FreePort()};
+    const CService endpoint_a{LookupNumeric("127.0.0.1", port_a)};
+    const CService endpoint_b{LookupNumeric("127.0.0.1", port_b)};
+    Results results_a, results_b;
+    SessionManager a{LocalOptions(port_a), results_a.Fn()};
+    SessionManager b{LocalOptions(port_b), results_b.Fn()};
+    BOOST_REQUIRE(a.Start());
+    BOOST_REQUIRE(b.Start());
+
+    // The responder gets its punch first (R-5.13); its connection reaches the
+    // initiator's listener before the initiator has a session and is held there.
+    BOOST_CHECK(!a.Punch(Role::RESPONDER, endpoint_b));
+    BOOST_CHECK(a.HasSession(endpoint_b));
+    BOOST_CHECK(!b.Punch(Role::INITIATOR, endpoint_a));
+
+    BOOST_REQUIRE(WaitFor([&] { return results_a.Count() == 1 && results_b.Count() == 1; }));
+    const auto result_a{results_a.Get(0)};
+    const auto result_b{results_b.Get(0)};
+    BOOST_REQUIRE(result_a.sock);
+    BOOST_REQUIRE(result_b.sock);
+    BOOST_CHECK(result_a.role == Role::RESPONDER);
+    BOOST_CHECK(result_b.role == Role::INITIATOR);
+    BOOST_CHECK_EQUAL(result_a.peer.ToStringAddrPort(), endpoint_b.ToStringAddrPort());
+    BOOST_CHECK_EQUAL(result_b.peer.ToStringAddrPort(), endpoint_a.ToStringAddrPort());
+    // Both ends of one connection, each bound to its own punch port (I-2, I-3).
+    BOOST_CHECK_EQUAL(GetBindAddress(*result_a.sock).GetPort(), port_a);
+    BOOST_CHECK_EQUAL(GetBindAddress(*result_b.sock).GetPort(), port_b);
+    CheckDataFlows(*result_b.sock, *result_a.sock);
+    CheckDataFlows(*result_a.sock, *result_b.sock);
+    BOOST_CHECK(!a.HasSession(endpoint_b));
+    BOOST_CHECK(!b.HasSession(endpoint_a));
+    BOOST_CHECK(a.GetSessions().empty());
+}
+
+BOOST_AUTO_TEST_CASE(session_unmatched_connection_is_closed)
+{
+    const uint16_t port_a{FreePort()};
+    Results results_a;
+    SessionManager a{LocalOptions(port_a), results_a.Fn()};
+    BOOST_REQUIRE(a.Start());
+
+    // A connection from an endpoint no session expects is accepted, held, and closed (R-5.7, I-2).
+    auto sock{ConnectDirectly(LookupNumeric("127.0.0.1", port_a), /*manual_connection=*/false, std::chrono::seconds{5})};
+    BOOST_REQUIRE(sock);
+    BOOST_REQUIRE(WaitFor([&] {
+        Sock::Event occurred{0};
+        return sock->Wait(std::chrono::milliseconds{0}, Sock::RecvEvent, &occurred) && occurred != 0;
+    }, HOLD + std::chrono::seconds{5}));
+    char buf[1];
+    BOOST_CHECK_EQUAL(sock->Recv(buf, sizeof(buf), 0), 0); // EOF
+    BOOST_CHECK_EQUAL(results_a.Count(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(session_fails_after_window_and_grace)
+{
+    const uint16_t port_a{FreePort()};
+    const uint16_t port_dead{FreePort()}; // nothing listens here
+    Results results_a;
+    SessionManager a{LocalOptions(port_a), results_a.Fn()};
+    BOOST_REQUIRE(a.Start());
+
+    MockClock();
+    const CService dead{LookupNumeric("127.0.0.1", port_dead)};
+    BOOST_CHECK(!a.Punch(Role::RESPONDER, dead));
+    // Attempts are refused immediately and retried (R-5.5).
+    BOOST_REQUIRE(WaitFor([&] { return !a.GetSessions().empty() && a.GetSessions().front().attempts >= 1; }));
+    MockClock(RETRY + std::chrono::seconds{1});
+    BOOST_REQUIRE(WaitFor([&] { return !a.GetSessions().empty() && a.GetSessions().front().attempts >= 2; }));
+    // After the window plus the grace period the session fails (R-5.11, I-6).
+    MockClock(WINDOW + GRACE);
+    BOOST_REQUIRE(WaitFor([&] { return results_a.Count() == 1; }));
+    BOOST_CHECK(!results_a.Get(0).sock);
+    BOOST_CHECK(results_a.Get(0).role == Role::RESPONDER);
+    BOOST_CHECK(!a.HasSession(dead));
+    SetMockTime(std::chrono::seconds{0});
+}
+
+BOOST_AUTO_TEST_CASE(session_limits)
+{
+    const uint16_t port_a{FreePort()};
+    Results results_a;
+    SessionManager a{LocalOptions(port_a), results_a.Fn()};
+    BOOST_REQUIRE(a.Start());
+    MockClock();
+    const auto peer{[](uint16_t port) { return LookupNumeric("127.0.0.1", port); }};
+
+    BOOST_CHECK(!a.Punch(Role::INITIATOR, peer(40001)));
+    BOOST_CHECK(a.Punch(Role::INITIATOR, peer(40001)).has_value()); // duplicate
+    BOOST_CHECK(!a.Punch(Role::INITIATOR, peer(40002)));
+    BOOST_CHECK(a.Punch(Role::INITIATOR, peer(40003)).has_value()); // MAX_ACTIVE_SESSIONS (I-5)
+
+    // Let both sessions fail, then two more fit in the per-minute budget but not a fifth.
+    MockClock(WINDOW + GRACE);
+    BOOST_REQUIRE(WaitFor([&] { return results_a.Count() == 2; }));
+    BOOST_CHECK(!a.Punch(Role::INITIATOR, peer(40003)));
+    BOOST_CHECK(!a.Punch(Role::INITIATOR, peer(40004)));
+    BOOST_CHECK(a.Punch(Role::INITIATOR, peer(40005)).has_value()); // SESSIONS_PER_MIN (I-5)
+    MockClock(WINDOW + GRACE);
+    BOOST_REQUIRE(WaitFor([&] { return results_a.Count() == 4; }));
+    // A minute later the budget is back. The same endpoint again within
+    // PER_ADDR_INTERVAL is refused, a new one is fine.
+    MockClock(std::chrono::seconds{61});
+    BOOST_CHECK(a.Punch(Role::INITIATOR, peer(40001)).has_value());
+    BOOST_CHECK(!a.Punch(Role::INITIATOR, peer(40005)));
+    MockClock(WINDOW + GRACE);
+    BOOST_REQUIRE(WaitFor([&] { return results_a.Count() == 5; }));
+    MockClock(std::chrono::duration_cast<std::chrono::seconds>(PER_ADDR_INTERVAL));
+    BOOST_CHECK(!a.Punch(Role::INITIATOR, peer(40001)));
+    SetMockTime(std::chrono::seconds{0});
 }
 
 BOOST_AUTO_TEST_SUITE_END()
