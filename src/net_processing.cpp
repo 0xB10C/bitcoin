@@ -438,11 +438,16 @@ struct Peer {
      * timestamp the peer sent in the version message. */
     std::atomic<std::chrono::seconds> m_time_offset{0s};
 
-    explicit Peer(NodeId id, ServiceFlags our_services, bool is_inbound)
+    explicit Peer(NodeId id, ServiceFlags our_services, bool is_inbound, bool direct_clearnet)
         : m_id{id}
         , m_our_services{our_services}
         , m_is_inbound{is_inbound}
+        , m_direct_clearnet{direct_clearnet}
     {}
+
+    /** Reached directly over IPv4 or IPv6, neither through a proxy nor through our onion
+     * service: the only peers that may learn an onion coordination address (R-6.4). */
+    const bool m_direct_clearnet;
 
 private:
     mutable Mutex m_tx_relay_mutex;
@@ -1261,6 +1266,11 @@ CNodeState* PeerManagerImpl::State(NodeId pnode)
  */
 static bool IsAddrCompatible(const Peer& peer, const CAddress& addr)
 {
+    if (addr.IsHolePunch()) {
+        // An onion coordination address never travels over a privacy network (R-6.4).
+        const auto coordinator{addr.HolePunchCoordinator()};
+        if (coordinator && !(coordinator->IsIPv4() || coordinator->IsIPv6()) && !peer.m_direct_clearnet) return false;
+    }
     return peer.m_wants_addrv2 || addr.IsAddrV1Compatible();
 }
 
@@ -1763,7 +1773,10 @@ void PeerManagerImpl::InitializeNode(const CNode& node, ServiceFlags our_service
         our_services = static_cast<ServiceFlags>(our_services | NODE_BLOOM);
     }
 
-    PeerRef peer = std::make_shared<Peer>(nodeid, our_services, node.IsInboundConn());
+    const auto& holepunch_opts{m_connman.GetHolePunchOptions()};
+    const bool direct_clearnet{(node.addr.IsIPv4() || node.addr.IsIPv6()) && !node.m_inbound_onion &&
+                               (node.IsInboundConn() || (holepunch_opts.enabled && node.addrBind.GetPort() == holepunch_opts.port))};
+    PeerRef peer = std::make_shared<Peer>(nodeid, our_services, node.IsInboundConn(), direct_clearnet);
     {
         LOCK(m_peer_mutex);
         m_peer_map.emplace_hint(m_peer_map.end(), nodeid, peer);
@@ -4164,16 +4177,23 @@ void PeerManagerImpl::MaybeSendHolePunchAnnouncement(CNode& node, Peer& peer, st
     peer.m_holepunch_next_announce = current_time + std::chrono::seconds{10};
     // Only while an inbound slot is free (R-6.5).
     if (m_connman.GetNodeCount(ConnectionDirection::In) >= static_cast<size_t>(m_connman.GetMaxInbound())) return;
-    const auto coordinators{HolePunchCoordinators()};
-    if (coordinators.empty()) return;
-    const CService& coordinator{coordinators.begin()->first};
+    // One element per way of reaching us: a coordinator we are connected to (Profile A)
+    // and our own onion service (Profile B), the latter only to direct clearnet peers (R-6.4).
+    std::vector<CService> via;
+    if (const auto coordinators{HolePunchCoordinators()}; !coordinators.empty()) via.push_back(coordinators.begin()->first);
+    if (peer.m_direct_clearnet) {
+        if (const auto service{m_connman.GetHolePunchCoordinationService()}) via.push_back(*service);
+    }
+    if (via.empty()) return;
     std::vector<CAddress> elements;
     for (const Network net : {NET_IPV4, NET_IPV6}) {
         const auto external{m_connman.HolePunchExternalAddress(net)};
         if (!external) continue;
-        const auto made{CNetAddr::MakeHolePunch(coordinator, *external)};
-        if (!made) continue;
-        elements.emplace_back(CService{*made, external->GetPort()}, peer.m_our_services, Now<NodeSeconds>());
+        for (const CService& coordinator : via) {
+            const auto made{CNetAddr::MakeHolePunch(coordinator, *external)};
+            if (!made) continue;
+            elements.emplace_back(CService{*made, external->GetPort()}, peer.m_our_services, Now<NodeSeconds>());
+        }
     }
     if (elements.empty()) return;
     // Sent alone (R-6.3), bypassing the known-addresses filter so that repeats go out.

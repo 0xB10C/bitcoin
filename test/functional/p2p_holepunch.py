@@ -29,6 +29,7 @@ from test_framework.util import (
     holepunch_coord_port,
     holepunch_port,
     p2p_port,
+    tor_port,
 )
 
 import time
@@ -49,6 +50,14 @@ def endpoint(ip, port):
     addr = CAddress()
     addr.net = CAddress.NET_IPV6 if ":" in ip else CAddress.NET_IPV4
     addr.ip = ip
+    addr.port = port
+    return addr
+
+
+def onion_endpoint(onion, port):
+    addr = CAddress()
+    addr.net = CAddress.NET_TORV3
+    addr.ip = onion
     addr.port = port
     return addr
 
@@ -165,6 +174,8 @@ class HolePunchTest(BitcoinTestFramework):
             "-holepunch=1",
             f"-holepunchport={holepunch_port(0)}",
             f"-holepunchcoordbind=127.0.0.1:{holepunch_coord_port(0)}",
+            f"-holepunchcoordonion={ONION}",  # as if Tor had created the coordination service
+            f"-bind=127.0.0.1:{tor_port(0)}=onion",  # the config file's bind= suppresses the default onion bind
             "-whitelist=addr@127.0.0.1",  # no address rate limit for inbound test peers
         ]]
 
@@ -569,6 +580,13 @@ class HolePunchTest(BitcoinTestFramework):
         legacy.sync_with_ping()
         assert_equal(legacy.announcements, [])
         assert_equal(node.getnodeaddresses(0), [])
+
+        self.log.info("An element with an onion coordinator is relayed to clearnet peers only")
+        onion_peer = node.add_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR, support_addrv2=True), dstport=tor_port(0))
+        source.send_and_ping(addrv2([announcement(onion_endpoint(ONION, 18444), endpoint("5.6.7.9", 8335))]))
+        self.wait_until(lambda: any(a.coordinator.net == CAddress.NET_TORV3 for r in receivers for a in r.announcements))
+        onion_peer.sync_with_ping()
+        assert_equal([a for a in onion_peer.announcements if a.coordinator.net == CAddress.NET_TORV3], [])
         node.disconnect_p2ps()
         self.wait_until(lambda: len(node.getpeerinfo()) == 0)
 
@@ -580,12 +598,23 @@ class HolePunchTest(BitcoinTestFramework):
         # A second reporting peer without capabilities, so that only one coordinator exists.
         node.add_outbound_p2p_connection(HolePunchPeer(caps=0, support_addrv2=True), p2p_idx=1)
         assert_equal(self.external(node)["address"], f"127.0.0.1:{punch_port}")
-        coordinator.wait_until(lambda: len(coordinator.announcements) > 0)
-        element = coordinator.announcements[0]
-        assert_equal(element.ip, "127.0.0.1")
-        assert_equal(element.port, punch_port)
-        assert_equal(element.coordinator.port, p2p_port(MAX_NODES - 1))  # the listening port of a p2p_idx=0 peer
-        assert_equal(element.nServices & NODE_P2P_V2, NODE_P2P_V2)
+        coordinator.wait_until(lambda: len(coordinator.announcements) > 1)
+        self.log.info("One element names the coordinator, one the node's own onion service")
+        assert_equal(len(coordinator.announcements), 2)
+        for element in coordinator.announcements:
+            assert_equal(element.ip, "127.0.0.1")
+            assert_equal(element.port, punch_port)
+            assert_equal(element.nServices & NODE_P2P_V2, NODE_P2P_V2)
+        by_net = {e.coordinator.net: e.coordinator for e in coordinator.announcements}
+        assert_equal(by_net[CAddress.NET_IPV4].port, p2p_port(MAX_NODES - 1))  # the listening port of a p2p_idx=0 peer
+        assert_equal(by_net[CAddress.NET_TORV3].ip, ONION)
+        assert_equal(by_net[CAddress.NET_TORV3].port, 18444)
+
+        self.log.info("A peer connected through Tor never learns the onion service")
+        onion_peer = node.add_p2p_connection(HolePunchPeer(caps=0, support_addrv2=True), dstport=tor_port(0))
+        onion_peer.wait_until(lambda: len(onion_peer.announcements) > 0)
+        onion_peer.sync_with_ping()
+        assert_equal([e.coordinator.net for e in onion_peer.announcements], [CAddress.NET_IPV4])
         node.disconnect_p2ps()
         self.wait_until(lambda: len(node.getpeerinfo()) == 0)
 
@@ -700,7 +729,7 @@ class HolePunchTest(BitcoinTestFramework):
             ["-holepunch=1", "-v2transport=1", "-holepunchcoordonion=1.2.3.4"],
             "Error: -holepunchcoordonion must be an onion address")
         with node.assert_debug_log([f"Hole punch coordination service is {ONION}:18444 (-holepunchcoordonion)"]):
-            self.start_node(0, extra_args=self.extra_args[0] + [f"-holepunchcoordonion={ONION}"])
+            self.start_node(0, extra_args=self.extra_args[0])
         self.stop_node(0)
         self.log.info("Without -holepunch, outbound connections use an ephemeral port and no feature is sent")
         self.start_node(0, extra_args=["-v2transport=1"])
