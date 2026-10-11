@@ -4,11 +4,17 @@
 
 #include <holepunch.h>
 #include <netbase.h>
+#include <streams.h>
 #include <test/util/setup_common.h>
+#include <util/strencodings.h>
 
 #include <boost/test/unit_test.hpp>
 
+#include <algorithm>
+#include <span>
+
 using namespace holepunch;
+using namespace util::hex_literals;
 
 BOOST_FIXTURE_TEST_SUITE(holepunch_tests, BasicTestingSetup)
 
@@ -112,6 +118,116 @@ BOOST_AUTO_TEST_CASE(external_address_on_test_networks)
     BOOST_CHECK(tracker.AddReport(2, GROUP_A, Addr("127.0.0.1:18446")));
     BOOST_REQUIRE(tracker.Get(NET_IPV4));
     BOOST_CHECK_EQUAL(tracker.Get(NET_IPV4)->ToStringAddrPort(), "127.0.0.1:18446");
+}
+
+// Test vectors from the draft BIP (bip-tcp-holepunch/vectors.json).
+
+template <typename Msg>
+static Msg Decode(std::span<const std::byte> bytes)
+{
+    DataStream s{bytes};
+    Msg msg;
+    s >> msg;
+    BOOST_REQUIRE(s.empty()); // R-4.1: no trailing bytes
+    return msg;
+}
+
+template <typename Msg>
+static std::vector<std::byte> Encode(const Msg& msg)
+{
+    DataStream s{};
+    s << msg;
+    return {s.begin(), s.end()};
+}
+
+BOOST_AUTO_TEST_CASE(message_vectors_valid)
+{
+    {
+        const auto bytes{"0104cb007101208f0104c6336402c3cb"_hex};
+        const auto msg{Decode<RendezvousMsg>(bytes)};
+        BOOST_CHECK(msg.IsWellFormed());
+        BOOST_CHECK_EQUAL(msg.target.ToStringAddrPort(), "203.0.113.1:8335");
+        BOOST_CHECK_EQUAL(msg.requester.ToStringAddrPort(), "198.51.100.2:50123");
+        BOOST_CHECK(std::ranges::equal(Encode(msg), bytes));
+    }
+    {
+        const auto bytes{"021020010db8000000000000000000000001208f021020010db8000000000000000000000002479f"_hex};
+        const auto msg{Decode<RendezvousMsg>(bytes)};
+        BOOST_CHECK(msg.IsWellFormed());
+        BOOST_CHECK_EQUAL(msg.target.ToStringAddrPort(), "[2001:db8::1]:8335");
+        BOOST_CHECK_EQUAL(msg.requester.ToStringAddrPort(), "[2001:db8::2]:18335");
+        BOOST_CHECK(std::ranges::equal(Encode(msg), bytes));
+    }
+    {
+        // Port 0 is encodable; it is rejected when the message is acted on (R-5.1), not when parsed.
+        const auto msg{Decode<RendezvousMsg>("0104cb007101208f0104c63364020000"_hex)};
+        BOOST_CHECK(msg.IsWellFormed());
+        BOOST_CHECK_EQUAL(msg.requester.GetPort(), 0);
+    }
+    {
+        const auto bytes{"010104cb007101208f"_hex};
+        const auto msg{Decode<PunchMsg>(bytes)};
+        BOOST_CHECK(msg.IsWellFormed());
+        BOOST_CHECK_EQUAL(msg.role, static_cast<uint8_t>(Role::INITIATOR));
+        BOOST_CHECK_EQUAL(msg.peer.ToStringAddrPort(), "203.0.113.1:8335");
+        BOOST_CHECK(std::ranges::equal(Encode(msg), bytes));
+    }
+    {
+        const auto bytes{"000104c6336402c3cb"_hex};
+        const auto msg{Decode<PunchMsg>(bytes)};
+        BOOST_CHECK(msg.IsWellFormed());
+        BOOST_CHECK_EQUAL(msg.role, static_cast<uint8_t>(Role::RESPONDER));
+        BOOST_CHECK(std::ranges::equal(Encode(msg), bytes));
+    }
+    {
+        const auto bytes{"01021020010db8000000000000000000000001208f"_hex};
+        const auto msg{Decode<PunchMsg>(bytes)};
+        BOOST_CHECK(msg.IsWellFormed());
+        BOOST_CHECK_EQUAL(msg.peer.ToStringAddrPort(), "[2001:db8::1]:8335");
+        BOOST_CHECK(std::ranges::equal(Encode(msg), bytes));
+    }
+}
+
+//! A malformed message either fails to deserialize, leaves bytes behind, or is not well formed.
+template <typename Msg>
+static bool Rejected(std::span<const std::byte> bytes)
+{
+    DataStream s{bytes};
+    Msg msg;
+    try {
+        s >> msg;
+    } catch (const std::ios_base::failure&) {
+        return true;
+    }
+    return !s.empty() || !msg.IsWellFormed();
+}
+
+BOOST_AUTO_TEST_CASE(message_vectors_invalid)
+{
+    // rendezvous: family mismatch (R-4.3)
+    BOOST_CHECK(Rejected<RendezvousMsg>("0104cb007101208f021020010db8000000000000000000000002479f"_hex));
+    // rendezvous: target with TORV3 net (R-4.2)
+    BOOST_CHECK(Rejected<RendezvousMsg>("042053cd5648af46a92b5b74b7f8f6bd3bb86e5d9ab77c5f0e03a5b43a1b4bbef6ac208d0104c6336402c3cb"_hex));
+    // rendezvous: IPv4 target with addr_len 5 (R-4.2)
+    BOOST_CHECK(Rejected<RendezvousMsg>("0105010101010100010104c6336402c3cb"_hex));
+    // rendezvous: trailing byte (R-4.1)
+    BOOST_CHECK(Rejected<RendezvousMsg>("0104cb007101208f0104c6336402c3cb00"_hex));
+    // rendezvous: truncated requester port (R-4.1)
+    BOOST_CHECK(Rejected<RendezvousMsg>("0104cb007101208f0104c6336402c3"_hex));
+    // rendezvous: non-minimal CompactSize addr_len
+    BOOST_CHECK(Rejected<RendezvousMsg>("01fd0400cb007101208f0104c6336402c3cb"_hex));
+    // rendezvous: IPv4-mapped IPv6 endpoint (R-1.4)
+    BOOST_CHECK(Rejected<RendezvousMsg>("021000000000000000000000ffffcb007101208f0104c6336402c3cb"_hex));
+    // punch: role 2 (R-4.2)
+    BOOST_CHECK(Rejected<PunchMsg>("020104cb007101208f"_hex));
+    // punch: peer with CJDNS net (R-4.2)
+    BOOST_CHECK(Rejected<PunchMsg>("010610fc000000000000000000000000000001208f"_hex));
+    // punch: unknown BIP 155 network id
+    BOOST_CHECK(Rejected<PunchMsg>("010904cb007101208f"_hex));
+    // punch: trailing byte (R-4.1)
+    BOOST_CHECK(Rejected<PunchMsg>("010104cb007101208f00"_hex));
+    // punch: empty payload (R-4.1)
+    BOOST_CHECK(Rejected<PunchMsg>(""_hex));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -20,6 +20,23 @@ static Network Family(const CNetAddr& addr)
     return NET_UNROUTABLE;
 }
 
+bool IsWellFormedEndpoint(const CService& endpoint)
+{
+    // Unknown BIP 155 network ids and IPv4-mapped IPv6 addresses (R-1.4) both
+    // deserialize as the unspecified address ::, which is never a usable endpoint.
+    return (endpoint.IsIPv4() || endpoint.IsIPv6()) && !endpoint.IsBindAny();
+}
+
+bool RendezvousMsg::IsWellFormed() const
+{
+    return IsWellFormedEndpoint(target) && IsWellFormedEndpoint(requester) && Family(target) == Family(requester);
+}
+
+bool PunchMsg::IsWellFormed() const
+{
+    return (role == static_cast<uint8_t>(Role::RESPONDER) || role == static_cast<uint8_t>(Role::INITIATOR)) && IsWellFormedEndpoint(peer);
+}
+
 bool ExternalAddressTracker::AddReport(NodeId id, const std::vector<unsigned char>& group, const CService& reported)
 {
     if (Family(reported) == NET_UNROUTABLE) return false;

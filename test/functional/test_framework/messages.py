@@ -361,6 +361,10 @@ class CAddress:
 
         self.nServices = deser_compact_size(f)
 
+        self.deserialize_endpoint(f)
+
+    def deserialize_endpoint(self, f):
+        """Deserialize the network, address and port part of the addrv2 format (BIP155)"""
         self.net = int.from_bytes(f.read(1), "little")
         assert self.net in self.ADDRV2_NET_NAME
 
@@ -388,10 +392,16 @@ class CAddress:
 
     def serialize_v2(self):
         """Serialize in addrv2 format (BIP155)"""
-        assert self.net in self.ADDRV2_NET_NAME
         r = b""
         r += self.time.to_bytes(4, "little")
         r += ser_compact_size(self.nServices)
+        r += self.serialize_endpoint()
+        return r
+
+    def serialize_endpoint(self):
+        """Serialize the network, address and port part of the addrv2 format (BIP155)"""
+        assert self.net in self.ADDRV2_NET_NAME
+        r = b""
         r += self.net.to_bytes(1, "little")
         r += ser_compact_size(self.ADDRV2_ADDRESS_LENGTH[self.net])
         if self.net == self.NET_IPV4:
@@ -1937,6 +1947,50 @@ class msg_sendtxrcncl:
     def __repr__(self):
         return "msg_sendtxrcncl(version=%lu, salt=%lu)" %\
             (self.version, self.salt)
+
+class msg_rendezvous:
+    __slots__ = ("target", "requester")
+    msgtype = b"rendezvous"
+
+    def __init__(self, target=None, requester=None):
+        self.target = target if target is not None else CAddress()
+        self.requester = requester if requester is not None else CAddress()
+
+    def deserialize(self, f):
+        self.target = CAddress()
+        self.target.deserialize_endpoint(f)
+        self.requester = CAddress()
+        self.requester.deserialize_endpoint(f)
+
+    def serialize(self):
+        return self.target.serialize_endpoint() + self.requester.serialize_endpoint()
+
+    def __repr__(self):
+        return "msg_rendezvous(target=%s:%i, requester=%s:%i)" % \
+            (self.target.ip, self.target.port, self.requester.ip, self.requester.port)
+
+
+class msg_punch:
+    __slots__ = ("role", "peer")
+    msgtype = b"punch"
+    ROLE_RESPONDER = 0
+    ROLE_INITIATOR = 1
+
+    def __init__(self, role=0, peer=None):
+        self.role = role
+        self.peer = peer if peer is not None else CAddress()
+
+    def deserialize(self, f):
+        self.role = int.from_bytes(f.read(1), "little")
+        self.peer = CAddress()
+        self.peer.deserialize_endpoint(f)
+
+    def serialize(self):
+        return self.role.to_bytes(1, "little") + self.peer.serialize_endpoint()
+
+    def __repr__(self):
+        return "msg_punch(role=%i, peer=%s:%i)" % (self.role, self.peer.ip, self.peer.port)
+
 
 class msg_feature:
     """FEATURE message for negotiating optional features."""

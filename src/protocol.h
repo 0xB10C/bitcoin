@@ -268,6 +268,18 @@ inline constexpr const char* SENDTXRCNCL{"sendtxrcncl"};
  * BIP 434 Peer feature negotiation
  */
 inline constexpr const char* FEATURE{"feature"};
+/**
+ * TCP hole punching (draft BIP): asks a coordinator to pair the sender with
+ * an advertised node. Contains the target's endpoint and the sender's own
+ * external endpoint.
+ */
+inline constexpr const char* RENDEZVOUS{"rendezvous"};
+/**
+ * TCP hole punching (draft BIP): tells the receiver to open a connection to
+ * a peer by TCP simultaneous open. Contains a role byte (0 responder,
+ * 1 initiator) and the peer's endpoint.
+ */
+inline constexpr const char* PUNCH{"punch"};
 }; // namespace NetMsgType
 
 /** All known message types (see above). Keep this in the same order as the list of messages above. */
@@ -308,6 +320,8 @@ inline const std::array ALL_NET_MESSAGE_TYPES{std::to_array<std::string>({
     NetMsgType::WTXIDRELAY,
     NetMsgType::SENDTXRCNCL,
     NetMsgType::FEATURE,
+    NetMsgType::RENDEZVOUS,
+    NetMsgType::PUNCH,
 })};
 
 inline constexpr size_t MAX_FEATUREID_LENGTH{80};

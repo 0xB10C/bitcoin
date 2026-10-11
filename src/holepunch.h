@@ -6,6 +6,7 @@
 #define BITCOIN_HOLEPUNCH_H
 
 #include <netaddress.h>
+#include <serialize.h>
 #include <sync.h>
 
 #include <cstdint>
@@ -22,6 +23,54 @@
 namespace holepunch {
 
 typedef int64_t NodeId;
+
+/** Role of a node in a session, as carried in `punch`. The initiator sends the
+ * first bytes (it is the BIP 324 initiator and sends `version` first). */
+enum class Role : uint8_t {
+    RESPONDER = 0,
+    INITIATOR = 1,
+};
+
+/**
+ * Whether an endpoint received in a message is well formed (R-4.2): an IPv4 or
+ * IPv6 address that is not an IPv4-mapped IPv6 address (R-1.4). Validity for
+ * use (routable, port, own address) is checked separately.
+ */
+bool IsWellFormedEndpoint(const CService& endpoint);
+
+/**
+ * `rendezvous`: connector to coordinator. Endpoints are serialized as BIP 155
+ * address elements without time and services, which is the V2 form of CService.
+ */
+struct RendezvousMsg {
+    /** The advertiser's endpoint, from its announcement. */
+    CService target;
+    /** The connector's own external address, in the same address family. */
+    CService requester;
+
+    SERIALIZE_METHODS(RendezvousMsg, obj)
+    {
+        READWRITE(CNetAddr::V2(obj.target), CNetAddr::V2(obj.requester));
+    }
+
+    /** Both endpoints well formed and of the same family (R-4.2, R-4.3). */
+    bool IsWellFormed() const;
+};
+
+/** `punch`: coordinator to a party. */
+struct PunchMsg {
+    uint8_t role{0};
+    /** The other party's endpoint. */
+    CService peer;
+
+    SERIALIZE_METHODS(PunchMsg, obj)
+    {
+        READWRITE(obj.role, CNetAddr::V2(obj.peer));
+    }
+
+    /** Known role and well formed endpoint (R-4.2). */
+    bool IsWellFormed() const;
+};
 
 /** Settings, filled in from the command line options. */
 struct Options {
