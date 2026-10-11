@@ -288,13 +288,12 @@ class HolePunchTest(BitcoinTestFramework):
         self.log.info("It takes no outbound slot")
         assert_equal(node.getnetworkinfo()["connections_out"], 0)
 
-        self.log.info("Any message other than ping, pong, rendezvous and punch closes it")
-        with node.assert_debug_log(["getaddr on a coordination connection"], timeout=5):
+        self.log.info("Whatever else a clearnet coordinator sends is ignored: it is an ordinary node")
+        with node.assert_debug_log(["ignoring getaddr on the coordination connection"], timeout=5):
             peer.send_without_ping(msg_getaddr())
-            peer.wait_for_disconnect()
+        peer.sync_with_ping()
 
         self.log.info("It is closed when nothing came of it within COORD_TIMEOUT")
-        peer = node.add_outbound_p2p_connection(CoordinationPeer(caps=CAP_COORDINATOR), p2p_idx=1, connection_type="holepunch-coordination")
         with node.assert_debug_log(["coordination timed out"], timeout=5):
             node.setmocktime(int(time.time()) + 11)
             peer.wait_for_disconnect()

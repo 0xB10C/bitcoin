@@ -12,8 +12,9 @@ P2P and network changes
   punches to itself; connectors reach it through their Tor proxy. Off by
   default; needs `-v2transport`. See `doc/p2p-holepunch.md`.
 - A new connection type, `holepunch-coordination`, is used for the
-  short-lived connections that arrange a hole punch. They carry only the
-  handshake and the hole punching messages and take no connection slot.
+  short-lived connections that arrange a hole punch. The node sends only
+  the handshake and the hole punching messages on them, and they take no
+  connection slot.
   `-holepunchcoordbind` sets where such connections are accepted.
 
 New RPCs

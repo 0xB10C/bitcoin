@@ -3899,6 +3899,17 @@ void PeerManagerImpl::PushPrivateBroadcastTx(CNode& node)
     MakeAndPushMessage(node, NetMsgType::INV, std::vector<CInv>{{CInv{MSG_TX, tx->GetHash().ToUint256()}}});
 }
 
+/**
+ * Whether a coordination connection is to a dedicated coordination endpoint, which speaks
+ * nothing but the coordination messages (R-7.4): one we accepted on our coordination
+ * bind, or one we opened to a coordination onion service. A coordination connection we
+ * opened to a clearnet coordinator is an ordinary inbound connection to that node.
+ */
+static bool IsDedicatedHolePunchCoordination(const CNode& node)
+{
+    return node.IsInboundConn() || !(node.addr.IsIPv4() || node.addr.IsIPv6());
+}
+
 void PeerManagerImpl::PushHolePunchFeature(CNode& pfrom, Peer& peer)
 {
     const auto& opts{m_connman.GetHolePunchOptions()};
@@ -4827,8 +4838,14 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
     if (pfrom.IsHolePunchCoordConn() && msg_type != NetMsgType::PING && msg_type != NetMsgType::PONG &&
         msg_type != NetMsgType::RENDEZVOUS && msg_type != NetMsgType::PUNCH) {
-        LogDebug(BCLog::HOLEPUNCH, "%s on a coordination connection, %s", SanitizeString(msg_type), pfrom.DisconnectMsg());
-        pfrom.fDisconnect = true;
+        if (IsDedicatedHolePunchCoordination(pfrom)) {
+            LogDebug(BCLog::HOLEPUNCH, "%s on a coordination connection, %s", SanitizeString(msg_type), pfrom.DisconnectMsg());
+            pfrom.fDisconnect = true;
+        } else {
+            // An ordinary node on the other end does not know that this connection is
+            // only for coordination and talks to us like to any peer (R-7.4).
+            LogDebug(BCLog::HOLEPUNCH, "ignoring %s on the coordination connection to peer=%d\n", SanitizeString(msg_type), pfrom.GetId());
+        }
         return;
     }
 

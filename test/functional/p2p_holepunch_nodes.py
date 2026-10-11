@@ -4,10 +4,11 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test a TCP hole punch between real nodes.
 
-Four nodes, none connected to each other at the start:
+Five nodes, none connected to each other at the start:
   A (node 0) is the advertiser, C (node 1) the coordinator, B (node 2) the
   connector, D (node 3) a second peer for A and B, so that both learn their
-  external address from two reporting peers.
+  external address from two reporting peers, and E (node 4) a second
+  connector that has no connection to C.
 
 A and B connect to C from their punch ports; C sees them at those ports and
 they announce ADVERTISED and PUNCHPORT. A announces itself through C, C
@@ -15,7 +16,9 @@ relays the announcement to B, B asks C for a rendezvous with A's endpoint,
 C sends punch to both, and they connect to each other by TCP simultaneous
 open. The result is an inbound peer at A and a hole-punched outbound peer
 at B that relays blocks like any other peer. The limits are then checked
-with the manual rendezvous RPC.
+with the manual rendezvous RPC. E then connects to A and D, gets A's
+announcement, and has to open a coordination connection to C to ask for
+its rendezvous.
 """
 
 import time
@@ -25,23 +28,25 @@ from test_framework.util import (
     assert_equal,
     holepunch_coord_port,
     holepunch_port,
+    p2p_port,
 )
 
-A, C, B, D = 0, 1, 2, 3
+A, C, B, D, E = 0, 1, 2, 3, 4
 
 
 class HolePunchNodesTest(BitcoinTestFramework):
     def set_test_params(self):
-        self.num_nodes = 4
+        self.num_nodes = 5
         self.extra_args = [[
             "-v2transport=1",
             "-holepunch=1",
             f"-holepunchport={holepunch_port(i)}",
             f"-holepunchcoordbind=127.0.0.1:{holepunch_coord_port(i)}",
         ] for i in range(self.num_nodes)]
-        # B gets no inbound slots, so it never announces itself and the punch
-        # always goes from B to A.
+        # B and E get no inbound slots, so they never announce themselves and
+        # the punches always go to A.
         self.extra_args[B].append("-maxconnections=10")
+        self.extra_args[E].append("-maxconnections=10")
 
     def setup_network(self):
         self.setup_nodes()
@@ -58,7 +63,7 @@ class HolePunchNodesTest(BitcoinTestFramework):
         return [p for p in node.getpeerinfo() if p["hole_punched"]]
 
     def run_test(self):
-        a, c, b, d = self.nodes
+        a, c, b, d, e = self.nodes
 
         self.log.info("A and B connect to the coordinator C and to D from their punch ports")
         self.connect_nodes(A, C)
@@ -110,10 +115,40 @@ class HolePunchNodesTest(BitcoinTestFramework):
              a.assert_debug_log(["a session with this address was started recently"], timeout=10):
             b.holepunchrendezvous(c_at_b, f"127.0.0.1:{holepunch_port(A)}")
 
+        self.log.info("E connects to A and D, and gets A's announcement; it has no connection to C")
+        # Past the window of the punch C just sent to A.
+        mocktime += 30
+        for node in self.nodes:
+            node.setmocktime(mocktime)
+        self.connect_nodes(E, A)
+        self.connect_nodes(E, D)
+        self.wait_until(lambda: "address" in self.external(e))
+        assert_equal(self.external(e)["address"], f"127.0.0.1:{holepunch_port(E)}")
+        assert_equal([p["id"] for p in e.getpeerinfo() if p["subver"] == c.getnetworkinfo()["subversion"]], [])
+
+        self.log.info("E opens a coordination connection to C, which treats it as an ordinary peer, and gets punched")
+        coordinator = f"127.0.0.1:{p2p_port(C)}"
+        with e.assert_debug_log([f"opening a coordination connection to {coordinator}", "ignoring getheaders on the coordination connection", "answers our rendezvous"], timeout=90):
+            self.wait_until(lambda: len(self.punched_peers(e)) == 1 and self.punched_peers(e)[0]["version"] != 0, timeout=90)
+        self.wait_until(lambda: len(self.punched_peers(a)) == 2)
+        at_e = self.punched_peers(e)[0]
+        assert_equal(at_e["addr"], f"127.0.0.1:{holepunch_port(A)}")
+        assert_equal(at_e["addrbind"], f"127.0.0.1:{holepunch_port(E)}")
+        assert_equal(at_e["connection_type"], "outbound-full-relay")
+        # A, D and the punched connection; the coordination connection is not counted.
+        assert_equal(e.getnetworkinfo()["connections_out"], 3)
+        self.log.info("The coordination connection is closed once it has done its job")
+        self.wait_until(lambda: not [p for p in e.getpeerinfo() if p["connection_type"] == "holepunch-coordination"])
+
         self.log.info("The punched connection relays blocks")
         self.disconnect_nodes(A, C)
         self.disconnect_nodes(A, D)
-        self.generate(a, 1, sync_fun=lambda: self.sync_blocks([a, b]))
+        # Only the regular connection from E to A, not the punched one.
+        a_subver = a.getnetworkinfo()["subversion"]
+        e.disconnectnode(nodeid=next(p["id"] for p in e.getpeerinfo() if p["subver"] == a_subver and not p["hole_punched"]))
+        self.wait_until(lambda: len([p for p in e.getpeerinfo() if p["subver"] == a_subver]) == 1)
+        self.disconnect_nodes(E, D)
+        self.generate(a, 1, sync_fun=lambda: self.sync_blocks([a, b, e]))
 
 
 if __name__ == '__main__':
