@@ -624,6 +624,8 @@ public:
     bool HolePunchNegotiated(const Peer& peer) const EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
     /** Handle a `punch` message: validate it (R-5.1) and start a session. */
     void ProcessPunch(CNode& pfrom, Peer& peer, DataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+    /** Handle a `rendezvous` message as coordinator: pair the requester with the advertised peer it names (R-11.1 to R-11.3). */
+    void ProcessRendezvous(CNode& pfrom, Peer& peer, DataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_peer_mutex);
     std::vector<node::TxOrphanage::OrphanInfo> GetOrphanTransactions() override EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
     PeerManagerInfo GetInfo() const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_inv_to_send_mutex);
     std::vector<PrivateBroadcast::TxBroadcastInfo> GetPrivateBroadcastInfo() const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
@@ -3936,6 +3938,88 @@ void PeerManagerImpl::ProcessPunch(CNode& pfrom, Peer& peer, DataStream& vRecv)
     LogDebug(BCLog::HOLEPUNCH, "punch from peer=%d: session with %s started as %s%s\n", pfrom.GetId(), msg.peer.ToStringAddrPort(), role_name, answered_target ? " (answers our rendezvous)" : "");
 }
 
+void PeerManagerImpl::ProcessRendezvous(CNode& pfrom, Peer& peer, DataStream& vRecv)
+{
+    if (!HolePunchNegotiated(peer)) {
+        LogDebug(BCLog::HOLEPUNCH, "rendezvous without negotiated feature, %s", pfrom.DisconnectMsg());
+        pfrom.fDisconnect = true;
+        return;
+    }
+    holepunch::RendezvousMsg msg;
+    bool malformed{false};
+    try {
+        vRecv >> msg;
+    } catch (const std::exception&) {
+        malformed = true;
+    }
+    if (malformed || !vRecv.empty() || !msg.IsWellFormed()) {
+        LogDebug(BCLog::HOLEPUNCH, "malformed rendezvous, %s", pfrom.DisconnectMsg());
+        pfrom.fDisconnect = true;
+        return;
+    }
+    const auto now{NodeClock::now()};
+    const auto& opts{m_connman.GetHolePunchOptions()};
+    // What we observe as the requester's endpoint; only that goes into a punch (R-11.1).
+    const CService requester{pfrom.addr};
+
+    std::string reject;
+    if (!pfrom.IsInboundConn()) {
+        reject = "not on an accepted connection";
+    } else if (!(peer.m_holepunch_caps & holepunch::CAP_PUNCHPORT)) {
+        reject = "requester did not announce PUNCHPORT";
+    } else if (msg.requester != requester) {
+        reject = strprintf("requester %s differs from the observed endpoint %s, its mapping is not endpoint-independent", msg.requester.ToStringAddrPort(), requester.ToStringAddrPort());
+    } else if (now - peer.m_holepunch_punch_sent < holepunch::WINDOW + holepunch::GRACE) {
+        reject = "a punch was sent to the requester recently";
+    } else if (!opts.allow_local && static_cast<CNetAddr>(msg.target) == static_cast<CNetAddr>(requester)) {
+        reject = "requester and target share an address";
+    }
+
+    // The target is an accepted peer with ADVERTISED and PUNCHPORT whose observed endpoint is `target` (R-11.2).
+    std::optional<NodeId> target_id;
+    if (reject.empty()) {
+        std::vector<NodeId> candidates;
+        m_connman.ForEachNode([&](const CNode* node) {
+            if (node->IsInboundConn() && node->fSuccessfullyConnected && !node->fDisconnect && node->addr == msg.target) {
+                candidates.push_back(node->GetId());
+            }
+        });
+        for (const NodeId id : candidates) {
+            if (id == pfrom.GetId()) continue;
+            const PeerRef target_peer{GetPeerRef(id)};
+            if (!target_peer || !target_peer->m_holepunch_feature_received || target_peer->m_holepunch_version != holepunch::FEATURE_DATA_VERSION) continue;
+            constexpr uint32_t needed{holepunch::CAP_ADVERTISED | holepunch::CAP_PUNCHPORT};
+            if ((target_peer->m_holepunch_caps & needed) != needed) continue;
+            if (now - target_peer->m_holepunch_punch_sent < holepunch::WINDOW + holepunch::GRACE) {
+                reject = "a punch was sent to the target recently";
+                continue;
+            }
+            target_id = id;
+            reject.clear();
+            break;
+        }
+        if (!target_id && reject.empty()) reject = "no advertised peer with that endpoint";
+    }
+    if (!reject.empty()) {
+        LogDebug(BCLog::HOLEPUNCH, "ignoring rendezvous from peer=%d for %s: %s\n", pfrom.GetId(), msg.target.ToStringAddrPort(), reject);
+        return;
+    }
+
+    // Responder first, then initiator (R-5.13).
+    const bool sent{m_connman.ForNode(*target_id, [&](CNode* target_node) {
+        MakeAndPushMessage(*target_node, NetMsgType::PUNCH, holepunch::PunchMsg{.role = static_cast<uint8_t>(holepunch::Role::RESPONDER), .peer = requester});
+        return true;
+    })};
+    if (!sent) {
+        LogDebug(BCLog::HOLEPUNCH, "ignoring rendezvous from peer=%d for %s: the target disconnected\n", pfrom.GetId(), msg.target.ToStringAddrPort());
+        return;
+    }
+    if (const PeerRef target_peer{GetPeerRef(*target_id)}) target_peer->m_holepunch_punch_sent = now;
+    MakeAndPushMessage(pfrom, NetMsgType::PUNCH, holepunch::PunchMsg{.role = static_cast<uint8_t>(holepunch::Role::INITIATOR), .peer = msg.target});
+    peer.m_holepunch_punch_sent = now;
+    LogDebug(BCLog::HOLEPUNCH, "rendezvous from peer=%d (%s): punch sent to it as initiator and to peer=%d (%s) as responder\n", pfrom.GetId(), requester.ToStringAddrPort(), *target_id, msg.target.ToStringAddrPort());
+}
+
 void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string& msg_type, DataStream& vRecv,
                                      const NodeClock::time_point time_received,
                                      const std::atomic<bool>& interruptMsgProc)
@@ -4474,6 +4558,11 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
     if (msg_type == NetMsgType::PUNCH) {
         ProcessPunch(pfrom, peer, vRecv);
+        return;
+    }
+
+    if (msg_type == NetMsgType::RENDEZVOUS) {
+        ProcessRendezvous(pfrom, peer, vRecv);
         return;
     }
 

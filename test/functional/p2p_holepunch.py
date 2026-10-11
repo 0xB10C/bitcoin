@@ -10,6 +10,7 @@ from test_framework.messages import (
     CAddress,
     msg_feature,
     msg_punch,
+    msg_rendezvous,
 )
 from test_framework.p2p import (
     EncryptedP2PState,
@@ -36,10 +37,15 @@ def feature_data(caps, version=0):
 
 def endpoint(ip, port):
     addr = CAddress()
-    addr.net = CAddress.NET_IPV4
+    addr.net = CAddress.NET_IPV6 if ":" in ip else CAddress.NET_IPV4
     addr.ip = ip
     addr.port = port
     return addr
+
+
+def endpoint_from_str(addr_port):
+    ip, port = addr_port.rsplit(":", 1)
+    return endpoint(ip, int(port))
 
 
 class ReportingPeer(P2PInterface):
@@ -283,6 +289,54 @@ class HolePunchTest(BitcoinTestFramework):
         node.disconnect_p2ps()
         self.wait_until(lambda: len(node.getpeerinfo()) == 0)
 
+    def test_coordinator(self):
+        node = self.nodes[0]
+
+        def connect(caps):
+            peer = node.add_p2p_connection(HolePunchPeer(caps=caps))
+            return peer, node.getpeerinfo()[-1]["addr"]
+
+        advertised, advertised_addr = connect(CAP_ADVERTISED | CAP_PUNCHPORT)
+        connector, connector_addr = connect(CAP_PUNCHPORT)
+
+        self.log.info("A rendezvous naming an advertised peer makes the coordinator punch both")
+        with node.assert_debug_log(["punch sent to it as initiator"], timeout=5):
+            connector.send_and_ping(msg_rendezvous(endpoint_from_str(advertised_addr), endpoint_from_str(connector_addr)))
+        advertised.wait_until(lambda: "punch" in advertised.last_message)
+        connector.wait_until(lambda: "punch" in connector.last_message)
+        assert_equal(advertised.last_message["punch"].role, msg_punch.ROLE_RESPONDER)
+        assert_equal(advertised.last_message["punch"].peer, endpoint_from_str(connector_addr))
+        assert_equal(connector.last_message["punch"].role, msg_punch.ROLE_INITIATOR)
+        assert_equal(connector.last_message["punch"].peer, endpoint_from_str(advertised_addr))
+
+        self.log.info("Rendezvous requests that fail validation are ignored")
+        other, other_addr = connect(CAP_PUNCHPORT)
+        without_punchport, without_punchport_addr = connect(CAP_COORDINATOR)
+        for peer, msg, reason in [
+            (other, msg_rendezvous(endpoint("127.0.0.1", 40000), endpoint_from_str(other_addr)), "no advertised peer with that endpoint"),
+            (other, msg_rendezvous(endpoint_from_str(connector_addr), endpoint_from_str(other_addr)), "no advertised peer with that endpoint"),
+            (other, msg_rendezvous(endpoint_from_str(advertised_addr), endpoint("127.0.0.1", 1)), "differs from the observed endpoint"),
+            (other, msg_rendezvous(endpoint_from_str(advertised_addr), endpoint_from_str(other_addr)), "a punch was sent to the target recently"),
+            (connector, msg_rendezvous(endpoint_from_str(advertised_addr), endpoint_from_str(connector_addr)), "a punch was sent to the requester recently"),
+            (without_punchport, msg_rendezvous(endpoint_from_str(advertised_addr), endpoint_from_str(without_punchport_addr)), "requester did not announce PUNCHPORT"),
+        ]:
+            with node.assert_debug_log(["ignoring rendezvous from peer=", reason], timeout=5):
+                peer.send_and_ping(msg)
+
+        self.log.info("A malformed rendezvous disconnects the peer")
+        with node.assert_debug_log(["malformed rendezvous"], timeout=5):
+            other.send_without_ping(msg_rendezvous(endpoint_from_str(advertised_addr), endpoint("::1", 1)))
+            other.wait_for_disconnect()
+
+        self.log.info("A rendezvous without negotiated feature disconnects the peer")
+        plain = node.add_p2p_connection(P2PInterface())
+        with node.assert_debug_log(["rendezvous without negotiated feature"], timeout=5):
+            plain.send_without_ping(msg_rendezvous(endpoint_from_str(advertised_addr), endpoint("127.0.0.1", 1)))
+            plain.wait_for_disconnect()
+
+        node.disconnect_p2ps()
+        self.wait_until(lambda: len(node.getpeerinfo()) == 0)
+
     def test_options(self):
         node = self.nodes[0]
         self.log.info("-holepunch needs -v2transport")
@@ -305,6 +359,7 @@ class HolePunchTest(BitcoinTestFramework):
         self.test_external_address()
         self.test_feature_negotiation()
         self.test_punch_as_responder()
+        self.test_coordinator()
         self.test_options()
 
 
