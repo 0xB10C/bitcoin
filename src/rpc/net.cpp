@@ -1350,6 +1350,37 @@ static RPCMethod holepunchrendezvous()
     };
 }
 
+static RPCMethod holepunchaddannouncement()
+{
+    return RPCMethod{
+        "holepunchaddannouncement",
+        "Put a hole punching announcement into the cache by hand, as if it had been received from a peer.\n"
+        "The connector then treats it like any other announcement. This RPC is for testing only.",
+        {
+            {"coordinator", RPCArg::Type::STR, RPCArg::Optional::NO, "The coordinator's endpoint (ip:port, or onion/i2p address with port)"},
+            {"target", RPCArg::Type::STR, RPCArg::Optional::NO, "The announced node's endpoint (ip:port)"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "", std::vector<RPCResult>{}},
+        RPCExamples{
+            HelpExampleCli("holepunchaddannouncement", "\"192.0.2.3:8333\" \"203.0.113.1:8335\"") + HelpExampleRpc("holepunchaddannouncement", R"("192.0.2.3:8333", "203.0.113.1:8335")")},
+        [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue {
+            const auto coordinator{Lookup(std::string{self.Arg<std::string_view>("coordinator")}, /*portDefault=*/0, /*fAllowLookup=*/false)};
+            const auto target{Lookup(std::string{self.Arg<std::string_view>("target")}, /*portDefault=*/0, /*fAllowLookup=*/false)};
+            if (!coordinator || !coordinator->IsValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Invalid coordinator endpoint");
+            if (!target || !target->IsValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Invalid target endpoint");
+            const auto made{CNetAddr::MakeHolePunch(*coordinator, *target)};
+            if (!made) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Unsupported address types for an announcement");
+            NodeContext& node = EnsureAnyNodeContext(request.context);
+            CConnman& connman = EnsureConnman(node);
+            const CAddress element{CService{*made, target->GetPort()}, ServiceFlags(NODE_NETWORK | NODE_P2P_V2), Now<NodeSeconds>()};
+            if (!connman.HolePunchAddAnnouncement(/*from=*/-1, element)) {
+                throw JSONRPCError(RPC_MISC_ERROR, "Error: Announcement not accepted (is -holepunch on? is the target routable?)");
+            }
+            return UniValue{UniValue::VOBJ};
+        },
+    };
+}
+
 static RPCMethod getholepunchinfo()
 {
     return RPCMethod{
@@ -1469,6 +1500,7 @@ void RegisterNetRPCCommands(CRPCTable& t)
         {"hidden", &addpeeraddress},
         {"hidden", &sendmsgtopeer},
         {"hidden", &holepunchrendezvous},
+        {"hidden", &holepunchaddannouncement},
         {"hidden", &getrawaddrman},
     };
     for (const auto& c : commands) {

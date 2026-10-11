@@ -398,6 +398,12 @@ class HolePunchTest(BitcoinTestFramework):
         peer.send_and_ping(addrv2([announcement(coordinator, endpoint(f"5.6.8.{i}", 8335)) for i in range(5)]))
         assert_equal(len(self.announcements(node)), 4)
 
+        self.log.info("An announcement can be added by hand for testing")
+        node.holepunchaddannouncement("192.0.2.3:8333", "203.0.113.1:8335")
+        assert_equal(len(self.announcements(node)), 5)
+        assert_equal(self.announcements(node)[-1]["from"], -1)
+        assert_equal(self.announcements(node)[-1]["coordinator"], "192.0.2.3:8333")
+
         node.disconnect_p2ps()
 
     def test_relay(self):
@@ -463,7 +469,7 @@ class HolePunchTest(BitcoinTestFramework):
         assert_equal(request.requester, endpoint("127.0.0.1", punch_port))
         self.log.info("A used announcement leaves the cache; ones without a connected coordinator stay")
         assert target_endpoint.port not in [int(a["target"].rsplit(":", 1)[1]) for a in self.announcements(node)]
-        assert all(a["coordinator"] == "1.2.3.4:8333" for a in self.announcements(node))
+        assert all(a["coordinator"] != f"127.0.0.1:{coordinator_endpoint.port}" for a in self.announcements(node))
 
         self.log.info("The coordinator's punch makes the node connect to the target as initiator")
         coordinator.send_and_ping(msg_punch(msg_punch.ROLE_INITIATOR, target_endpoint))
