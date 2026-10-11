@@ -135,10 +135,19 @@ class HolePunchNodesTest(BitcoinTestFramework):
         assert_equal(at_e["addr"], f"127.0.0.1:{holepunch_port(A)}")
         assert_equal(at_e["addrbind"], f"127.0.0.1:{holepunch_port(E)}")
         assert_equal(at_e["connection_type"], "outbound-full-relay")
+        coordination = [p for p in e.getpeerinfo() if p["connection_type"] == "holepunch-coordination"]
+        assert_equal([p["addr"] for p in coordination], [coordinator])
+        assert_equal(coordination[0]["holepunch_caps"], ["COORDINATOR"])
+        assert_equal(coordination[0]["addrbind"], f"127.0.0.1:{holepunch_port(E)}")
         # A, D and the punched connection; the coordination connection is not counted.
         assert_equal(e.getnetworkinfo()["connections_out"], 3)
-        self.log.info("The coordination connection is closed once it has done its job")
-        self.wait_until(lambda: not [p for p in e.getpeerinfo() if p["connection_type"] == "holepunch-coordination"])
+
+        self.log.info("The coordination connection is kept through the punch window and closed after it")
+        mocktime += 20
+        with e.assert_debug_log(["punch window over"], timeout=10):
+            for node in self.nodes:
+                node.setmocktime(mocktime)
+            self.wait_until(lambda: not [p for p in e.getpeerinfo() if p["connection_type"] == "holepunch-coordination"])
 
         self.log.info("The punched connection relays blocks")
         self.disconnect_nodes(A, C)

@@ -390,6 +390,8 @@ struct Peer {
     NodeClock::time_point m_holepunch_rendezvous_sent GUARDED_BY(m_holepunch_mutex){};
     /** When we last sent a punch to this peer as coordinator (R-4.4). */
     NodeClock::time_point m_holepunch_punch_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
+    /** When a punch answering our rendezvous was accepted on a coordination connection (R-7.3). */
+    NodeClock::time_point m_holepunch_punch_received GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
     /** When to next announce ourselves to this peer as reachable by hole punching (R-6.5). */
     std::chrono::microseconds m_holepunch_next_announce GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0};
     /** Whether the peer sent us the hole punching feature. */
@@ -636,7 +638,8 @@ public:
     /** Why `peer` cannot be the other party of a session in `role` (R-5.1), or nothing if it can. */
     std::optional<std::string> HolePunchPeerProblem(holepunch::Role role, const CService& peer) const;
     /** Handle a `punch` message: validate it (R-5.1) and start a session. */
-    void ProcessPunch(CNode& pfrom, Peer& peer, DataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+    /** Handle a punch. Returns whether a session was started. */
+    bool ProcessPunch(CNode& pfrom, Peer& peer, DataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
     /** Handle a `rendezvous` message as coordinator: pair the requester with the advertised peer it names (R-11.1 to R-11.3). */
     void ProcessRendezvous(CNode& pfrom, Peer& peer, DataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_peer_mutex);
     std::optional<std::string> HolePunchRendezvous(NodeId coordinator, const CService& target) override
@@ -3964,12 +3967,12 @@ std::optional<std::string> PeerManagerImpl::HolePunchPeerProblem(holepunch::Role
     return std::nullopt;
 }
 
-void PeerManagerImpl::ProcessPunch(CNode& pfrom, Peer& peer, DataStream& vRecv)
+bool PeerManagerImpl::ProcessPunch(CNode& pfrom, Peer& peer, DataStream& vRecv)
 {
     if (!HolePunchNegotiated(peer)) {
         LogDebug(BCLog::HOLEPUNCH, "punch without negotiated feature, %s", pfrom.DisconnectMsg());
         pfrom.fDisconnect = true;
-        return;
+        return false;
     }
     holepunch::PunchMsg msg;
     try {
@@ -3980,7 +3983,7 @@ void PeerManagerImpl::ProcessPunch(CNode& pfrom, Peer& peer, DataStream& vRecv)
     if (!vRecv.empty() || !msg.IsWellFormed()) {
         LogDebug(BCLog::HOLEPUNCH, "malformed punch, %s", pfrom.DisconnectMsg());
         pfrom.fDisconnect = true;
-        return;
+        return false;
     }
     const auto role{static_cast<holepunch::Role>(msg.role)};
     const char* role_name{role == holepunch::Role::INITIATOR ? "initiator" : "responder"};
@@ -4019,9 +4022,10 @@ void PeerManagerImpl::ProcessPunch(CNode& pfrom, Peer& peer, DataStream& vRecv)
     }
     if (!reject.empty()) {
         LogDebug(BCLog::HOLEPUNCH, "ignoring punch from peer=%d (%s with %s): %s\n", pfrom.GetId(), role_name, msg.peer.ToStringAddrPort(), reject);
-        return;
+        return false;
     }
     LogDebug(BCLog::HOLEPUNCH, "punch from peer=%d: session with %s started as %s%s\n", pfrom.GetId(), msg.peer.ToStringAddrPort(), role_name, answered_target ? " (answers our rendezvous)" : "");
+    return true;
 }
 
 void PeerManagerImpl::ProcessRendezvous(CNode& pfrom, Peer& peer, DataStream& vRecv)
@@ -4850,11 +4854,19 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
     }
 
     if (msg_type == NetMsgType::PUNCH) {
-        ProcessPunch(pfrom, peer, vRecv);
+        const bool accepted{ProcessPunch(pfrom, peer, vRecv)};
         if (pfrom.IsHolePunchCoordConn() && !pfrom.fDisconnect) {
-            // The answer is in, whatever it was; the connection has no other use (R-7.3).
-            LogDebug(BCLog::HOLEPUNCH, "coordination finished, %s", pfrom.DisconnectMsg());
-            pfrom.fDisconnect = true;
+            // The answer is in, whatever it was. A connection to a clearnet coordinator is
+            // kept through the punch window, like the coordinator keeps its side: it is
+            // from our punch port and keeps the mapping the coordinator observed alive
+            // (R-7.3). Any other coordination connection has no further use.
+            if (accepted && !IsDedicatedHolePunchCoordination(pfrom)) {
+                peer.m_holepunch_punch_received = NodeClock::now();
+                LogDebug(BCLog::HOLEPUNCH, "coordination finished, keeping peer=%d through the punch window\n", pfrom.GetId());
+            } else {
+                LogDebug(BCLog::HOLEPUNCH, "coordination finished, %s", pfrom.DisconnectMsg());
+                pfrom.fDisconnect = true;
+            }
         }
         return;
     }
@@ -6643,7 +6655,13 @@ bool PeerManagerImpl::SendMessages(CNode& node)
         // Only the coordination exchange travels on these. Close one that has not done its
         // job within COORD_TIMEOUT of the connection or of our rendezvous (R-7.3, R-12.2).
         const auto last{WITH_LOCK(peer.m_holepunch_mutex, return std::max(node.m_connected, peer.m_holepunch_rendezvous_sent))};
-        if (last + holepunch::COORD_TIMEOUT < now) {
+        if (peer.m_holepunch_punch_received != NodeClock::time_point{}) {
+            // Kept through the punch window after an accepted punch (R-7.3).
+            if (peer.m_holepunch_punch_received + holepunch::WINDOW + holepunch::GRACE < now) {
+                LogDebug(BCLog::HOLEPUNCH, "punch window over, %s", node.DisconnectMsg());
+                node.fDisconnect = true;
+            }
+        } else if (last + holepunch::COORD_TIMEOUT < now) {
             LogDebug(BCLog::HOLEPUNCH, "coordination timed out, %s", node.DisconnectMsg());
             node.fDisconnect = true;
         } else if (peer.m_holepunch_punch_sent != NodeClock::time_point{}) {

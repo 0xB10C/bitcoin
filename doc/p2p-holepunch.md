@@ -32,7 +32,8 @@ This is experimental and off by default.
 - A connector that has no connection to the coordinator named in an
   announcement opens a short-lived *coordination connection* just for the
   rendezvous: from its punch port for a clearnet coordinator, so that the
-  coordinator observes its external address. On these connections the
+  coordinator observes its external address, kept open through the punch
+  window like the coordinator keeps its side. On these connections the
   node sends only the handshake, `rendezvous` and `punch`, and ignores
   whatever else the coordinator sends, which treats them as ordinary
   inbound connections. They take no connection slot and show as

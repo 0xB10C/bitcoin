@@ -670,7 +670,7 @@ class HolePunchTest(BitcoinTestFramework):
         assert_equal(self.external(node)["address"], f"127.0.0.1:{punch_port}")
         mocktime = int(time.time())
 
-        def run(coordinator_addr, coordinator_idx, target_idx, expected_caps):
+        def run(coordinator_addr, coordinator_idx, target_idx, expected_caps, kept):
             nonlocal mocktime
             coordinator = CoordinationPeer(caps=CAP_COORDINATOR)
             coordinator_port = self.listen(coordinator, coordinator_idx)
@@ -690,26 +690,35 @@ class HolePunchTest(BitcoinTestFramework):
             info = next(p for p in node.getpeerinfo() if p["connection_type"] == "holepunch-coordination")
             assert_equal(info["inbound"], False)
             assert_equal(info["addr"], coordinator_str)
-            self.log.info("The coordinator's punch makes the node connect to the target and close the coordination connection")
+            self.log.info("The coordinator's punch makes the node connect to the target")
             with node.assert_debug_log(["coordination finished"], timeout=5):
                 coordinator.send_without_ping(msg_punch(msg_punch.ROLE_INITIATOR, target_endpoint))
-                coordinator.wait_for_disconnect()
+                if not kept:
+                    coordinator.wait_for_disconnect()
             target.wait_for_connect()
             target.wait_for_verack()
             punched = [p for p in node.getpeerinfo() if p["hole_punched"]]
             assert_equal(len(punched), 1)
             assert_equal(punched[0]["inbound"], False)
             assert_equal(punched[0]["addr"], f"127.0.0.1:{target_endpoint.port}")
+            if kept:
+                self.log.info("A coordination connection to a clearnet coordinator stays open through the punch window")
+                coordinator.sync_with_ping()
+                assert_equal(info["id"], next(p["id"] for p in node.getpeerinfo() if p["connection_type"] == "holepunch-coordination"))
+                mocktime += 20
+                with node.assert_debug_log(["punch window over"], timeout=5):
+                    node.setmocktime(mocktime)
+                    coordinator.wait_for_disconnect()
             target.peer_disconnect()
             self.wait_until(lambda: not [p for p in node.getpeerinfo() if p["hole_punched"]])
             return info
 
         self.log.info("Without a connection to a clearnet coordinator, the connector opens one from the punch port")
-        info = run("127.0.0.1", coordinator_idx=10, target_idx=11, expected_caps=CAP_PUNCHPORT)
+        info = run("127.0.0.1", coordinator_idx=10, target_idx=11, expected_caps=CAP_PUNCHPORT, kept=True)
         assert_equal(info["addrbind"], f"127.0.0.1:{punch_port}")
 
         self.log.info("An onion coordinator is reached through the Tor proxy")
-        info = run(ONION, coordinator_idx=8, target_idx=4, expected_caps=0)
+        info = run(ONION, coordinator_idx=8, target_idx=4, expected_caps=0, kept=False)
         assert_equal(info["network"], "onion")
 
         node.setmocktime(0)
