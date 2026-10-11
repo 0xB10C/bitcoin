@@ -5669,7 +5669,7 @@ void PeerManagerImpl::EvictExtraOutboundPeers(NodeClock::time_point now)
 
             // Only consider outbound-full-relay peers that are not already
             // marked for disconnection
-            if (!pnode->IsFullOutboundConn() || pnode->fDisconnect) return;
+            if (!pnode->IsFullOutboundConn() || pnode->fDisconnect || pnode->m_hole_punched) return;
             CNodeState *state = State(pnode->GetId());
             if (state == nullptr) return; // shouldn't be possible, but just in case
             // Don't evict our protected peers

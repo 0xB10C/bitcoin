@@ -162,6 +162,7 @@ class NetTest(BitcoinTestFramework):
                 "conntime": no_version_peer_conntime,
                 "id": no_version_peer_id,
                 "inbound": True,
+                "hole_punched": False,
                 "inflight": [],
                 "last_block": 0,
                 "last_block_announcement": 0,

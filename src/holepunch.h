@@ -141,6 +141,8 @@ inline constexpr auto HOLD{std::chrono::seconds{2}};
 inline constexpr size_t MAX_ACTIVE_SESSIONS{2};
 inline constexpr size_t SESSIONS_PER_MIN{4};
 inline constexpr auto PER_ADDR_INTERVAL{std::chrono::minutes{10}};
+/** Hole-punched outbound connections a node holds at most (R-8.1). */
+inline constexpr int HP_OUTBOUND_MAX{1};
 
 /**
  * Runs the punch procedure (draft section 5): listens on the punch port, makes

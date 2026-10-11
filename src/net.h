@@ -207,6 +207,7 @@ public:
     int nVersion;
     std::string cleanSubVer;
     bool fInbound;
+    bool m_hole_punched;
     // We requested high bandwidth connection to peer
     bool m_bip152_highbandwidth_to;
     // Peer requested high bandwidth connection
@@ -680,6 +681,8 @@ struct CNodeOptions
     bool prefer_evict = false;
     size_t recv_flood_size{DEFAULT_MAXRECEIVEBUFFER * 1000};
     bool use_v2transport = false;
+    /** The connection was made by TCP hole punching. */
+    bool hole_punched = false;
 };
 
 /** Information about a peer */
@@ -731,6 +734,9 @@ public:
     const std::string m_dest;
     //! Whether this peer is an inbound onion, i.e. connected via our Tor onion service.
     const bool m_inbound_onion;
+    //! Whether this connection was made by TCP hole punching. An outbound one
+    //! occupies the hole punch slot, not one of the automatic outbound slots.
+    const bool m_hole_punched;
     std::atomic<int> nVersion{0};
     Mutex m_subver_mutex;
     /**
@@ -1176,6 +1182,12 @@ public:
     std::optional<CService> HolePunchExternalAddress(Network net) const;
     /** Details about the external address for `net`; empty when hole punching is off. */
     std::optional<holepunch::ExternalAddressTracker::Info> HolePunchExternalAddressInfo(Network net) const;
+    /** Start a punch session with `peer`. Returns the reason if it was not started. */
+    std::optional<std::string> HolePunch(holepunch::Role role, const CService& peer);
+    bool HasHolePunchSession(const CService& peer) const;
+    std::vector<holepunch::SessionManager::SessionInfo> GetHolePunchSessions() const;
+    /** Number of hole-punched outbound peers. */
+    int GetHolePunchOutboundCount() const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
     // test only
     void SetCaptureMessages(bool cap) { m_capture_messages = cap; }
@@ -1509,11 +1521,24 @@ private:
      * @param[in] permission_flags The peer's permissions.
      * @param[in] addr_bind The address and port at our side of the connection.
      * @param[in] addr The address and port at the peer's side of the connection.
+     * @param[in] hole_punched Whether the connection came out of a hole punch session.
      */
-    void CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
+    void CreateNodeFromAcceptedSocket(std::shared_ptr<Sock> sock,
                                       NetPermissionFlags permission_flags,
                                       const CService& addr_bind,
-                                      const CService& addr)
+                                      const CService& addr,
+                                      bool hole_punched = false)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+
+    /**
+     * Make an outbound hole-punched peer from the connection a session ended
+     * with as initiator. It takes the hole punch slot (R-8.1).
+     */
+    void CreateNodeFromPunchedSocket(std::shared_ptr<Sock> sock, const CService& peer)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+
+    /** Called by the session manager, on its thread, when a session ends. */
+    void OnHolePunchResult(const CService& peer, holepunch::Role role, std::shared_ptr<Sock> sock)
         EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
     void DisconnectNodes() EXCLUSIVE_LOCKS_REQUIRED(!m_reconnections_mutex, !m_nodes_mutex);
@@ -1824,6 +1849,7 @@ private:
 
     holepunch::Options m_holepunch_opts;
     std::unique_ptr<holepunch::ExternalAddressTracker> m_holepunch_tracker;
+    std::unique_ptr<holepunch::SessionManager> m_holepunch_sessions;
 
     /**
      * The local address to connect from when hole punching is enabled and the

@@ -649,6 +649,7 @@ void CNode::CopyStats(CNodeStats& stats)
         X(cleanSubVer);
     }
     stats.fInbound = IsInboundConn();
+    stats.m_hole_punched = m_hole_punched;
     X(m_bip152_highbandwidth_to);
     X(m_bip152_highbandwidth_from);
     {
@@ -1791,10 +1792,11 @@ void CConnman::AcceptConnection(const ListenSocket& hListenSocket) {
     CreateNodeFromAcceptedSocket(std::move(sock), permission_flags, addr_bind, addr);
 }
 
-void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
+void CConnman::CreateNodeFromAcceptedSocket(std::shared_ptr<Sock> sock,
                                             NetPermissionFlags permission_flags,
                                             const CService& addr_bind,
-                                            const CService& addr)
+                                            const CService& addr,
+                                            bool hole_punched)
 {
     AssertLockNotHeld(m_nodes_mutex);
 
@@ -1884,6 +1886,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                                  .prefer_evict = discouraged,
                                  .recv_flood_size = nReceiveFloodSize,
                                  .use_v2transport = use_v2transport,
+                                 .hole_punched = hole_punched,
                              });
     pnode->AddRef();
     m_msgproc->InitializeNode(*pnode, local_services);
@@ -1891,7 +1894,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
         LOCK(m_nodes_mutex);
         m_nodes.push_back(pnode);
     }
-    LogDebug(BCLog::NET, "connection from %s accepted\n", addr.ToStringAddrPort());
+    LogDebug(BCLog::NET, "%sconnection from %s accepted\n", hole_punched ? "hole-punched " : "", addr.ToStringAddrPort());
     TRACEPOINT(net, inbound_connection,
         pnode->GetId(),
         pnode->m_addr_name.c_str(),
@@ -2506,7 +2509,7 @@ int CConnman::GetFullOutboundConnCount() const
     {
         LOCK(m_nodes_mutex);
         for (const CNode* pnode : m_nodes) {
-            if (pnode->fSuccessfullyConnected && pnode->IsFullOutboundConn()) ++nRelevant;
+            if (pnode->fSuccessfullyConnected && pnode->IsFullOutboundConn() && !pnode->m_hole_punched) ++nRelevant;
         }
     }
     return nRelevant;
@@ -2742,6 +2745,8 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
         {
             LOCK(m_nodes_mutex);
             for (const CNode* pnode : m_nodes) {
+                // A hole-punched outbound has its own slot and does not count here (R-8.1).
+                if (pnode->m_hole_punched) continue;
                 if (pnode->IsFullOutboundConn()) nOutboundFullRelay++;
                 if (pnode->IsBlockOnlyConn()) nOutboundBlockRelay++;
 
@@ -3700,6 +3705,18 @@ bool CConnman::Start(CScheduler& scheduler, const Options& connOptions)
             std::thread(&util::TraceThread, "privbcast", [this] { ThreadPrivateBroadcast(); });
     }
 
+    if (m_holepunch_opts.enabled) {
+        m_holepunch_sessions = std::make_unique<holepunch::SessionManager>(
+            m_holepunch_opts,
+            [this](const CService& peer, holepunch::Role role, std::shared_ptr<Sock> sock) {
+                OnHolePunchResult(peer, role, std::move(sock));
+            });
+        if (!m_holepunch_sessions->Start()) {
+            LogWarning("Hole punching: sessions disabled, the punch port %d could not be opened", m_holepunch_opts.port);
+            m_holepunch_sessions.reset();
+        }
+    }
+
     // Dump network addresses
     scheduler.scheduleEvery([this] { DumpAddresses(); }, DUMP_PEERS_INTERVAL);
 
@@ -3756,6 +3773,9 @@ void CConnman::Interrupt()
 
 void CConnman::StopThreads()
 {
+    if (m_holepunch_sessions) {
+        m_holepunch_sessions->Stop();
+    }
     if (threadPrivateBroadcast.joinable()) {
         threadPrivateBroadcast.join();
     }
@@ -3830,6 +3850,98 @@ CConnman::~CConnman()
 {
     Interrupt();
     Stop();
+}
+
+void CConnman::CreateNodeFromPunchedSocket(std::shared_ptr<Sock> sock, const CService& peer)
+{
+    AssertLockNotHeld(m_nodes_mutex);
+    if (!fNetworkActive || m_interrupt_net->interrupted()) return;
+    if (m_banman && (m_banman->IsBanned(peer) || m_banman->IsDiscouraged(peer))) {
+        LogDebug(BCLog::HOLEPUNCH, "dropping punched connection to %s: banned or discouraged\n", peer.ToStringAddrPort());
+        return;
+    }
+    if (GetHolePunchOutboundCount() >= holepunch::HP_OUTBOUND_MAX) {
+        LogDebug(BCLog::HOLEPUNCH, "dropping punched connection to %s: hole punch slot is taken\n", peer.ToStringAddrPort());
+        return;
+    }
+
+    const NodeId id{GetNewNodeId()};
+    const uint64_t nonce{GetDeterministicRandomizer(RANDOMIZER_ID_LOCALHOSTNONCE).Write(id).Finalize()};
+    const CService addr_bind{GetBindAddress(*sock)};
+    const uint64_t network_id{GetDeterministicRandomizer(RANDOMIZER_ID_NETWORKKEY)
+                                  .Write(peer.GetNetClass())
+                                  .Write(addr_bind.GetAddrBytes())
+                                  .Write(0)
+                                  .Finalize()};
+    CNode* pnode = new CNode(id,
+                             std::move(sock),
+                             CAddress{peer, NODE_NONE},
+                             CalculateKeyedNetGroup(peer),
+                             nonce,
+                             addr_bind,
+                             /*addrNameIn=*/"",
+                             ConnectionType::OUTBOUND_FULL_RELAY,
+                             /*inbound_onion=*/false,
+                             network_id,
+                             CNodeOptions{
+                                 .recv_flood_size = nReceiveFloodSize,
+                                 .use_v2transport = true, // punched connections use the v2 transport only (R-5.9)
+                                 .hole_punched = true,
+                             });
+    pnode->AddRef();
+    m_msgproc->InitializeNode(*pnode, m_local_services);
+    {
+        LOCK(m_nodes_mutex);
+        m_nodes.push_back(pnode);
+    }
+    LogDebug(BCLog::HOLEPUNCH, "hole-punched outbound connection to %s, peer=%d\n", peer.ToStringAddrPort(), id);
+    TRACEPOINT(net, outbound_connection,
+        pnode->GetId(),
+        pnode->m_addr_name.c_str(),
+        pnode->ConnectionTypeAsString().c_str(),
+        pnode->ConnectedThroughNetwork(),
+        GetNodeCount(ConnectionDirection::Out));
+}
+
+void CConnman::OnHolePunchResult(const CService& peer, holepunch::Role role, std::shared_ptr<Sock> sock)
+{
+    if (!sock) {
+        LogDebug(BCLog::HOLEPUNCH, "punch with %s failed\n", peer.ToStringAddrPort());
+        return;
+    }
+    if (role == holepunch::Role::INITIATOR) {
+        CreateNodeFromPunchedSocket(std::move(sock), peer);
+    } else {
+        const CService addr_bind{GetBindAddress(*sock)};
+        CreateNodeFromAcceptedSocket(std::move(sock), NetPermissionFlags::None, addr_bind, peer, /*hole_punched=*/true);
+    }
+}
+
+std::optional<std::string> CConnman::HolePunch(holepunch::Role role, const CService& peer)
+{
+    if (!m_holepunch_sessions) return "hole punching is not running";
+    return m_holepunch_sessions->Punch(role, peer);
+}
+
+bool CConnman::HasHolePunchSession(const CService& peer) const
+{
+    return m_holepunch_sessions && m_holepunch_sessions->HasSession(peer);
+}
+
+std::vector<holepunch::SessionManager::SessionInfo> CConnman::GetHolePunchSessions() const
+{
+    if (!m_holepunch_sessions) return {};
+    return m_holepunch_sessions->GetSessions();
+}
+
+int CConnman::GetHolePunchOutboundCount() const
+{
+    int count{0};
+    LOCK(m_nodes_mutex);
+    for (const CNode* pnode : m_nodes) {
+        if (pnode->m_hole_punched && !pnode->IsInboundConn() && !pnode->fDisconnect) ++count;
+    }
+    return count;
 }
 
 void CConnman::HolePunchReport(const CNode& node, const CService& reported)
@@ -4195,6 +4307,7 @@ CNode::CNode(NodeId idIn,
       m_addr_name{addrNameIn.empty() ? addr.ToStringAddrPort() : addrNameIn},
       m_dest(addrNameIn),
       m_inbound_onion{inbound_onion},
+      m_hole_punched{node_opts.hole_punched},
       m_prefer_evict{node_opts.prefer_evict},
       nKeyedNetGroup{nKeyedNetGroupIn},
       m_network_key{network_key},
