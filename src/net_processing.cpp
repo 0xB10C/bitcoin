@@ -4163,6 +4163,12 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
 
     if (msg_type == NetMsgType::VERSION) {
+        // A punched connection uses the v2 transport only; no v1 fallback (R-5.9).
+        if (pfrom.m_hole_punched && pfrom.m_transport->GetInfo().transport_type != TransportProtocolType::V2) {
+            LogDebug(BCLog::HOLEPUNCH, "punched connection uses the v1 transport, %s", pfrom.DisconnectMsg());
+            pfrom.fDisconnect = true;
+            return;
+        }
         if (pfrom.nVersion != 0) {
             LogDebug(BCLog::NET, "redundant version message from peer=%d\n", pfrom.GetId());
             return;

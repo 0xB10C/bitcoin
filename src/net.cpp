@@ -1988,7 +1988,8 @@ void CConnman::DisconnectNodes()
                 // Add to reconnection list if appropriate. We don't reconnect right here, because
                 // the creation of a connection is a blocking operation (up to several seconds),
                 // and we don't want to hold up the socket handler thread for that long.
-                if (network_active && pnode->m_transport->ShouldReconnectV1()) {
+                // A punched connection cannot be remade by a plain reconnect, and it is v2 only anyway.
+                if (network_active && !pnode->m_hole_punched && pnode->m_transport->ShouldReconnectV1()) {
                     reconnections_to_add.push_back({
                         .proxy_override = pnode->m_proxy_override,
                         .addr_connect = pnode->addr,

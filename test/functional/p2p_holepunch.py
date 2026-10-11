@@ -134,7 +134,8 @@ class PunchInitiatorPeer(HolePunchPeer):
 
     def peer_accept_connection(self, *args, net, **kwargs):
         create = super().peer_accept_connection(*args, net=net, **kwargs)
-        self.v2_state = EncryptedP2PState(initiating=True, net=net)
+        if self.v2_state is not None:
+            self.v2_state = EncryptedP2PState(initiating=True, net=net)
         self.p2p_connected_to_node = True
         return create
 
@@ -254,13 +255,13 @@ class HolePunchTest(BitcoinTestFramework):
 
         node.disconnect_p2ps()
 
-    def listen_for_punch(self, idx):
+    def listen_for_punch(self, idx, v2=True):
         """Start a PunchInitiatorPeer listening where the node will punch to. Returns it and its port."""
         peer = PunchInitiatorPeer()
         listening = threading.Event()
         peer.peer_accept_connection(
             connect_cb=lambda address, port: listening.set(), connect_id=idx, net=self.chain,
-            timeout_factor=self.options.timeout_factor, supports_v2_p2p=True, reconnect=False)()
+            timeout_factor=self.options.timeout_factor, supports_v2_p2p=v2, reconnect=False)()
         assert listening.wait(timeout=10 * self.options.timeout_factor)
         return peer, p2p_port(MAX_NODES - idx)
 
@@ -292,6 +293,14 @@ class HolePunchTest(BitcoinTestFramework):
         assert_equal(punched[0]["transport_protocol_type"], "v2")
         self.log.info("The punched peer negotiates the feature like any other")
         assert_equal(listener.holepunch_feature, feature_data(CAP_COORDINATOR))
+
+        self.log.info("A punched peer that speaks the v1 transport is disconnected")
+        v1_listener, v1_port = self.listen_for_punch(idx=7, v2=False)
+        with node.assert_debug_log(["punched connection uses the v1 transport"], timeout=10):
+            coordinator.send_without_ping(msg_punch(msg_punch.ROLE_RESPONDER, endpoint("127.0.0.1", v1_port)))
+            v1_listener.wait_for_connect()
+            v1_listener.wait_for_disconnect()
+        assert_equal(len([p for p in node.getpeerinfo() if p["hole_punched"]]), 1)
 
         self.log.info("Punch requests that fail validation are ignored")
         for punch, reason in [
