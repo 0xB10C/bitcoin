@@ -1796,7 +1796,8 @@ void CConnman::CreateNodeFromAcceptedSocket(std::shared_ptr<Sock> sock,
                                             NetPermissionFlags permission_flags,
                                             const CService& addr_bind,
                                             const CService& addr,
-                                            bool hole_punched)
+                                            bool hole_punched,
+                                            NodeClock::time_point holepunch_deadline)
 {
     AssertLockNotHeld(m_nodes_mutex);
 
@@ -1903,6 +1904,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::shared_ptr<Sock> sock,
                                  .recv_flood_size = nReceiveFloodSize,
                                  .use_v2transport = use_v2transport,
                                  .hole_punched = hole_punched,
+                                 .holepunch_deadline = holepunch_deadline,
                                  .accepted = coordination,
                              });
     pnode->AddRef();
@@ -3804,8 +3806,8 @@ bool CConnman::Start(CScheduler& scheduler, const Options& connOptions)
     if (m_holepunch_opts.enabled) {
         m_holepunch_sessions = std::make_unique<holepunch::SessionManager>(
             m_holepunch_opts,
-            [this](const CService& peer, holepunch::Role role, std::shared_ptr<Sock> sock) {
-                OnHolePunchResult(peer, role, std::move(sock));
+            [this](const CService& peer, holepunch::Role role, std::shared_ptr<Sock> sock, NodeClock::time_point deadline) {
+                OnHolePunchResult(peer, role, std::move(sock), deadline);
             });
         if (!m_holepunch_sessions->Start()) {
             LogWarning("Hole punching: sessions disabled, the punch port %d could not be opened", m_holepunch_opts.port);
@@ -3952,7 +3954,7 @@ CConnman::~CConnman()
     Stop();
 }
 
-void CConnman::CreateNodeFromPunchedSocket(std::shared_ptr<Sock> sock, const CService& peer)
+void CConnman::CreateNodeFromPunchedSocket(std::shared_ptr<Sock> sock, const CService& peer, NodeClock::time_point deadline)
 {
     AssertLockNotHeld(m_nodes_mutex);
     if (!fNetworkActive || m_interrupt_net->interrupted()) return;
@@ -3987,6 +3989,7 @@ void CConnman::CreateNodeFromPunchedSocket(std::shared_ptr<Sock> sock, const CSe
                                  .recv_flood_size = nReceiveFloodSize,
                                  .use_v2transport = true, // punched connections use the v2 transport only (R-5.9)
                                  .hole_punched = true,
+                                 .holepunch_deadline = deadline,
                              });
     pnode->AddRef();
     m_msgproc->InitializeNode(*pnode, m_local_services);
@@ -4003,17 +4006,17 @@ void CConnman::CreateNodeFromPunchedSocket(std::shared_ptr<Sock> sock, const CSe
         GetNodeCount(ConnectionDirection::Out));
 }
 
-void CConnman::OnHolePunchResult(const CService& peer, holepunch::Role role, std::shared_ptr<Sock> sock)
+void CConnman::OnHolePunchResult(const CService& peer, holepunch::Role role, std::shared_ptr<Sock> sock, NodeClock::time_point deadline)
 {
     if (!sock) {
         LogDebug(BCLog::HOLEPUNCH, "punch with %s failed\n", peer.ToStringAddrPort());
         return;
     }
     if (role == holepunch::Role::INITIATOR) {
-        CreateNodeFromPunchedSocket(std::move(sock), peer);
+        CreateNodeFromPunchedSocket(std::move(sock), peer, deadline);
     } else {
         const CService addr_bind{GetBindAddress(*sock)};
-        CreateNodeFromAcceptedSocket(std::move(sock), NetPermissionFlags::None, addr_bind, peer, /*hole_punched=*/true);
+        CreateNodeFromAcceptedSocket(std::move(sock), NetPermissionFlags::None, addr_bind, peer, /*hole_punched=*/true, deadline);
     }
 }
 
@@ -4447,6 +4450,7 @@ CNode::CNode(NodeId idIn,
       m_dest(addrNameIn),
       m_inbound_onion{inbound_onion},
       m_hole_punched{node_opts.hole_punched},
+      m_holepunch_deadline{node_opts.holepunch_deadline},
       m_accepted{node_opts.accepted},
       m_prefer_evict{node_opts.prefer_evict},
       nKeyedNetGroup{nKeyedNetGroupIn},

@@ -317,7 +317,7 @@ void SessionManager::Finish(const CService& peer, std::shared_ptr<Sock> sock, st
     } else {
         LogDebug(BCLog::HOLEPUNCH, "session with %s failed as %s after %d attempt(s)\n", peer.ToStringAddrPort(), RoleName(session.role), session.attempts);
     }
-    results.push_back({.peer = peer, .role = session.role, .sock = std::move(sock)});
+    results.push_back({.peer = peer, .role = session.role, .sock = std::move(sock), .deadline = session.deadline + GRACE});
     m_sessions.erase(it);
 }
 
@@ -438,7 +438,7 @@ void SessionManager::ThreadLoop()
                 if (session.attempt) events.emplace(session.attempt, Sock::Events{Sock::SendEvent});
             }
         }
-        for (auto& result : results) m_on_result(result.peer, result.role, std::move(result.sock));
+        for (auto& result : results) m_on_result(result.peer, result.role, std::move(result.sock), result.deadline);
         results.clear();
 
         if (events.empty() || !events.begin()->first->WaitMany(std::chrono::milliseconds{100}, events)) {
@@ -468,7 +468,7 @@ void SessionManager::ThreadLoop()
             }
             for (const CService& peer : done) OnAttemptDone(m_sessions.at(peer), now, results);
         }
-        for (auto& result : results) m_on_result(result.peer, result.role, std::move(result.sock));
+        for (auto& result : results) m_on_result(result.peer, result.role, std::move(result.sock), result.deadline);
     }
 }
 

@@ -427,15 +427,16 @@ struct Results {
         CService peer;
         Role role;
         std::shared_ptr<Sock> sock;
+        NodeClock::time_point deadline;
     };
     Mutex mutex;
     std::vector<Entry> entries GUARDED_BY(mutex);
 
     SessionManager::ResultFn Fn()
     {
-        return [this](const CService& peer, Role role, std::shared_ptr<Sock> sock) {
+        return [this](const CService& peer, Role role, std::shared_ptr<Sock> sock, NodeClock::time_point deadline) {
             LOCK(mutex);
-            entries.push_back({peer, role, std::move(sock)});
+            entries.push_back({peer, role, std::move(sock), deadline});
         };
     }
     size_t Count() EXCLUSIVE_LOCKS_REQUIRED(!mutex) { return WITH_LOCK(mutex, return entries.size()); }

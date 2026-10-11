@@ -4,6 +4,7 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test TCP hole punching (-holepunch)."""
 
+import socket
 import threading
 
 from test_framework.messages import (
@@ -532,6 +533,36 @@ class HolePunchTest(BitcoinTestFramework):
     def announcements(self, node):
         return node.getholepunchinfo()["announcements"]
 
+    def test_handshake_deadline(self):
+        node = self.nodes[0]
+        coord_port = holepunch_coord_port(0)
+        node.add_outbound_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR), p2p_idx=0)
+        node.add_outbound_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR), p2p_idx=1)
+        external = endpoint_from_str(self.external(node)["address"])
+        # A base far past any session the earlier mocktime-driven tests left behind.
+        mocktime = int(time.time()) + 1000
+        node.setmocktime(mocktime)
+
+        self.log.info("A punched connection that never completes the handshake is closed at the session deadline")
+        # A target that accepts the TCP connection but never speaks the v2 transport.
+        silent = socket.socket()
+        silent.bind(("127.0.0.1", 0))
+        silent.listen(1)
+        silent_port = silent.getsockname()[1]
+        requester = node.add_p2p_connection(CoordinationPeer(caps=0), dstport=coord_port)
+        with node.assert_debug_log([f"session with 127.0.0.1:{silent_port} started as responder"], timeout=10):
+            requester.send_without_ping(msg_rendezvous(external, endpoint("127.0.0.1", silent_port)))
+            conn, _ = silent.accept()
+        self.wait_until(lambda: len([p for p in node.getpeerinfo() if p["hole_punched"]]) == 1)
+        with node.assert_debug_log(["punched connection did not complete the handshake in time"], timeout=10):
+            node.setmocktime(mocktime + 20)
+            self.wait_until(lambda: not [p for p in node.getpeerinfo() if p["hole_punched"]])
+        conn.close()
+        silent.close()
+        node.setmocktime(0)
+        node.disconnect_p2ps()
+        self.wait_until(lambda: len(node.getpeerinfo()) == 0)
+
     def test_announcement_cache(self):
         node = self.nodes[0]
         peer = node.add_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR))
@@ -779,6 +810,7 @@ class HolePunchTest(BitcoinTestFramework):
         self.test_advertiser()
         self.test_connector()
         self.test_coordination_connect()
+        self.test_handshake_deadline()
         self.test_announcement_cache()
         self.test_relay()
         self.test_options()

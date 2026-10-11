@@ -6654,6 +6654,13 @@ bool PeerManagerImpl::SendMessages(CNode& node)
         peer.m_outbound_version_message_sent = true;
     }
 
+    // A punched connection has the rest of its session's window for the handshake (R-5.11).
+    if (node.m_hole_punched && !node.fSuccessfullyConnected && node.m_holepunch_deadline < NodeClock::now()) {
+        LogDebug(BCLog::HOLEPUNCH, "punched connection did not complete the handshake in time, %s", node.DisconnectMsg());
+        node.fDisconnect = true;
+        return true;
+    }
+
     // Don't send anything until the version handshake is complete
     if (!node.fSuccessfullyConnected || node.fDisconnect)
         return true;

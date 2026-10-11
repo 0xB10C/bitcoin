@@ -222,8 +222,12 @@ private:
 class SessionManager
 {
 public:
-    /** Called when a session ends: with the connection on success, with nullptr on failure. */
-    using ResultFn = std::function<void(const CService& peer, Role role, std::shared_ptr<Sock> sock)>;
+    /**
+     * Called when a session ends: with the connection on success, with nullptr on failure.
+     * `deadline` is the session's deadline (R-5.11): the connection's handshake must be
+     * complete by then too.
+     */
+    using ResultFn = std::function<void(const CService& peer, Role role, std::shared_ptr<Sock> sock, NodeClock::time_point deadline)>;
 
     SessionManager(const Options& opts, ResultFn on_result);
     ~SessionManager() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
@@ -277,6 +281,7 @@ private:
         CService peer;
         Role role;
         std::shared_ptr<Sock> sock;
+        NodeClock::time_point deadline;
     };
 
     void ThreadLoop() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);

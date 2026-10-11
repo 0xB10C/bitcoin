@@ -683,6 +683,8 @@ struct CNodeOptions
     bool use_v2transport = false;
     /** The connection was made by TCP hole punching. */
     bool hole_punched = false;
+    /** Only for hole_punched: the session's deadline, by which the handshake must be complete (R-5.11). */
+    NodeClock::time_point holepunch_deadline{};
     /** Only for ConnectionType::HOLEPUNCH_COORD: the peer connected to us. */
     bool accepted = false;
 };
@@ -739,6 +741,8 @@ public:
     //! Whether this connection was made by TCP hole punching. An outbound one
     //! occupies the hole punch slot, not one of the automatic outbound slots.
     const bool m_hole_punched;
+    //! For hole-punched connections: when the handshake must be complete (R-5.11).
+    const NodeClock::time_point m_holepunch_deadline;
     //! For hole punch coordination connections: whether the peer connected to us.
     const bool m_accepted;
     std::atomic<int> nVersion{0};
@@ -1556,23 +1560,25 @@ private:
      * @param[in] addr_bind The address and port at our side of the connection.
      * @param[in] addr The address and port at the peer's side of the connection.
      * @param[in] hole_punched Whether the connection came out of a hole punch session.
+     * @param[in] holepunch_deadline For a hole-punched connection: the session's deadline.
      */
     void CreateNodeFromAcceptedSocket(std::shared_ptr<Sock> sock,
                                       NetPermissionFlags permission_flags,
                                       const CService& addr_bind,
                                       const CService& addr,
-                                      bool hole_punched = false)
+                                      bool hole_punched = false,
+                                      NodeClock::time_point holepunch_deadline = {})
         EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
     /**
      * Make an outbound hole-punched peer from the connection a session ended
      * with as initiator. It takes the hole punch slot (R-8.1).
      */
-    void CreateNodeFromPunchedSocket(std::shared_ptr<Sock> sock, const CService& peer)
+    void CreateNodeFromPunchedSocket(std::shared_ptr<Sock> sock, const CService& peer, NodeClock::time_point deadline)
         EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
     /** Called by the session manager, on its thread, when a session ends. */
-    void OnHolePunchResult(const CService& peer, holepunch::Role role, std::shared_ptr<Sock> sock)
+    void OnHolePunchResult(const CService& peer, holepunch::Role role, std::shared_ptr<Sock> sock, NodeClock::time_point deadline)
         EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
     void DisconnectNodes() EXCLUSIVE_LOCKS_REQUIRED(!m_reconnections_mutex, !m_nodes_mutex);
