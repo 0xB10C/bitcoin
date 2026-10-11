@@ -119,6 +119,74 @@ ExternalAddressTracker::Info ExternalAddressTracker::GetInfo(Network net) const
     return info;
 }
 
+std::optional<Announcement> AnnouncementCache::Add(NodeId from, const CAddress& element, NodeClock::time_point now, bool allow_local)
+{
+    if (!element.IsHolePunch() || !element.IsValid()) return std::nullopt;
+    const auto coordinator{element.HolePunchCoordinator()};
+    const auto target{element.HolePunchTarget()};
+    if (!coordinator || !target) return std::nullopt;
+    if (!allow_local && !element.IsRoutable()) return std::nullopt;
+    if (element.GetPort() == 0) return std::nullopt;
+    // Same freshness window as address relay (R-6.3).
+    const auto now_s{std::chrono::time_point_cast<std::chrono::seconds>(now)};
+    if (element.nTime <= now_s - std::chrono::minutes{10} || element.nTime > now_s + std::chrono::minutes{10}) return std::nullopt;
+
+    Announcement announcement{
+        .coordinator = *coordinator,
+        .target = CService{*target, element.GetPort()},
+        .services = element.nServices,
+        .time = element.nTime,
+        .from = from,
+    };
+    LOCK(m_mutex);
+    Expire(now);
+    // A newer element for the same pair replaces the old one.
+    std::erase_if(m_entries, [&](const Announcement& a) { return a.coordinator == announcement.coordinator && a.target == announcement.target; });
+    const size_t from_peer{static_cast<size_t>(std::ranges::count_if(m_entries, [&](const Announcement& a) { return a.from == from; }))};
+    if (from_peer >= CACHE_PER_PEER) return std::nullopt;
+    if (m_entries.size() >= CACHE_MAX) m_entries.erase(m_entries.begin());
+    m_entries.push_back(announcement);
+    return announcement;
+}
+
+void AnnouncementCache::Expire(NodeClock::time_point now)
+{
+    const auto now_s{std::chrono::time_point_cast<std::chrono::seconds>(now)};
+    std::erase_if(m_entries, [&](const Announcement& a) { return a.time + CACHE_TTL <= now_s; });
+}
+
+std::vector<Announcement> AnnouncementCache::Get(NodeClock::time_point now) const
+{
+    LOCK(m_mutex);
+    const auto now_s{std::chrono::time_point_cast<std::chrono::seconds>(now)};
+    std::vector<Announcement> live;
+    for (const auto& a : m_entries) {
+        if (a.time + CACHE_TTL > now_s) live.push_back(a);
+    }
+    return live;
+}
+
+std::optional<Announcement> AnnouncementCache::Take(NodeClock::time_point now, const std::function<bool(const Announcement&)>& eligible, FastRandomContext& rng)
+{
+    LOCK(m_mutex);
+    Expire(now);
+    std::vector<size_t> candidates;
+    for (size_t i = 0; i < m_entries.size(); ++i) {
+        if (eligible(m_entries[i])) candidates.push_back(i);
+    }
+    if (candidates.empty()) return std::nullopt;
+    const size_t index{candidates[rng.randrange(candidates.size())]};
+    Announcement taken{m_entries[index]};
+    m_entries.erase(m_entries.begin() + index);
+    return taken;
+}
+
+size_t AnnouncementCache::Size() const
+{
+    LOCK(m_mutex);
+    return m_entries.size();
+}
+
 CService WildcardAddress(Network family, uint16_t port)
 {
     if (family == NET_IPV4) {

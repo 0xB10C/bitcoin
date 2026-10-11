@@ -6,6 +6,8 @@
 #define BITCOIN_HOLEPUNCH_H
 
 #include <netaddress.h>
+#include <protocol.h>
+#include <random.h>
 #include <serialize.h>
 #include <sync.h>
 #include <util/sock.h>
@@ -145,6 +147,59 @@ inline constexpr auto PER_ADDR_INTERVAL{std::chrono::minutes{10}};
 inline constexpr int HP_OUTBOUND_MAX{1};
 /** How long a connector waits for the answer to a rendezvous (R-4.4, R-7.3). */
 inline constexpr auto COORD_TIMEOUT{std::chrono::seconds{10}};
+
+/** Cache limits for announcements (R-6.2). */
+inline constexpr size_t CACHE_MAX{32};
+inline constexpr size_t CACHE_PER_PEER{4};
+inline constexpr auto CACHE_TTL{std::chrono::minutes{10}};
+/** An advertiser announces at most this often per peer (R-6.5). */
+inline constexpr auto ANNOUNCE_INTERVAL{std::chrono::minutes{10}};
+/** A connector starts at most one coordination attempt per this interval (R-7.2). */
+inline constexpr auto HP_ATTEMPT_INTERVAL{std::chrono::minutes{5}};
+
+/** A hole punching announcement received from a peer: a HOLEPUNCH address element taken apart. */
+struct Announcement {
+    /** The coordinator through which the node can be reached. */
+    CService coordinator;
+    /** The announced node's endpoint. */
+    CService target;
+    ServiceFlags services;
+    NodeSeconds time;
+    /** The peer the element came from. */
+    NodeId from;
+};
+
+/**
+ * Short-lived store of announcements (R-6.2): at most CACHE_MAX entries,
+ * CACHE_PER_PEER from one peer, each expiring CACHE_TTL after its time. Nothing
+ * here is ever persisted or handed to the address manager.
+ */
+class AnnouncementCache
+{
+public:
+    /**
+     * Add an element. Rejected if it is not a well formed HOLEPUNCH address, its
+     * time is outside the relay window, or the peer's share is used up. A
+     * newer element for the same coordinator and target replaces the old one.
+     * @param[in] allow_local Accept non-routable targets (test networks).
+     * @return the announcement if it was added.
+     */
+    std::optional<Announcement> Add(NodeId from, const CAddress& element, NodeClock::time_point now, bool allow_local)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** All announcements that have not expired, oldest first. */
+    std::vector<Announcement> Get(NodeClock::time_point now) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Remove and return a random announcement among those `eligible` (R-7.1, R-7.2). */
+    std::optional<Announcement> Take(NodeClock::time_point now, const std::function<bool(const Announcement&)>& eligible, FastRandomContext& rng)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    size_t Size() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+private:
+    void Expire(NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+
+    mutable Mutex m_mutex;
+    /** Insertion order, oldest first. */
+    std::vector<Announcement> m_entries GUARDED_BY(m_mutex);
+};
 
 /**
  * Runs the punch procedure (draft section 5): listens on the punch port, makes

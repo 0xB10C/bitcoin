@@ -342,6 +342,73 @@ BOOST_AUTO_TEST_CASE(holepunch_address_make)
     BOOST_CHECK(!CNetAddr::MakeHolePunch(CService{i2p, 1}, target));
 }
 
+// Announcement cache (R-6.2).
+
+namespace {
+CAddress Element(const std::string& coordinator, const std::string& target, uint16_t port, NodeSeconds time)
+{
+    const auto made{CNetAddr::MakeHolePunch(LookupNumeric(coordinator, 8333), LookupNumeric(target, 0))};
+    BOOST_REQUIRE(made);
+    return CAddress{CService{*made, port}, ServiceFlags(NODE_NETWORK | NODE_P2P_V2), time};
+}
+} // namespace
+
+BOOST_AUTO_TEST_CASE(announcement_cache)
+{
+    AnnouncementCache cache;
+    FastRandomContext rng{/*fDeterministic=*/true};
+    const auto now{NodeClock::now()};
+    const auto now_s{std::chrono::time_point_cast<std::chrono::seconds>(now)};
+
+    // A fresh, routable element is added and taken apart.
+    const auto added{cache.Add(1, Element("1.2.3.4", "5.6.7.8", 8335, now_s), now, /*allow_local=*/false)};
+    BOOST_REQUIRE(added);
+    BOOST_CHECK_EQUAL(added->coordinator.ToStringAddrPort(), "1.2.3.4:8333");
+    BOOST_CHECK_EQUAL(added->target.ToStringAddrPort(), "5.6.7.8:8335");
+    BOOST_CHECK_EQUAL(added->from, 1);
+    BOOST_CHECK_EQUAL(cache.Size(), 1);
+
+    // Not a HOLEPUNCH address, stale, from the future, port 0, non-routable: rejected.
+    BOOST_CHECK(!cache.Add(1, CAddress{LookupNumeric("1.2.3.4", 8333), NODE_NETWORK, now_s}, now, false));
+    BOOST_CHECK(!cache.Add(1, Element("1.2.3.4", "5.6.7.9", 8335, now_s - std::chrono::minutes{11}), now, false));
+    BOOST_CHECK(!cache.Add(1, Element("1.2.3.4", "5.6.7.9", 8335, now_s + std::chrono::minutes{11}), now, false));
+    BOOST_CHECK(!cache.Add(1, Element("1.2.3.4", "5.6.7.9", 0, now_s), now, false));
+    BOOST_CHECK(!cache.Add(1, Element("1.2.3.4", "127.0.0.1", 8335, now_s), now, false));
+    BOOST_CHECK(cache.Add(1, Element("1.2.3.4", "127.0.0.1", 8335, now_s), now, /*allow_local=*/true));
+    BOOST_CHECK_EQUAL(cache.Size(), 2);
+
+    // The same pair again replaces the old entry (newer time).
+    BOOST_CHECK(cache.Add(1, Element("1.2.3.4", "5.6.7.8", 8335, now_s + std::chrono::seconds{1}), now, false));
+    BOOST_CHECK_EQUAL(cache.Size(), 2);
+    BOOST_CHECK_EQUAL(cache.Get(now).back().time.time_since_epoch().count(), (now_s + std::chrono::seconds{1}).time_since_epoch().count());
+
+    // At most CACHE_PER_PEER from one peer.
+    BOOST_CHECK(cache.Add(1, Element("1.2.3.4", "5.6.7.10", 8335, now_s), now, false));
+    BOOST_CHECK(cache.Add(1, Element("1.2.3.4", "5.6.7.11", 8335, now_s), now, false));
+    BOOST_CHECK(!cache.Add(1, Element("1.2.3.4", "5.6.7.12", 8335, now_s), now, false));
+    BOOST_CHECK(cache.Add(2, Element("1.2.3.4", "5.6.7.12", 8335, now_s), now, false));
+    BOOST_CHECK_EQUAL(cache.Size(), 5);
+
+    // At most CACHE_MAX in total, the oldest goes first.
+    for (int i = 0; i < 40; ++i) {
+        cache.Add(100 + i, Element("1.2.3.4", strprintf("9.9.%d.1", i), 8335, now_s), now, false);
+    }
+    BOOST_CHECK_EQUAL(cache.Size(), CACHE_MAX);
+    BOOST_CHECK_EQUAL(cache.Get(now).front().target.ToStringAddrPort(), "9.9.8.1:8335");
+
+    // Taking removes a random eligible entry; nothing eligible means nothing taken.
+    BOOST_CHECK(!cache.Take(now, [](const Announcement&) { return false; }, rng));
+    const auto taken{cache.Take(now, [](const Announcement& a) { return a.target.ToStringAddr() == "9.9.20.1"; }, rng)};
+    BOOST_REQUIRE(taken);
+    BOOST_CHECK_EQUAL(taken->target.ToStringAddr(), "9.9.20.1");
+    BOOST_CHECK_EQUAL(cache.Size(), CACHE_MAX - 1);
+
+    // Entries expire CACHE_TTL after their time.
+    BOOST_CHECK_EQUAL(cache.Get(now + CACHE_TTL + std::chrono::seconds{1}).size(), 0);
+    BOOST_CHECK(!cache.Take(now + CACHE_TTL + std::chrono::seconds{1}, [](const Announcement&) { return true; }, rng));
+    BOOST_CHECK_EQUAL(cache.Size(), 0);
+}
+
 // Session manager tests with real loopback sockets.
 
 namespace {
