@@ -2575,7 +2575,7 @@ std::unordered_set<Network> CConnman::GetReachableEmptyNetworks() const
     std::unordered_set<Network> networks{};
     for (int n = 0; n < NET_MAX; n++) {
         enum Network net = (enum Network)n;
-        if (net == NET_UNROUTABLE || net == NET_INTERNAL) continue;
+        if (net == NET_UNROUTABLE || net == NET_INTERNAL || net == NET_HOLEPUNCH) continue;
         if (g_reachable_nets.Contains(net) && addrman.get().Size(net, std::nullopt) == 0) {
             networks.insert(net);
         }

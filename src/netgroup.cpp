@@ -29,6 +29,12 @@ uint256 NetGroupManager::GetAsmapVersion() const
 std::vector<unsigned char> NetGroupManager::GetGroup(const CNetAddr& address) const
 {
     std::vector<unsigned char> vchRet;
+    // A hole punching announcement belongs to the group of the node it announces.
+    if (address.IsHolePunch()) {
+        if (const auto target{address.HolePunchTarget()}) return GetGroup(*target);
+        vchRet.push_back(address.GetNetClass());
+        return vchRet;
+    }
     // If non-empty asmap is supplied and the address is IPv4/IPv6,
     // return ASN to be used for bucketing.
     uint32_t asn = GetMappedAS(address);

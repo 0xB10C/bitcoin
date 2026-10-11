@@ -667,7 +667,7 @@ static UniValue GetNetworksInfo()
     UniValue networks(UniValue::VARR);
     for (int n = 0; n < NET_MAX; ++n) {
         enum Network network = static_cast<enum Network>(n);
-        if (network == NET_UNROUTABLE || network == NET_INTERNAL) continue;
+        if (network == NET_UNROUTABLE || network == NET_INTERNAL || network == NET_HOLEPUNCH) continue;
         UniValue obj(UniValue::VOBJ);
         obj.pushKV("name", GetNetworkName(network));
         obj.pushKV("limited", !g_reachable_nets.Contains(network));
@@ -1176,7 +1176,7 @@ static RPCMethod getaddrmaninfo()
             UniValue ret(UniValue::VOBJ);
             for (int n = 0; n < NET_MAX; ++n) {
                 enum Network network = static_cast<enum Network>(n);
-                if (network == NET_UNROUTABLE || network == NET_INTERNAL) continue;
+                if (network == NET_UNROUTABLE || network == NET_INTERNAL || network == NET_HOLEPUNCH) continue;
                 UniValue obj(UniValue::VOBJ);
                 obj.pushKV("new", addrman.Size(network, true));
                 obj.pushKV("tried", addrman.Size(network, false));

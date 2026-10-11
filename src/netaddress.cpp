@@ -37,6 +37,8 @@ CNetAddr::BIP155Network CNetAddr::GetBIP155Network() const
         return BIP155Network::I2P;
     case NET_CJDNS:
         return BIP155Network::CJDNS;
+    case NET_HOLEPUNCH:
+        return BIP155Network::HOLEPUNCH;
     case NET_INTERNAL:   // should have been handled before calling this function
     case NET_UNROUTABLE: // m_net is never and should not be set to NET_UNROUTABLE
     case NET_MAX:        // m_net is never and should not be set to NET_MAX
@@ -89,6 +91,13 @@ bool CNetAddr::SetNetFromBIP155Network(uint8_t possible_bip155_net, size_t addre
         throw std::ios_base::failure(
             strprintf("BIP155 CJDNS address with length %u (should be %u)", address_size,
                       ADDR_CJDNS_SIZE));
+    case BIP155Network::HOLEPUNCH:
+        if (std::ranges::find(ADDR_HOLEPUNCH_SIZES, address_size) != ADDR_HOLEPUNCH_SIZES.end()) {
+            m_net = NET_HOLEPUNCH;
+            return true;
+        }
+        throw std::ios_base::failure(
+            strprintf("BIP155 HOLEPUNCH address with length %u (should be 12, 24, 36, 40 or 52)", address_size));
     }
 
     // Don't throw on addresses with unknown network ids (maybe from the future).
@@ -122,6 +131,9 @@ void CNetAddr::SetIP(const CNetAddr& ipIn)
         break;
     case NET_CJDNS:
         assert(ipIn.m_addr.size() == ADDR_CJDNS_SIZE);
+        break;
+    case NET_HOLEPUNCH:
+        assert(std::ranges::find(ADDR_HOLEPUNCH_SIZES, ipIn.m_addr.size()) != ADDR_HOLEPUNCH_SIZES.end());
         break;
     case NET_INTERNAL:
         assert(ipIn.m_addr.size() == ADDR_INTERNAL_SIZE);
@@ -427,8 +439,106 @@ bool CNetAddr::IsLocal() const
  *
  * @see CNetAddr::IsRoutable()
  */
+std::optional<CNetAddr> CNetAddr::FromBIP155Bytes(uint8_t bip155_net, std::span<const uint8_t> bytes)
+{
+    CNetAddr addr;
+    switch (bip155_net) {
+    case BIP155Network::IPV4:
+        if (bytes.size() != ADDR_IPV4_SIZE) return std::nullopt;
+        addr.m_net = NET_IPV4;
+        break;
+    case BIP155Network::IPV6:
+        if (bytes.size() != ADDR_IPV6_SIZE) return std::nullopt;
+        // Embedded IPv4, internal and CJDNS-looking addresses are not plain IPv6.
+        if (util::HasPrefix(bytes, IPV4_IN_IPV6_PREFIX) || util::HasPrefix(bytes, INTERNAL_IN_IPV6_PREFIX)) return std::nullopt;
+        addr.m_net = NET_IPV6;
+        break;
+    case BIP155Network::TORV3:
+        if (bytes.size() != ADDR_TORV3_SIZE) return std::nullopt;
+        addr.m_net = NET_ONION;
+        break;
+    case BIP155Network::I2P:
+        if (bytes.size() != ADDR_I2P_SIZE) return std::nullopt;
+        addr.m_net = NET_I2P;
+        break;
+    default:
+        return std::nullopt;
+    }
+    addr.m_addr.assign(bytes.begin(), bytes.end());
+    return addr;
+}
+
+//! The two parts of a HOLEPUNCH address, if its bytes are well formed.
+static std::optional<std::pair<CService, CNetAddr>> ParseHolePunch(std::span<const uint8_t> bytes)
+{
+    const auto addr_size{[](uint8_t bip155_net) -> size_t {
+        switch (bip155_net) {
+        case CNetAddr::BIP155Network::IPV4: return ADDR_IPV4_SIZE;
+        case CNetAddr::BIP155Network::IPV6: return ADDR_IPV6_SIZE;
+        case CNetAddr::BIP155Network::TORV3: return ADDR_TORV3_SIZE;
+        case CNetAddr::BIP155Network::I2P: return ADDR_I2P_SIZE;
+        default: return 0;
+        }
+    }};
+    if (bytes.size() < 1) return std::nullopt;
+    const uint8_t coord_net{bytes[0]};
+    const size_t coord_size{addr_size(coord_net)};
+    if (coord_size == 0 || bytes.size() < 1 + coord_size + 2 + 1) return std::nullopt;
+    const auto coord_addr{CNetAddr::FromBIP155Bytes(coord_net, bytes.subspan(1, coord_size))};
+    if (!coord_addr) return std::nullopt;
+    const uint16_t coord_port{static_cast<uint16_t>((bytes[1 + coord_size] << 8) | bytes[1 + coord_size + 1])};
+    if (coord_net == CNetAddr::BIP155Network::I2P && coord_port != 0) return std::nullopt;
+    const uint8_t target_net{bytes[1 + coord_size + 2]};
+    if (target_net != CNetAddr::BIP155Network::IPV4 && target_net != CNetAddr::BIP155Network::IPV6) return std::nullopt;
+    const size_t target_size{addr_size(target_net)};
+    if (bytes.size() != 1 + coord_size + 2 + 1 + target_size) return std::nullopt;
+    const auto target{CNetAddr::FromBIP155Bytes(target_net, bytes.subspan(1 + coord_size + 2 + 1, target_size))};
+    if (!target) return std::nullopt;
+    return std::make_pair(CService{*coord_addr, coord_port}, *target);
+}
+
+std::optional<CNetAddr> CNetAddr::MakeHolePunch(const CService& coordinator, const CNetAddr& target)
+{
+    const bool coord_ok{coordinator.IsIPv4() || coordinator.IsIPv6() || coordinator.IsTor() || coordinator.IsI2P()};
+    if (!coord_ok || !(target.IsIPv4() || target.IsIPv6())) return std::nullopt;
+    if (coordinator.IsI2P() && coordinator.GetPort() != 0) return std::nullopt;
+    std::vector<uint8_t> bytes;
+    // The raw address bytes, not GetAddrBytes(), which returns the legacy 16-byte form for IPv4.
+    bytes.push_back(static_cast<uint8_t>(coordinator.GetBIP155Network()));
+    bytes.insert(bytes.end(), coordinator.m_addr.begin(), coordinator.m_addr.end());
+    bytes.push_back(coordinator.GetPort() >> 8);
+    bytes.push_back(coordinator.GetPort() & 0xff);
+    bytes.push_back(static_cast<uint8_t>(target.GetBIP155Network()));
+    bytes.insert(bytes.end(), target.m_addr.begin(), target.m_addr.end());
+    CNetAddr addr;
+    addr.m_net = NET_HOLEPUNCH;
+    addr.m_addr.assign(bytes.begin(), bytes.end());
+    return addr;
+}
+
+std::optional<CService> CNetAddr::HolePunchCoordinator() const
+{
+    if (!IsHolePunch()) return std::nullopt;
+    const auto parts{ParseHolePunch(std::span<const uint8_t>{m_addr.data(), m_addr.size()})};
+    if (!parts) return std::nullopt;
+    return parts->first;
+}
+
+std::optional<CNetAddr> CNetAddr::HolePunchTarget() const
+{
+    if (!IsHolePunch()) return std::nullopt;
+    const auto parts{ParseHolePunch(std::span<const uint8_t>{m_addr.data(), m_addr.size()})};
+    if (!parts) return std::nullopt;
+    return parts->second;
+}
+
 bool CNetAddr::IsValid() const
 {
+    if (IsHolePunch()) {
+        const auto parts{ParseHolePunch(std::span<const uint8_t>{m_addr.data(), m_addr.size()})};
+        return parts && parts->first.IsValid() && parts->second.IsValid();
+    }
+
     // unspecified IPv6 address (::/128)
     unsigned char ipNone6[16] = {};
     if (IsIPv6() && memcmp(m_addr.data(), ipNone6, sizeof(ipNone6)) == 0) {
@@ -467,6 +577,14 @@ bool CNetAddr::IsValid() const
  */
 bool CNetAddr::IsRoutable() const
 {
+    if (IsHolePunch()) {
+        // An announcement is as routable as the node it announces; a clearnet
+        // coordinator has to be routable too.
+        const auto parts{ParseHolePunch(std::span<const uint8_t>{m_addr.data(), m_addr.size()})};
+        if (!parts || !parts->second.IsRoutable()) return false;
+        const CService& coordinator{parts->first};
+        return coordinator.IsPrivacyNet() ? coordinator.IsValid() : coordinator.IsRoutable();
+    }
     return IsValid() && !(IsRFC1918() || IsRFC2544() || IsRFC3927() || IsRFC4862() || IsRFC6598() || IsRFC5737() || IsRFC4193() || IsRFC4843() || IsRFC7343() || IsLocal() || IsInternal());
 }
 
@@ -490,6 +608,7 @@ bool CNetAddr::IsAddrV1Compatible() const
     case NET_ONION:
     case NET_I2P:
     case NET_CJDNS:
+    case NET_HOLEPUNCH:
         return false;
     case NET_UNROUTABLE: // m_net is never and should not be set to NET_UNROUTABLE
     case NET_MAX:        // m_net is never and should not be set to NET_MAX
@@ -598,6 +717,13 @@ std::string CNetAddr::ToStringAddr() const
         return IPv6ToString(m_addr, 0);
     case NET_INTERNAL:
         return EncodeBase32(m_addr) + ".internal";
+    case NET_HOLEPUNCH: {
+        const auto parts{ParseHolePunch(std::span<const uint8_t>{m_addr.data(), m_addr.size()})};
+        if (!parts) return "holepunch:invalid";
+        const CNetAddr& target{parts->second};
+        return "holepunch:" + parts->first.ToStringAddrPort() + "/" +
+               (target.IsIPv6() ? "[" + target.ToStringAddr() + "]" : target.ToStringAddr());
+    }
     case NET_UNROUTABLE: // m_net is never and should not be set to NET_UNROUTABLE
     case NET_MAX:        // m_net is never and should not be set to NET_MAX
         assert(false);
@@ -910,7 +1036,7 @@ std::string CService::ToStringAddrPort() const
 {
     const auto port_str = strprintf("%u", port);
 
-    if (IsIPv4() || IsTor() || IsI2P() || IsInternal()) {
+    if (IsIPv4() || IsTor() || IsI2P() || IsInternal() || IsHolePunch()) {
         return ToStringAddr() + ":" + port_str;
     } else {
         return "[" + ToStringAddr() + "]:" + port_str;
@@ -1009,6 +1135,7 @@ CSubNet::CSubNet(const CNetAddr& addr) : CSubNet()
     case NET_CJDNS:
         valid = true;
         break;
+    case NET_HOLEPUNCH: // announcements are not addresses one can ban or allow
     case NET_INTERNAL:
     case NET_UNROUTABLE:
     case NET_MAX:
@@ -1036,6 +1163,7 @@ bool CSubNet::Match(const CNetAddr &addr) const
     case NET_CJDNS:
     case NET_INTERNAL:
         return addr == network;
+    case NET_HOLEPUNCH:
     case NET_UNROUTABLE:
     case NET_MAX:
         return false;
@@ -1075,6 +1203,7 @@ std::string CSubNet::ToString() const
     case NET_I2P:
     case NET_CJDNS:
     case NET_INTERNAL:
+    case NET_HOLEPUNCH:
     case NET_UNROUTABLE:
     case NET_MAX:
         break;

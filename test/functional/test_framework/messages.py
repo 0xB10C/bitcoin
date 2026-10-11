@@ -293,7 +293,7 @@ def from_binary(cls, stream):
 
 
 class CAddress:
-    __slots__ = ("net", "ip", "nServices", "port", "time")
+    __slots__ = ("net", "ip", "nServices", "port", "time", "coordinator")
 
     # see https://github.com/bitcoin/bips/blob/master/bip-0155.mediawiki
     NET_IPV4 = 1
@@ -301,13 +301,15 @@ class CAddress:
     NET_TORV3 = 4
     NET_I2P = 5
     NET_CJDNS = 6
+    NET_HOLEPUNCH = 8
 
     ADDRV2_NET_NAME = {
         NET_IPV4: "IPv4",
         NET_IPV6: "IPv6",
         NET_TORV3: "TorV3",
         NET_I2P: "I2P",
-        NET_CJDNS: "CJDNS"
+        NET_CJDNS: "CJDNS",
+        NET_HOLEPUNCH: "HolePunch",
     }
 
     ADDRV2_ADDRESS_LENGTH = {
@@ -326,9 +328,49 @@ class CAddress:
         self.net = self.NET_IPV4
         self.ip = "0.0.0.0"
         self.port = 0
+        # For NET_HOLEPUNCH: the coordinator's endpoint (a CAddress with net, ip and
+        # port); ip and port are then the announced node's address and port.
+        self.coordinator = None
 
     def __eq__(self, other):
-        return self.net == other.net and self.ip == other.ip and self.nServices == other.nServices and self.port == other.port and self.time == other.time
+        return self.net == other.net and self.ip == other.ip and self.nServices == other.nServices and self.port == other.port and self.time == other.time and self.coordinator == other.coordinator
+
+    @staticmethod
+    def _ip_to_bytes(net, ip):
+        if net == CAddress.NET_IPV4:
+            return socket.inet_aton(ip)
+        elif net == CAddress.NET_IPV6:
+            return socket.inet_pton(socket.AF_INET6, ip)
+        elif net == CAddress.NET_TORV3:
+            sfx = ".onion"
+            assert ip.endswith(sfx)
+            return b32decode(ip[0:-len(sfx)], True)[0:32]
+        elif net == CAddress.NET_I2P:
+            sfx = ".b32.i2p"
+            assert ip.endswith(sfx)
+            return b32decode(ip[0:-len(sfx)] + CAddress.I2P_PAD, True)
+        elif net == CAddress.NET_CJDNS:
+            return socket.inet_pton(socket.AF_INET6, ip)
+        else:
+            raise Exception("Address type not supported")
+
+    @staticmethod
+    def _bytes_to_ip(net, addr_bytes):
+        if net == CAddress.NET_IPV4:
+            return socket.inet_ntoa(addr_bytes)
+        elif net == CAddress.NET_IPV6:
+            return socket.inet_ntop(socket.AF_INET6, addr_bytes)
+        elif net == CAddress.NET_TORV3:
+            prefix = b".onion checksum"
+            version = bytes([3])
+            checksum = sha3(prefix + addr_bytes + version)[:2]
+            return b32encode(addr_bytes + checksum + version).decode("ascii").lower() + ".onion"
+        elif net == CAddress.NET_I2P:
+            return b32encode(addr_bytes)[0:-len(CAddress.I2P_PAD)].decode("ascii").lower() + ".b32.i2p"
+        elif net == CAddress.NET_CJDNS:
+            return socket.inet_ntop(socket.AF_INET6, addr_bytes)
+        else:
+            raise Exception("Address type not supported")
 
     def deserialize(self, f, *, with_time=True):
         """Deserialize from addrv1 format (pre-BIP155)"""
@@ -369,24 +411,23 @@ class CAddress:
         assert self.net in self.ADDRV2_NET_NAME
 
         address_length = deser_compact_size(f)
-        assert_equal(address_length, self.ADDRV2_ADDRESS_LENGTH[self.net])
-
         addr_bytes = f.read(address_length)
-        if self.net == self.NET_IPV4:
-            self.ip = socket.inet_ntoa(addr_bytes)
-        elif self.net == self.NET_IPV6:
-            self.ip = socket.inet_ntop(socket.AF_INET6, addr_bytes)
-        elif self.net == self.NET_TORV3:
-            prefix = b".onion checksum"
-            version = bytes([3])
-            checksum = sha3(prefix + addr_bytes + version)[:2]
-            self.ip = b32encode(addr_bytes + checksum + version).decode("ascii").lower() + ".onion"
-        elif self.net == self.NET_I2P:
-            self.ip = b32encode(addr_bytes)[0:-len(self.I2P_PAD)].decode("ascii").lower() + ".b32.i2p"
-        elif self.net == self.NET_CJDNS:
-            self.ip = socket.inet_ntop(socket.AF_INET6, addr_bytes)
+        if self.net == self.NET_HOLEPUNCH:
+            # coordinator net, coordinator address, coordinator port, target net, target address
+            assert address_length in (12, 24, 36, 40, 52)
+            coord = CAddress()
+            coord.net = addr_bytes[0]
+            coord_len = self.ADDRV2_ADDRESS_LENGTH[coord.net]
+            coord.ip = self._bytes_to_ip(coord.net, addr_bytes[1:1 + coord_len])
+            coord.port = int.from_bytes(addr_bytes[1 + coord_len:3 + coord_len], "big")
+            target_net = addr_bytes[3 + coord_len]
+            target_bytes = addr_bytes[4 + coord_len:]
+            assert_equal(len(target_bytes), self.ADDRV2_ADDRESS_LENGTH[target_net])
+            self.coordinator = coord
+            self.ip = self._bytes_to_ip(target_net, target_bytes)
         else:
-            raise Exception("Address type not supported")
+            assert_equal(address_length, self.ADDRV2_ADDRESS_LENGTH[self.net])
+            self.ip = self._bytes_to_ip(self.net, addr_bytes)
 
         self.port = int.from_bytes(f.read(2), "big")
 
@@ -403,27 +444,23 @@ class CAddress:
         assert self.net in self.ADDRV2_NET_NAME
         r = b""
         r += self.net.to_bytes(1, "little")
-        r += ser_compact_size(self.ADDRV2_ADDRESS_LENGTH[self.net])
-        if self.net == self.NET_IPV4:
-            r += socket.inet_aton(self.ip)
-        elif self.net == self.NET_IPV6:
-            r += socket.inet_pton(socket.AF_INET6, self.ip)
-        elif self.net == self.NET_TORV3:
-            sfx = ".onion"
-            assert self.ip.endswith(sfx)
-            r += b32decode(self.ip[0:-len(sfx)], True)[0:32]
-        elif self.net == self.NET_I2P:
-            sfx = ".b32.i2p"
-            assert self.ip.endswith(sfx)
-            r += b32decode(self.ip[0:-len(sfx)] + self.I2P_PAD, True)
-        elif self.net == self.NET_CJDNS:
-            r += socket.inet_pton(socket.AF_INET6, self.ip)
+        if self.net == self.NET_HOLEPUNCH:
+            coord = self.coordinator
+            target_net = self.NET_IPV6 if ":" in self.ip else self.NET_IPV4
+            addr_bytes = coord.net.to_bytes(1, "little") + self._ip_to_bytes(coord.net, coord.ip)
+            addr_bytes += coord.port.to_bytes(2, "big")
+            addr_bytes += target_net.to_bytes(1, "little") + self._ip_to_bytes(target_net, self.ip)
+            r += ser_compact_size(len(addr_bytes)) + addr_bytes
         else:
-            raise Exception("Address type not supported")
+            r += ser_compact_size(self.ADDRV2_ADDRESS_LENGTH[self.net])
+            r += self._ip_to_bytes(self.net, self.ip)
         r += self.port.to_bytes(2, "big")
         return r
 
     def __repr__(self):
+        if self.net == self.NET_HOLEPUNCH:
+            return ("CAddress(nServices=%i net=HolePunch coordinator=%s:%i target=%s port=%i)"
+                    % (self.nServices, self.coordinator.ip, self.coordinator.port, self.ip, self.port))
         return ("CAddress(nServices=%i net=%s addr=%s port=%i)"
                 % (self.nServices, self.ADDRV2_NET_NAME[self.net], self.ip, self.port))
 

@@ -4,6 +4,7 @@
 
 #include <holepunch.h>
 #include <netbase.h>
+#include <protocol.h>
 #include <streams.h>
 #include <test/util/setup_common.h>
 #include <util/strencodings.h>
@@ -229,6 +230,116 @@ BOOST_AUTO_TEST_CASE(message_vectors_invalid)
     BOOST_CHECK(Rejected<PunchMsg>("010104cb007101208f00"_hex));
     // punch: empty payload (R-4.1)
     BOOST_CHECK(Rejected<PunchMsg>(""_hex));
+}
+
+// HOLEPUNCH address type (BIP 155 network id 8), with the draft's element vectors.
+
+static CAddress DecodeElement(std::span<const std::byte> bytes)
+{
+    DataStream s{bytes};
+    CAddress addr;
+    s >> CAddress::V2_NETWORK(addr);
+    BOOST_REQUIRE(s.empty());
+    return addr;
+}
+
+BOOST_AUTO_TEST_CASE(holepunch_address_vectors)
+{
+    struct Vector {
+        std::string_view hex;
+        std::string_view coordinator;
+        std::string_view target;
+        bool valid; // in Core's sense: documentation IPv6 ranges are not valid addresses
+    };
+    const Vector vectors[]{
+        {"a0fee868fd0908080c01c0000203208d01cb007101208f", "192.0.2.3:8333", "203.0.113.1", true},
+        {"a0fee868fd090808180220010db8000000000000000000000003208d01cb007101208f", "[2001:db8::3]:8333", "203.0.113.1", false},
+        {"a0fee868fd0908081801c0000203208d0220010db8000000000000000000000001208f", "192.0.2.3:8333", "2001:db8::1", false},
+        {"a0fee868fd090808240220010db8000000000000000000000003479d0220010db8000000000000000000000001208f", "[2001:db8::3]:18333", "2001:db8::1", false},
+        {"a0fee868fd090808280453cd5648af46a92b5b74b7f8f6bd3bb86e5d9ab77c5f0e03a5b43a1b4bbef6ac208d01cb007101208f", "kpgvmsfpi2usww3uw74pnpj3xbxf3gvxprpq4a5fwq5bws5662wbv3ad.onion:8333", "203.0.113.1", true},
+        {"a0fee868fd0908082805a2894dabaec4a6e5f84ccaa9c0b5bc64bd4e4e7f8a9f5f8c3f7aa6a4dd7e5e56000001cb007101208f", "ukeu3k5oystol6cmzku4bnn4ms6u4tt7rkpv7db7pktkjxl6lzla.b32.i2p:0", "203.0.113.1", true},
+        {"a0fee868fd0908080c01c0000203208d01c6336402c3cb", "192.0.2.3:8333", "198.51.100.2", true},
+    };
+    for (const auto& v : vectors) {
+        const auto bytes{ParseHex<std::byte>(v.hex)};
+        const CAddress addr{DecodeElement(bytes)};
+        BOOST_CHECK(addr.IsHolePunch());
+        BOOST_CHECK_EQUAL(addr.GetNetwork() == NET_HOLEPUNCH, addr.IsRoutable());
+        BOOST_CHECK(!addr.IsAddrV1Compatible());
+        BOOST_CHECK(addr.IsRelayable());
+        BOOST_CHECK_EQUAL(addr.IsValid(), v.valid);
+        BOOST_REQUIRE(addr.HolePunchCoordinator());
+        BOOST_REQUIRE(addr.HolePunchTarget());
+        BOOST_CHECK_EQUAL(addr.HolePunchCoordinator()->ToStringAddrPort(), v.coordinator);
+        BOOST_CHECK_EQUAL(addr.HolePunchTarget()->ToStringAddr(), v.target);
+        BOOST_CHECK_EQUAL(addr.nServices, ServiceFlags{2057});
+        // Byte for byte identical when serialized again.
+        DataStream out{};
+        out << CAddress::V2_NETWORK(addr);
+        BOOST_CHECK(std::ranges::equal(out, bytes));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(holepunch_address_invalid_vectors)
+{
+    // Lengths other than 12/24/36/40/52 are rejected when parsing (R-6.1).
+    for (const auto hex : {"a0fee868fd0908080d01c0000203208d01cb00710100208f", "a0fee868fd0908080b01c0000203208d01cb0071208f", "a0fee868fd09080800208f"}) {
+        const auto bytes{ParseHex<std::byte>(hex)};
+        DataStream s{bytes};
+        CAddress addr;
+        BOOST_CHECK_THROW(s >> CAddress::V2_NETWORK(addr), std::ios_base::failure);
+    }
+    // Well-sized but inconsistent elements parse as invalid addresses.
+    for (const auto hex : {
+             "a0fee868fd0908081801c0000203208d01cb007101000000000000000000000000208f", // IPv4 ids in 24 bytes
+             "a0fee868fd0908081806fc000000000000000000000000000001208d01cb007101208f", // CJDNS coordinator
+             "a0fee868fd0908082801c0000203208d0453cd5648af46a92b5b74b7f8f6bd3bb86e5d9ab77c5f0e03a5b43a1b4bbef6ac208f", // Tor target
+             "a0fee868fd0908082805a2894dabaec4a6e5f84ccaa9c0b5bc64bd4e4e7f8a9f5f8c3f7aa6a4dd7e5e56000101cb007101208f", // I2P with port
+         }) {
+        const CAddress addr{DecodeElement(ParseHex<std::byte>(hex))};
+        BOOST_CHECK(addr.IsHolePunch());
+        BOOST_CHECK(!addr.IsValid());
+        BOOST_CHECK(!addr.IsRoutable());
+        BOOST_CHECK(!addr.HolePunchCoordinator());
+        BOOST_CHECK_EQUAL(addr.ToStringAddr(), "holepunch:invalid");
+    }
+}
+
+BOOST_AUTO_TEST_CASE(holepunch_address_make)
+{
+    const CService coordinator{LookupNumeric("1.2.3.4", 8333)};
+    const CNetAddr target{LookupNumeric("5.6.7.8", 0)};
+    const auto made{CNetAddr::MakeHolePunch(coordinator, target)};
+    BOOST_REQUIRE(made);
+    const CService element{*made, 8335};
+    BOOST_CHECK(element.IsHolePunch());
+    BOOST_CHECK(element.IsValid());
+    BOOST_CHECK(element.IsRoutable());
+    BOOST_CHECK(element.GetNetwork() == NET_HOLEPUNCH);
+    BOOST_CHECK(element.GetNetClass() == NET_HOLEPUNCH);
+    BOOST_CHECK_EQUAL(element.ToStringAddrPort(), "holepunch:1.2.3.4:8333/5.6.7.8:8335");
+    BOOST_CHECK_EQUAL(element.HolePunchCoordinator()->ToStringAddrPort(), "1.2.3.4:8333");
+    BOOST_CHECK_EQUAL(element.HolePunchTarget()->ToStringAddr(), "5.6.7.8");
+    BOOST_CHECK_EQUAL(GetNetworkName(element.GetNetwork()), "holepunch");
+    // Round trip through BIP 155 serialization.
+    DataStream s{};
+    s << CNetAddr::V2(element);
+    CService back;
+    s >> CNetAddr::V2(back);
+    BOOST_CHECK(back == element);
+    // An IPv6 target is bracketed in the string form.
+    const auto made6{CNetAddr::MakeHolePunch(coordinator, LookupNumeric("2a00:1450::1", 0))};
+    BOOST_REQUIRE(made6);
+    BOOST_CHECK_EQUAL(CService(*made6, 8335).ToStringAddrPort(), "holepunch:1.2.3.4:8333/[2a00:1450::1]:8335");
+    // Not allowed: non-IP target, CJDNS coordinator, I2P coordinator with a port.
+    BOOST_CHECK(!CNetAddr::MakeHolePunch(coordinator, *made));
+    CNetAddr onion;
+    BOOST_REQUIRE(onion.SetSpecial("kpgvmsfpi2usww3uw74pnpj3xbxf3gvxprpq4a5fwq5bws5662wbv3ad.onion"));
+    BOOST_CHECK(CNetAddr::MakeHolePunch(CService{onion, 8333}, target));
+    CNetAddr i2p;
+    BOOST_REQUIRE(i2p.SetSpecial("ukeu3k5oystol6cmzku4bnn4ms6u4tt7rkpv7db7pktkjxl6lzla.b32.i2p"));
+    BOOST_CHECK(CNetAddr::MakeHolePunch(CService{i2p, 0}, target));
+    BOOST_CHECK(!CNetAddr::MakeHolePunch(CService{i2p, 1}, target));
 }
 
 // Session manager tests with real loopback sockets.
