@@ -12,6 +12,7 @@ from test_framework.messages import (
     NODE_P2P_V2,
     msg_addrv2,
     msg_feature,
+    msg_getaddr,
     msg_punch,
     msg_rendezvous,
 )
@@ -220,6 +221,34 @@ class HolePunchTest(BitcoinTestFramework):
 
         node.disconnect_p2ps()
         self.wait_until(lambda: self.external(node)["reports"] == 0)
+
+    def test_coordination_connection(self):
+        node = self.nodes[0]
+        self.log.info("A coordination connection is made from the punch port and negotiates only the feature")
+        peer = node.add_outbound_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR), p2p_idx=0, connection_type="holepunch-coordination")
+        assert_equal(peer.dstport, holepunch_port(0))
+        # The connection is not kept, so the node does not offer to be advertised through it.
+        assert_equal(peer.holepunch_feature, feature_data(CAP_PUNCHPORT))
+        info = next(p for p in node.getpeerinfo() if p["connection_type"] == "holepunch-coordination")
+        assert_equal(info["inbound"], False)
+        assert_equal(info["holepunch_caps"], ["COORDINATOR"])
+        assert set(peer.message_count) <= {"version", "feature", "verack", "pong"}, peer.message_count
+        self.log.info("It takes no outbound slot")
+        assert_equal(node.getnetworkinfo()["connections_out"], 0)
+
+        self.log.info("Any message other than ping, pong, rendezvous and punch closes it")
+        with node.assert_debug_log(["getaddr on a coordination connection"], timeout=5):
+            peer.send_without_ping(msg_getaddr())
+            peer.wait_for_disconnect()
+
+        self.log.info("It is closed when nothing came of it within COORD_TIMEOUT")
+        peer = node.add_outbound_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR), p2p_idx=1, connection_type="holepunch-coordination")
+        with node.assert_debug_log(["coordination timed out"], timeout=5):
+            node.setmocktime(int(time.time()) + 11)
+            peer.wait_for_disconnect()
+        node.setmocktime(0)
+        node.disconnect_p2ps()
+        self.wait_until(lambda: len(node.getpeerinfo()) == 0)
 
     def test_feature_negotiation(self):
         node = self.nodes[0]
@@ -515,6 +544,7 @@ class HolePunchTest(BitcoinTestFramework):
     def run_test(self):
         self.test_outbound_from_punch_port()
         self.test_external_address()
+        self.test_coordination_connection()
         self.test_feature_negotiation()
         self.test_punch_as_responder()
         self.test_coordinator()

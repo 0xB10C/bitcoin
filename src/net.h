@@ -683,6 +683,8 @@ struct CNodeOptions
     bool use_v2transport = false;
     /** The connection was made by TCP hole punching. */
     bool hole_punched = false;
+    /** Only for ConnectionType::HOLEPUNCH_COORD: the peer connected to us. */
+    bool accepted = false;
 };
 
 /** Information about a peer */
@@ -737,6 +739,8 @@ public:
     //! Whether this connection was made by TCP hole punching. An outbound one
     //! occupies the hole punch slot, not one of the automatic outbound slots.
     const bool m_hole_punched;
+    //! For hole punch coordination connections: whether the peer connected to us.
+    const bool m_accepted;
     std::atomic<int> nVersion{0};
     Mutex m_subver_mutex;
     /**
@@ -795,6 +799,7 @@ public:
             case ConnectionType::ADDR_FETCH:
             case ConnectionType::FEELER:
             case ConnectionType::PRIVATE_BROADCAST:
+            case ConnectionType::HOLEPUNCH_COORD:
                 return false;
         } // no default case, so the compiler can warn about missing cases
 
@@ -817,6 +822,7 @@ public:
         case ConnectionType::BLOCK_RELAY:
         case ConnectionType::ADDR_FETCH:
         case ConnectionType::PRIVATE_BROADCAST:
+        case ConnectionType::HOLEPUNCH_COORD:
                 return false;
         case ConnectionType::OUTBOUND_FULL_RELAY:
         case ConnectionType::MANUAL:
@@ -843,6 +849,12 @@ public:
         return m_conn_type == ConnectionType::PRIVATE_BROADCAST;
     }
 
+    /** A short-lived connection that only arranges a hole punch, in either direction. */
+    bool IsHolePunchCoordConn() const
+    {
+        return m_conn_type == ConnectionType::HOLEPUNCH_COORD;
+    }
+
     /** Protocol version advertised in our VERSION message.
      *  Private broadcast connections use a fixed version to maximise anonymity. */
     int AdvertisedVersion() const
@@ -850,8 +862,9 @@ public:
         return IsPrivateBroadcastConn() ? WTXID_RELAY_VERSION : PROTOCOL_VERSION;
     }
 
+    /** Whether the peer initiated the connection. */
     bool IsInboundConn() const {
-        return m_conn_type == ConnectionType::INBOUND;
+        return m_conn_type == ConnectionType::INBOUND || m_accepted;
     }
 
     bool ExpectServicesFromConn() const {
@@ -859,6 +872,7 @@ public:
             case ConnectionType::INBOUND:
             case ConnectionType::MANUAL:
             case ConnectionType::FEELER:
+            case ConnectionType::HOLEPUNCH_COORD:
                 return false;
             case ConnectionType::OUTBOUND_FULL_RELAY:
             case ConnectionType::BLOCK_RELAY:

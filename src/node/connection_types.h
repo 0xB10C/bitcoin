@@ -10,7 +10,8 @@
 
 /** Different types of connections to a peer. This enum encapsulates the
  * information we have available at the time of opening or accepting the
- * connection. Aside from INBOUND, all types are initiated by us.
+ * connection. Aside from INBOUND and HOLEPUNCH_COORD, all types are initiated
+ * by us.
  *
  * If adding or removing types, please update CONNECTION_TYPE_DOC in
  * src/rpc/net.cpp and src/qt/rpcconsole.cpp, as well as the descriptions in
@@ -82,6 +83,15 @@ enum class ConnectionType {
      * our own transactions) and closed afterwards.
      */
     PRIVATE_BROADCAST,
+
+    /**
+     * Hole punch coordination connections are short-lived and carry only the
+     * messages that arrange a hole-punched connection. A connector opens one
+     * to a coordinator or to an advertiser's onion service, and an advertiser
+     * accepts them on its coordination bind, so unlike the other types this
+     * one is used in both directions.
+     */
+    HOLEPUNCH_COORD,
 };
 
 /** Convert ConnectionType enum to a string value */

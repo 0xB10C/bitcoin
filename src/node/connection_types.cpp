@@ -22,6 +22,8 @@ std::string ConnectionTypeAsString(ConnectionType conn_type)
         return "addr-fetch";
     case ConnectionType::PRIVATE_BROADCAST:
         return "private-broadcast";
+    case ConnectionType::HOLEPUNCH_COORD:
+        return "holepunch-coordination";
     } // no default case, so the compiler can warn about missing cases
 
     assert(false);

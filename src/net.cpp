@@ -369,7 +369,7 @@ bool CConnman::CheckIncomingNonce(uint64_t nonce)
         // - Upon a disconnect, the peer knows our clearnet address. They go back to the short
         //   lived privacy broadcast connection and continue with VERACK.
         if (!pnode->fSuccessfullyConnected && !pnode->IsInboundConn() && !pnode->IsPrivateBroadcastConn() &&
-            pnode->GetLocalNonce() == nonce)
+            !pnode->IsHolePunchCoordConn() && pnode->GetLocalNonce() == nonce)
             return false;
     }
     return true;
@@ -459,7 +459,7 @@ CNode* CConnman::ConnectNode(CAddress addrConnect,
                 // If an I2P SAM session already exists, normally we would re-use it. But in the case of
                 // private broadcast we force a new transient session. A Connect() using m_i2p_sam_session
                 // would use our permanent I2P address as a source address.
-                if (m_i2p_sam_session && conn_type != ConnectionType::PRIVATE_BROADCAST) {
+                if (m_i2p_sam_session && conn_type != ConnectionType::PRIVATE_BROADCAST && conn_type != ConnectionType::HOLEPUNCH_COORD) {
                     connected = m_i2p_sam_session->Connect(target_addr, conn, proxyConnectionFailed);
                 } else {
                     {
@@ -1918,6 +1918,9 @@ bool CConnman::AddConnection(const std::string& address, ConnectionType conn_typ
     // no separate per-type limit for MANUAL because semAddnode limits them
     case ConnectionType::MANUAL:
         break;
+    // no limit for HOLEPUNCH_COORD: short-lived, and the connector opens at most one per attempt interval
+    case ConnectionType::HOLEPUNCH_COORD:
+        break;
     case ConnectionType::OUTBOUND_FULL_RELAY:
         max_connections = m_max_outbound_full_relay;
         break;
@@ -2762,6 +2765,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
                     case ConnectionType::ADDR_FETCH:
                     case ConnectionType::FEELER:
                     case ConnectionType::PRIVATE_BROADCAST:
+                    case ConnectionType::HOLEPUNCH_COORD:
                         break;
                     case ConnectionType::MANUAL:
                     case ConnectionType::OUTBOUND_FULL_RELAY:
@@ -3972,7 +3976,7 @@ bool CConnman::HasOutboundPeerInGroup(const CNetAddr& addr) const
     const auto group{m_netgroupman.GetGroup(addr)};
     LOCK(m_nodes_mutex);
     for (const CNode* pnode : m_nodes) {
-        if (pnode->IsInboundConn() || pnode->m_hole_punched || pnode->fDisconnect) continue;
+        if (pnode->IsInboundConn() || pnode->m_hole_punched || pnode->IsHolePunchCoordConn() || pnode->fDisconnect) continue;
         if (!pnode->IsFullOutboundConn() && !pnode->IsBlockOnlyConn() && !pnode->IsManualConn()) continue;
         if (m_netgroupman.GetGroup(pnode->addr) == group) return true;
     }
@@ -4121,11 +4125,10 @@ bool CConnman::AddedNodesContain(const CAddress& addr) const
 size_t CConnman::GetNodeCount(ConnectionDirection flags) const
 {
     LOCK(m_nodes_mutex);
-    if (flags == ConnectionDirection::Both) // Shortcut if we want total
-        return m_nodes.size();
-
     int nNum = 0;
     for (const auto& pnode : m_nodes) {
+        // Coordination connections take no inbound or outbound slot.
+        if (pnode->IsHolePunchCoordConn()) continue;
         if (flags & (pnode->IsInboundConn() ? ConnectionDirection::In : ConnectionDirection::Out)) {
             nNum++;
         }
@@ -4332,7 +4335,7 @@ CNode::CNode(NodeId idIn,
              bool inbound_onion,
              uint64_t network_key,
              CNodeOptions&& node_opts)
-    : m_transport{MakeTransport(idIn, node_opts.use_v2transport, conn_type_in == ConnectionType::INBOUND)},
+    : m_transport{MakeTransport(idIn, node_opts.use_v2transport, conn_type_in == ConnectionType::INBOUND || node_opts.accepted)},
       m_permission_flags{node_opts.permission_flags},
       m_sock{sock},
       m_connected{NodeClock::now()},
@@ -4343,6 +4346,7 @@ CNode::CNode(NodeId idIn,
       m_dest(addrNameIn),
       m_inbound_onion{inbound_onion},
       m_hole_punched{node_opts.hole_punched},
+      m_accepted{node_opts.accepted},
       m_prefer_evict{node_opts.prefer_evict},
       nKeyedNetGroup{nKeyedNetGroupIn},
       m_network_key{network_key},
@@ -4352,7 +4356,8 @@ CNode::CNode(NodeId idIn,
       m_recv_flood_size{node_opts.recv_flood_size},
       m_i2p_sam_session{std::move(node_opts.i2p_sam_session)}
 {
-    if (inbound_onion) assert(conn_type_in == ConnectionType::INBOUND);
+    if (inbound_onion) assert(IsInboundConn());
+    if (m_accepted) assert(conn_type_in == ConnectionType::HOLEPUNCH_COORD);
 
     for (const auto& msg : ALL_NET_MESSAGE_TYPES) {
         mapRecvBytesPerMsgType[msg] = 0;
@@ -4413,12 +4418,28 @@ static bool IsOutboundMessageAllowedInPrivateBroadcast(std::string_view type) no
            type == NetMsgType::PING;
 }
 
+/// Hole punch coordination connections carry only the messages that arrange a punch (R-7.4).
+static bool IsOutboundMessageAllowedInHolePunchCoordination(std::string_view type) noexcept
+{
+    return type == NetMsgType::VERSION ||
+           type == NetMsgType::VERACK ||
+           type == NetMsgType::FEATURE ||
+           type == NetMsgType::PING ||
+           type == NetMsgType::PONG ||
+           type == NetMsgType::RENDEZVOUS ||
+           type == NetMsgType::PUNCH;
+}
+
 void CConnman::PushMessage(CNode* pnode, CSerializedNetMsg&& msg)
 {
     AssertLockNotHeld(m_total_bytes_sent_mutex);
 
     if (pnode->IsPrivateBroadcastConn() && !IsOutboundMessageAllowedInPrivateBroadcast(msg.m_type)) {
         LogDebug(BCLog::PRIVBROADCAST, "Omitting send of message '%s', %s", msg.m_type, pnode->LogPeer());
+        return;
+    }
+    if (pnode->IsHolePunchCoordConn() && !IsOutboundMessageAllowedInHolePunchCoordination(msg.m_type)) {
+        LogDebug(BCLog::HOLEPUNCH, "not sending %s on a coordination connection, peer=%d\n", msg.m_type, pnode->GetId());
         return;
     }
 
