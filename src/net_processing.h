@@ -142,6 +142,13 @@ public:
     virtual std::vector<PrivateBroadcast::TxBroadcastInfo> GetPrivateBroadcastInfo() const = 0;
 
     /**
+     * Send a hole punching rendezvous for `target` to the peer `coordinator` and
+     * expect its punch as the answer. For testing.
+     * @return the reason if nothing was sent.
+     */
+    virtual std::optional<std::string> HolePunchRendezvous(NodeId coordinator, const CService& target) = 0;
+
+    /**
      * Abort private broadcast attempts for transactions currently being privately broadcast.
      *
      * @param[in] id A transaction identifier. It will be matched against both txid and wtxid for

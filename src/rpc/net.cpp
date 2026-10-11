@@ -1320,6 +1320,36 @@ static RPCMethod getrawaddrman()
     };
 }
 
+static RPCMethod holepunchrendezvous()
+{
+    return RPCMethod{
+        "holepunchrendezvous",
+        "Ask a connected coordinator to pair us with an advertised node by TCP hole punching.\n"
+        "Sends a rendezvous message for the target to the peer and accepts its punch as the answer.\n"
+        "This RPC is for testing only.",
+        {
+            {"peer_id", RPCArg::Type::NUM, RPCArg::Optional::NO, "The coordinator: a connected peer that negotiated hole punching."},
+            {"target", RPCArg::Type::STR, RPCArg::Optional::NO, "The target's endpoint (ip:port) as the coordinator observes it, from the target's announcement."},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "", std::vector<RPCResult>{}},
+        RPCExamples{
+            HelpExampleCli("holepunchrendezvous", "0 \"203.0.113.1:8335\"") + HelpExampleRpc("holepunchrendezvous", R"(0, "203.0.113.1:8335")")},
+        [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue {
+            const NodeId peer_id{request.params[0].getInt<int64_t>()};
+            const auto target{Lookup(std::string{self.Arg<std::string_view>("target")}, /*portDefault=*/0, /*fAllowLookup=*/false)};
+            if (!target || !target->IsValid()) {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Invalid target endpoint");
+            }
+            NodeContext& node = EnsureAnyNodeContext(request.context);
+            PeerManager& peerman = EnsurePeerman(node);
+            if (const auto error{peerman.HolePunchRendezvous(peer_id, *target)}) {
+                throw JSONRPCError(RPC_MISC_ERROR, "Error: " + *error);
+            }
+            return UniValue{UniValue::VOBJ};
+        },
+    };
+}
+
 static RPCMethod getholepunchinfo()
 {
     return RPCMethod{
@@ -1397,6 +1427,7 @@ void RegisterNetRPCCommands(CRPCTable& t)
         {"hidden", &addconnection},
         {"hidden", &addpeeraddress},
         {"hidden", &sendmsgtopeer},
+        {"hidden", &holepunchrendezvous},
         {"hidden", &getrawaddrman},
     };
     for (const auto& c : commands) {
