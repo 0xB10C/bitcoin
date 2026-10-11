@@ -1372,6 +1372,16 @@ static RPCMethod getholepunchinfo()
                                 {RPCResult::Type::BOOL, "conflicting", "Whether peers disagree in a way that rules out an external address (NAT mapping not endpoint-independent)"},
                             }},
                     }},
+                {RPCResult::Type::ARR, "sessions", /*optional=*/true, "Punch sessions in progress",
+                    {
+                        {RPCResult::Type::OBJ, "", "",
+                            {
+                                {RPCResult::Type::STR, "peer", "(ip:port) The endpoint being punched to"},
+                                {RPCResult::Type::STR, "role", "initiator or responder"},
+                                {RPCResult::Type::NUM, "age", "Seconds since the session started"},
+                                {RPCResult::Type::NUM, "attempts", "Connection attempts made so far"},
+                            }},
+                    }},
             }},
         RPCExamples{
             HelpExampleCli("getholepunchinfo", "")
@@ -1400,6 +1410,17 @@ static RPCMethod getholepunchinfo()
                 external.push_back(std::move(o));
             }
             obj.pushKV("external", std::move(external));
+            UniValue sessions(UniValue::VARR);
+            const auto now{NodeClock::now()};
+            for (const auto& session : connman.GetHolePunchSessions()) {
+                UniValue o(UniValue::VOBJ);
+                o.pushKV("peer", session.peer.ToStringAddrPort());
+                o.pushKV("role", session.role == holepunch::Role::INITIATOR ? "initiator" : "responder");
+                o.pushKV("age", Ticks<std::chrono::seconds>(now - session.started));
+                o.pushKV("attempts", session.attempts);
+                sessions.push_back(std::move(o));
+            }
+            obj.pushKV("sessions", std::move(sessions));
             return obj;
         },
     };
