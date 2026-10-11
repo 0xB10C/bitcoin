@@ -1695,7 +1695,10 @@ void PeerManagerImpl::PushNodeVersion(CNode& pnode, const Peer& peer)
         my_services = peer.m_our_services;
         my_time = TicksSinceEpoch<std::chrono::seconds>(NodeClock::now());
         your_services = addr.nServices;
-        your_addr = addr.IsRoutable() && !IsProxy(addr) && addr.IsAddrV1Compatible() ? CService{addr} : CService{};
+        // On test networks with hole punching, report loopback addresses too, so that
+        // nodes can learn their punch port from each other there (R-2.5).
+        const bool report_local{m_connman.GetHolePunchOptions().allow_local};
+        your_addr = (addr.IsRoutable() || report_local) && !IsProxy(addr) && addr.IsAddrV1Compatible() ? CService{addr} : CService{};
         my_user_agent = strSubVersion;
         my_height = m_best_height;
         my_tx_relay = !RejectIncomingTxs(pnode);

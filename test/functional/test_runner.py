@@ -343,6 +343,7 @@ BASE_SCRIPTS = [
     'wallet_assumeutxo.py',
     'p2p_add_connections.py',
     'p2p_holepunch.py',
+    'p2p_holepunch_nodes.py',
     'feature_bind_port_discover.py',
     'p2p_unrequested_blocks.py',
     'p2p_message_capture.py',
