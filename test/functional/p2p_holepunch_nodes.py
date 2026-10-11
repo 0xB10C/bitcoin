@@ -23,6 +23,7 @@ import time
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
+    holepunch_coord_port,
     holepunch_port,
 )
 
@@ -36,6 +37,7 @@ class HolePunchNodesTest(BitcoinTestFramework):
             "-v2transport=1",
             "-holepunch=1",
             f"-holepunchport={holepunch_port(i)}",
+            f"-holepunchcoordbind=127.0.0.1:{holepunch_coord_port(i)}",
         ] for i in range(self.num_nodes)]
         # B gets no inbound slots, so it never announces itself and the punch
         # always goes from B to A.

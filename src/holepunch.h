@@ -125,6 +125,9 @@ struct Options {
      * its own network group (R-2.5) and rate limit sessions per endpoint
      * rather than per address. */
     bool allow_local{false};
+    /** Where coordination connections are accepted (R-12.1); the target of
+     * the coordination onion service. */
+    std::optional<CService> coordination_bind;
 };
 
 /** The wildcard address of `family` (NET_IPV4 or NET_IPV6) with `port`. */
@@ -147,6 +150,8 @@ inline constexpr auto PER_ADDR_INTERVAL{std::chrono::minutes{10}};
 inline constexpr int HP_OUTBOUND_MAX{1};
 /** How long a connector waits for the answer to a rendezvous (R-4.4, R-7.3). */
 inline constexpr auto COORD_TIMEOUT{std::chrono::seconds{10}};
+/** Coordination connections an advertiser accepts at once (R-12.2). */
+inline constexpr size_t COORD_INBOUND_MAX{8};
 
 /** Cache limits for announcements (R-6.2). */
 inline constexpr size_t CACHE_MAX{32};

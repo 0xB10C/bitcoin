@@ -1801,8 +1801,11 @@ void CConnman::CreateNodeFromAcceptedSocket(std::shared_ptr<Sock> sock,
     AssertLockNotHeld(m_nodes_mutex);
 
     int nInbound = 0;
+    size_t n_coordination{0};
 
-    const bool inbound_onion = std::find(m_onion_binds.begin(), m_onion_binds.end(), addr_bind) != m_onion_binds.end();
+    // The coordination bind is reached only through the hole punching onion service (R-12.1).
+    const bool coordination{m_holepunch_opts.enabled && m_holepunch_opts.coordination_bind == addr_bind};
+    const bool inbound_onion = coordination || std::find(m_onion_binds.begin(), m_onion_binds.end(), addr_bind) != m_onion_binds.end();
 
     // Tor inbound connections do not reveal the peer's actual network address.
     // Therefore do not apply address-based whitelist permissions to them.
@@ -1811,7 +1814,13 @@ void CConnman::CreateNodeFromAcceptedSocket(std::shared_ptr<Sock> sock,
     {
         LOCK(m_nodes_mutex);
         for (const CNode* pnode : m_nodes) {
-            if (pnode->IsInboundConn()) nInbound++;
+            if (!pnode->IsInboundConn()) continue;
+            // Coordination connections have their own limit and take no inbound slot (R-12.2).
+            if (pnode->IsHolePunchCoordConn()) {
+                ++n_coordination;
+            } else {
+                nInbound++;
+            }
         }
     }
 
@@ -1843,18 +1852,25 @@ void CConnman::CreateNodeFromAcceptedSocket(std::shared_ptr<Sock> sock,
 
     // Only accept connections from discouraged peers if our inbound slots aren't (almost) full.
     bool discouraged = m_banman && m_banman->IsDiscouraged(addr);
-    if (!NetPermissions::HasFlag(permission_flags, NetPermissionFlags::NoBan) && nInbound + 1 >= m_max_inbound && discouraged)
-    {
-        LogDebug(BCLog::NET, "connection from %s dropped (discouraged)\n", addr.ToStringAddrPort());
-        return;
-    }
-
-    if (nInbound >= m_max_inbound)
-    {
-        if (!AttemptToEvictConnection(/*evict_tx_relay_peer_only=*/false)) {
-            // No connection to evict, disconnect the new connection
-            LogDebug(BCLog::NET, "failed to find an eviction candidate - connection dropped (full)\n");
+    if (coordination) {
+        if (n_coordination >= holepunch::COORD_INBOUND_MAX) {
+            LogDebug(BCLog::HOLEPUNCH, "coordination connection dropped: %d are open already\n", n_coordination);
             return;
+        }
+    } else {
+        if (!NetPermissions::HasFlag(permission_flags, NetPermissionFlags::NoBan) && nInbound + 1 >= m_max_inbound && discouraged)
+        {
+            LogDebug(BCLog::NET, "connection from %s dropped (discouraged)\n", addr.ToStringAddrPort());
+            return;
+        }
+
+        if (nInbound >= m_max_inbound)
+        {
+            if (!AttemptToEvictConnection(/*evict_tx_relay_peer_only=*/false)) {
+                // No connection to evict, disconnect the new connection
+                LogDebug(BCLog::NET, "failed to find an eviction candidate - connection dropped (full)\n");
+                return;
+            }
         }
     }
 
@@ -1878,7 +1894,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::shared_ptr<Sock> sock,
                              nonce,
                              addr_bind,
                              /*addrNameIn=*/"",
-                             ConnectionType::INBOUND,
+                             coordination ? ConnectionType::HOLEPUNCH_COORD : ConnectionType::INBOUND,
                              inbound_onion,
                              network_id,
                              CNodeOptions{
@@ -1887,6 +1903,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::shared_ptr<Sock> sock,
                                  .recv_flood_size = nReceiveFloodSize,
                                  .use_v2transport = use_v2transport,
                                  .hole_punched = hole_punched,
+                                 .accepted = coordination,
                              });
     pnode->AddRef();
     m_msgproc->InitializeNode(*pnode, local_services);
@@ -1894,7 +1911,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::shared_ptr<Sock> sock,
         LOCK(m_nodes_mutex);
         m_nodes.push_back(pnode);
     }
-    LogDebug(BCLog::NET, "%sconnection from %s accepted\n", hole_punched ? "hole-punched " : "", addr.ToStringAddrPort());
+    LogDebug(BCLog::NET, "%sconnection from %s accepted\n", coordination ? "coordination " : hole_punched ? "hole-punched " : "", addr.ToStringAddrPort());
     TRACEPOINT(net, inbound_connection,
         pnode->GetId(),
         pnode->m_addr_name.c_str(),
@@ -3586,6 +3603,11 @@ bool CConnman::InitBinds(const Options& options)
     }
     for (const auto& addr_bind : options.onion_binds) {
         if (!Bind(addr_bind, BF_REPORT_ERROR | BF_DONT_ADVERTISE, NetPermissionFlags::None)) {
+            return false;
+        }
+    }
+    if (options.m_holepunch.enabled && options.m_holepunch.coordination_bind) {
+        if (!Bind(*options.m_holepunch.coordination_bind, BF_REPORT_ERROR | BF_DONT_ADVERTISE, NetPermissionFlags::None)) {
             return false;
         }
     }

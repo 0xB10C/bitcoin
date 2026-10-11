@@ -597,6 +597,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-v2transport", strprintf("Support v2 transport (default: %u)", DEFAULT_V2_TRANSPORT), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-holepunch", strprintf("EXPERIMENTAL: Connect to other nodes behind NATs by TCP hole punching and let them connect to this node. All outbound clearnet connections are then made from the punch port. Requires -v2transport (default: %u)", DEFAULT_HOLEPUNCH), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-holepunchport=<port>", "Local port used for hole punching: for all outbound clearnet connections and for accepting punched connections (default: the -port value plus 2)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-holepunchcoordbind=<addr>[:<port>]", "Address to accept hole punch coordination connections on. Other nodes reach it only through the hole punching onion service (default: 127.0.0.1 and the punch port plus 1)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-peerbloomfilters", strprintf("Support filtering of blocks and transaction with bloom filters (default: %u)", DEFAULT_PEERBLOOMFILTERS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-peerblockfilters", strprintf("Serve compact block filters to peers per BIP 157 (default: %u)", DEFAULT_PEERBLOCKFILTERS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-txreconciliation", strprintf("Enable transaction reconciliations per BIP 330 (default: %d)", DEFAULT_TXRECONCILIATION_ENABLE), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CONNECTION);
@@ -1391,6 +1392,10 @@ static std::optional<CService> CheckBindingConflicts(const CConnman::Options& co
         if (!seen.insert(onion_bind).second) {
             return onion_bind;
         }
+    }
+
+    if (conn_options.m_holepunch.coordination_bind && !seen.insert(*conn_options.m_holepunch.coordination_bind).second) {
+        return conn_options.m_holepunch.coordination_bind;
     }
 
     return std::nullopt;
@@ -2405,13 +2410,21 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         }
         connOptions.m_holepunch.port = static_cast<uint16_t>(punch_port);
         connOptions.m_holepunch.allow_local = chainparams.GetChainType() == ChainType::REGTEST;
-        LogInfo("Hole punching enabled, punch port %d", connOptions.m_holepunch.port);
+        const uint16_t coord_port{static_cast<uint16_t>(punch_port + 1)};
+        if (args.IsArgSet("-holepunchcoordbind")) {
+            const std::string bind_arg{args.GetArg("-holepunchcoordbind", "")};
+            connOptions.m_holepunch.coordination_bind = Lookup(bind_arg, coord_port, /*fAllowLookup=*/false);
+            if (!connOptions.m_holepunch.coordination_bind) return InitError(ResolveErrMsg("holepunchcoordbind", bind_arg));
+        } else {
+            connOptions.m_holepunch.coordination_bind = DefaultOnionServiceTarget(coord_port);
+        }
+        LogInfo("Hole punching enabled, punch port %d, coordination bind %s", connOptions.m_holepunch.port, connOptions.m_holepunch.coordination_bind->ToStringAddrPort());
     }
 
     if (auto conflict = CheckBindingConflicts(connOptions)) {
         return InitError(strprintf(
             _("Duplicate binding configuration for address %s. "
-                "Please check your -bind, -bind=...=onion and -whitebind settings."),
+                "Please check your -bind, -bind=...=onion, -whitebind and -holepunchcoordbind settings."),
                     conflict->ToStringAddrPort()));
     }
 

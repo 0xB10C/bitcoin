@@ -15,6 +15,7 @@ from test_framework.messages import (
     msg_getaddr,
     msg_punch,
     msg_rendezvous,
+    msg_verack,
 )
 from test_framework.p2p import (
     EncryptedP2PState,
@@ -24,6 +25,7 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     MAX_NODES,
     assert_equal,
+    holepunch_coord_port,
     holepunch_port,
     p2p_port,
 )
@@ -128,6 +130,18 @@ class HolePunchPeer(ReportingPeer):
             self.holepunch_feature = message.feature_data
 
 
+class CoordinationPeer(HolePunchPeer):
+    """A test peer on a coordination connection: it negotiates the feature and
+    sends nothing else, in particular no getaddr after verack."""
+
+    def on_version(self, message):
+        if not self.p2p_connected_to_node:
+            self.send_version()
+        self.send_without_ping(msg_feature(HOLEPUNCH_FEATURE_ID, feature_data(self.caps)))
+        self.send_without_ping(msg_verack())
+        self.nServices = message.nServices
+
+
 class PunchInitiatorPeer(HolePunchPeer):
     """A test peer at the other end of a punched connection, in the initiator
     role: it accepts the node's TCP connection but speaks first, as the BIP 324
@@ -148,6 +162,7 @@ class HolePunchTest(BitcoinTestFramework):
             "-v2transport=1",
             "-holepunch=1",
             f"-holepunchport={holepunch_port(0)}",
+            f"-holepunchcoordbind=127.0.0.1:{holepunch_coord_port(0)}",
             "-whitelist=addr@127.0.0.1",  # no address rate limit for inbound test peers
         ]]
 
@@ -225,7 +240,7 @@ class HolePunchTest(BitcoinTestFramework):
     def test_coordination_connection(self):
         node = self.nodes[0]
         self.log.info("A coordination connection is made from the punch port and negotiates only the feature")
-        peer = node.add_outbound_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR), p2p_idx=0, connection_type="holepunch-coordination")
+        peer = node.add_outbound_p2p_connection(CoordinationPeer(caps=CAP_COORDINATOR), p2p_idx=0, connection_type="holepunch-coordination")
         assert_equal(peer.dstport, holepunch_port(0))
         # The connection is not kept, so the node does not offer to be advertised through it.
         assert_equal(peer.holepunch_feature, feature_data(CAP_PUNCHPORT))
@@ -242,11 +257,39 @@ class HolePunchTest(BitcoinTestFramework):
             peer.wait_for_disconnect()
 
         self.log.info("It is closed when nothing came of it within COORD_TIMEOUT")
-        peer = node.add_outbound_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR), p2p_idx=1, connection_type="holepunch-coordination")
+        peer = node.add_outbound_p2p_connection(CoordinationPeer(caps=CAP_COORDINATOR), p2p_idx=1, connection_type="holepunch-coordination")
         with node.assert_debug_log(["coordination timed out"], timeout=5):
             node.setmocktime(int(time.time()) + 11)
             peer.wait_for_disconnect()
         node.setmocktime(0)
+        node.disconnect_p2ps()
+        self.wait_until(lambda: len(node.getpeerinfo()) == 0)
+
+    def test_coordination_bind(self):
+        node = self.nodes[0]
+        coord_port = holepunch_coord_port(0)
+        self.log.info("A connection to the coordination bind is a coordination connection reached through Tor")
+        peer = node.add_p2p_connection(CoordinationPeer(caps=0), dstport=coord_port)
+        info = next(p for p in node.getpeerinfo() if p["connection_type"] == "holepunch-coordination")
+        assert_equal(info["inbound"], True)
+        assert_equal(info["network"], "onion")
+        # On the accepting side the node answers rendezvous, and it observes nothing about the peer.
+        assert_equal(peer.holepunch_feature, feature_data(CAP_COORDINATOR))
+        assert set(peer.message_count) <= {"version", "feature", "verack", "pong"}, peer.message_count
+        self.log.info("It takes no inbound slot")
+        assert_equal(node.getnetworkinfo()["connections_in"], 0)
+
+        self.log.info("At most COORD_INBOUND_MAX coordination connections are held")
+        for _ in range(7):
+            node.add_p2p_connection(CoordinationPeer(caps=0), dstport=coord_port)
+        with node.assert_debug_log(["coordination connection dropped: 8 are open already"], timeout=5):
+            node.add_p2p_connection(CoordinationPeer(caps=0), dstport=coord_port, send_version=False, wait_for_verack=False, expect_success=False)
+        assert_equal(len([p for p in node.getpeerinfo() if p["connection_type"] == "holepunch-coordination"]), 8)
+
+        self.log.info("Any message other than ping, pong, rendezvous and punch closes it")
+        with node.assert_debug_log(["getaddr on a coordination connection"], timeout=5):
+            peer.send_without_ping(msg_getaddr())
+            peer.wait_for_disconnect()
         node.disconnect_p2ps()
         self.wait_until(lambda: len(node.getpeerinfo()) == 0)
 
@@ -545,6 +588,7 @@ class HolePunchTest(BitcoinTestFramework):
         self.test_outbound_from_punch_port()
         self.test_external_address()
         self.test_coordination_connection()
+        self.test_coordination_bind()
         self.test_feature_negotiation()
         self.test_punch_as_responder()
         self.test_coordinator()
