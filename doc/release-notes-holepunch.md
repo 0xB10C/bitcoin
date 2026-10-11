@@ -7,8 +7,14 @@ P2P and network changes
   clearnet connections are then made from the punch port
   (`-holepunchport`, default: the P2P port plus two), peers negotiate the
   feature with BIP 434, and a new BIP 155 address type (network id 8)
-  announces nodes reachable this way. Off by default; needs
-  `-v2transport`. See `doc/p2p-holepunch.md`.
+  announces nodes reachable this way. A node with `-listenonion` also runs
+  a second onion service, never advertised, through which it coordinates
+  punches to itself; connectors reach it through their Tor proxy. Off by
+  default; needs `-v2transport`. See `doc/p2p-holepunch.md`.
+- A new connection type, `holepunch-coordination`, is used for the
+  short-lived connections that arrange a hole punch. They carry only the
+  handshake and the hole punching messages and take no connection slot.
+  `-holepunchcoordbind` sets where such connections are accepted.
 
 New RPCs
 --------
@@ -20,4 +26,6 @@ Updated RPCs
 
 - `getpeerinfo` has two new fields: `hole_punched`, whether the connection
   was made by hole punching, and `holepunch_caps`, the hole punching
-  capabilities a peer announced.
+  capabilities a peer announced; `connection_type` can be
+  `holepunch-coordination`.
+- `addconnection` accepts `holepunch-coordination` as connection type.
