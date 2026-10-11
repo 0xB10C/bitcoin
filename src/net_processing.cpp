@@ -3997,7 +3997,6 @@ bool PeerManagerImpl::ProcessPunch(CNode& pfrom, Peer& peer, DataStream& vRecv)
         if (peer.m_holepunch_rendezvous_target && now - peer.m_holepunch_rendezvous_sent <= holepunch::COORD_TIMEOUT) {
             answered_target = peer.m_holepunch_rendezvous_target;
         }
-        peer.m_holepunch_rendezvous_target.reset();
     }
 
     std::string reject;
@@ -4021,9 +4020,12 @@ bool PeerManagerImpl::ProcessPunch(CNode& pfrom, Peer& peer, DataStream& vRecv)
         if (const auto refused{m_connman.HolePunch(role, msg.peer)}) reject = *refused;
     }
     if (!reject.empty()) {
+        // A rejected answer leaves the rendezvous outstanding until its deadline: the
+        // next punch is checked against it too, and no new request goes out (R-4.4).
         LogDebug(BCLog::HOLEPUNCH, "ignoring punch from peer=%d (%s with %s): %s\n", pfrom.GetId(), role_name, msg.peer.ToStringAddrPort(), reject);
         return false;
     }
+    if (answered_target) WITH_LOCK(peer.m_holepunch_mutex, peer.m_holepunch_rendezvous_target.reset());
     LogDebug(BCLog::HOLEPUNCH, "punch from peer=%d: session with %s started as %s%s\n", pfrom.GetId(), msg.peer.ToStringAddrPort(), role_name, answered_target ? " (answers our rendezvous)" : "");
     return true;
 }
@@ -4143,6 +4145,7 @@ std::optional<std::string> PeerManagerImpl::HolePunchRendezvous(NodeId coordinat
     const PeerRef peer{GetPeerRef(coordinator)};
     if (!peer) return "unknown peer";
     if (!HolePunchNegotiated(*peer)) return "hole punching is not negotiated with this peer";
+    if (!(peer->m_holepunch_caps & holepunch::CAP_COORDINATOR)) return "the peer does not coordinate";
     if (!holepunch::IsWellFormedEndpoint(target) || target.GetPort() == 0) return "target must be an IPv4 or IPv6 address with a port";
     const auto now{NodeClock::now()};
     LOCK(peer->m_holepunch_mutex);

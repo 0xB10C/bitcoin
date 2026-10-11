@@ -26,6 +26,7 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     MAX_NODES,
     assert_equal,
+    assert_raises_rpc_error,
     holepunch_coord_port,
     holepunch_port,
     p2p_port,
@@ -646,8 +647,19 @@ class HolePunchTest(BitcoinTestFramework):
         assert target_endpoint.port not in [int(a["target"].rsplit(":", 1)[1]) for a in self.announcements(node)]
         assert all(a["coordinator"] != f"127.0.0.1:{coordinator_endpoint.port}" for a in self.announcements(node))
 
+        self.log.info("Answers that fail validation leave the request outstanding")
+        coordinator_id = next(p["id"] for p in node.getpeerinfo() if p["addr"] == f"127.0.0.1:{coordinator_endpoint.port}")
+        for punch, reason in [
+            (msg_punch(msg_punch.ROLE_RESPONDER, target_endpoint), "the answer to our rendezvous names us responder"),
+            (msg_punch(msg_punch.ROLE_INITIATOR, endpoint("127.0.0.1", 40000)), "not the target"),
+        ]:
+            with node.assert_debug_log(["ignoring punch from peer=", reason], timeout=5):
+                coordinator.send_and_ping(punch)
+        assert_raises_rpc_error(-1, "a rendezvous is outstanding on this connection", node.holepunchrendezvous, coordinator_id, f"127.0.0.1:{target_endpoint.port}")
+
         self.log.info("The coordinator's punch makes the node connect to the target as initiator")
-        coordinator.send_and_ping(msg_punch(msg_punch.ROLE_INITIATOR, target_endpoint))
+        with node.assert_debug_log(["answers our rendezvous"], timeout=5):
+            coordinator.send_and_ping(msg_punch(msg_punch.ROLE_INITIATOR, target_endpoint))
         target.wait_for_connect()
         target.wait_for_verack()
         punched = [p for p in node.getpeerinfo() if p["hole_punched"]]
@@ -669,6 +681,9 @@ class HolePunchTest(BitcoinTestFramework):
         node.add_outbound_p2p_connection(HolePunchPeer(caps=0), p2p_idx=1)
         assert_equal(self.external(node)["address"], f"127.0.0.1:{punch_port}")
         mocktime = int(time.time())
+
+        self.log.info("A rendezvous is only asked of a peer that coordinates")
+        assert_raises_rpc_error(-1, "the peer does not coordinate", node.holepunchrendezvous, node.getpeerinfo()[0]["id"], "127.0.0.1:40000")
 
         def run(coordinator_addr, coordinator_idx, target_idx, expected_caps, kept):
             nonlocal mocktime
