@@ -4028,6 +4028,11 @@ bool CConnman::HasHolePunchSession(const CService& peer) const
     return m_holepunch_sessions && m_holepunch_sessions->HasSession(peer);
 }
 
+void CConnman::HolePunchCancel(const CService& peer)
+{
+    if (m_holepunch_sessions) m_holepunch_sessions->Cancel(peer);
+}
+
 std::vector<holepunch::SessionManager::SessionInfo> CConnman::GetHolePunchSessions() const
 {
     if (!m_holepunch_sessions) return {};

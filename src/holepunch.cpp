@@ -288,6 +288,15 @@ bool SessionManager::HasSession(const CService& peer) const
     return m_sessions.contains(peer);
 }
 
+void SessionManager::Cancel(const CService& peer)
+{
+    LOCK(m_mutex);
+    const auto it{m_sessions.find(peer)};
+    if (it == m_sessions.end()) return;
+    LogDebug(BCLog::HOLEPUNCH, "session with %s cancelled as %s after %d attempt(s)\n", peer.ToStringAddrPort(), RoleName(it->second.role), it->second.attempts);
+    m_sessions.erase(it);
+}
+
 std::vector<SessionManager::SessionInfo> SessionManager::GetSessions() const
 {
     std::vector<SessionInfo> infos;

@@ -1199,6 +1199,8 @@ public:
     /** Start a punch session with `peer`. Returns the reason if it was not started. */
     std::optional<std::string> HolePunch(holepunch::Role role, const CService& peer);
     bool HasHolePunchSession(const CService& peer) const;
+    /** Drop the punch session with `peer`, if any. */
+    void HolePunchCancel(const CService& peer);
     std::vector<holepunch::SessionManager::SessionInfo> GetHolePunchSessions() const;
     /** Number of hole-punched outbound peers. */
     int GetHolePunchOutboundCount() const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);

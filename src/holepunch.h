@@ -241,6 +241,8 @@ public:
     std::optional<std::string> Punch(Role role, const CService& peer) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     bool HasSession(const CService& peer) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Drop the session with `peer`, closing its sockets. Nothing is reported for it. */
+    void Cancel(const CService& peer) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     struct SessionInfo {
         CService peer;

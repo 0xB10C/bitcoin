@@ -388,6 +388,8 @@ struct Peer {
     /** Target of the rendezvous we sent on this connection, while it is outstanding (R-4.4). */
     std::optional<CService> m_holepunch_rendezvous_target GUARDED_BY(m_holepunch_mutex);
     NodeClock::time_point m_holepunch_rendezvous_sent GUARDED_BY(m_holepunch_mutex){};
+    /** The requester whose session we started on our coordination service, until its punch is on the wire (R-12.5). */
+    std::optional<CService> m_holepunch_answered_requester GUARDED_BY(m_holepunch_mutex);
     /** When we last sent a punch to this peer as coordinator (R-4.4). */
     NodeClock::time_point m_holepunch_punch_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
     /** When a punch answering our rendezvous was accepted on a coordination connection (R-7.3). */
@@ -644,6 +646,8 @@ public:
     void ProcessRendezvous(CNode& pfrom, Peer& peer, DataStream& vRecv) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_peer_mutex);
     std::optional<std::string> HolePunchRendezvous(NodeId coordinator, const CService& target) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+    /** The punch answering a rendezvous on our coordination service did not reach the connector: drop the session (R-12.5). */
+    void HolePunchCancelAnswered(Peer& peer);
     /** Connected outbound peers that negotiated hole punching and act as coordinator, by address. */
     std::map<CService, NodeId> HolePunchCoordinators() const EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     /** Advertiser: announce ourselves to `node` through one of our coordinators (R-6.5), at most every ANNOUNCE_INTERVAL. */
@@ -1854,6 +1858,7 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
         assert(peer != nullptr);
         m_wtxid_relay_peers -= peer->m_wtxid_relay;
         m_connman.HolePunchForgetPeer(nodeid);
+        if (node.IsHolePunchCoordConn()) HolePunchCancelAnswered(*peer);
         assert(m_wtxid_relay_peers >= 0);
     }
     CNodeState *state = State(nodeid);
@@ -4075,6 +4080,7 @@ void PeerManagerImpl::ProcessRendezvous(CNode& pfrom, Peer& peer, DataStream& vR
         // The connector is always the initiator (R-12.5); the connection is closed once this is out.
         MakeAndPushMessage(pfrom, NetMsgType::PUNCH, holepunch::PunchMsg{.role = static_cast<uint8_t>(holepunch::Role::INITIATOR), .peer = msg.target});
         peer.m_holepunch_punch_sent = now;
+        WITH_LOCK(peer.m_holepunch_mutex, peer.m_holepunch_answered_requester = msg.requester);
         LogDebug(BCLog::HOLEPUNCH, "rendezvous from peer=%d on our coordination service: punch sent to it as initiator, session with %s started as responder\n", pfrom.GetId(), msg.requester.ToStringAddrPort());
         return;
     }
@@ -4138,6 +4144,18 @@ void PeerManagerImpl::ProcessRendezvous(CNode& pfrom, Peer& peer, DataStream& vR
     MakeAndPushMessage(pfrom, NetMsgType::PUNCH, holepunch::PunchMsg{.role = static_cast<uint8_t>(holepunch::Role::INITIATOR), .peer = msg.target});
     peer.m_holepunch_punch_sent = now;
     LogDebug(BCLog::HOLEPUNCH, "rendezvous from peer=%d (%s): punch sent to it as initiator and to peer=%d (%s) as responder\n", pfrom.GetId(), requester.ToStringAddrPort(), *target_id, msg.target.ToStringAddrPort());
+}
+
+void PeerManagerImpl::HolePunchCancelAnswered(Peer& peer)
+{
+    std::optional<CService> requester;
+    {
+        LOCK(peer.m_holepunch_mutex);
+        requester.swap(peer.m_holepunch_answered_requester);
+    }
+    if (!requester) return;
+    LogDebug(BCLog::HOLEPUNCH, "punch for %s not delivered, cancelling the session with it\n", requester->ToStringAddrPort());
+    m_connman.HolePunchCancel(*requester);
 }
 
 std::optional<std::string> PeerManagerImpl::HolePunchRendezvous(NodeId coordinator, const CService& target)
@@ -6668,10 +6686,12 @@ bool PeerManagerImpl::SendMessages(CNode& node)
         } else if (last + holepunch::COORD_TIMEOUT < now) {
             LogDebug(BCLog::HOLEPUNCH, "coordination timed out, %s", node.DisconnectMsg());
             node.fDisconnect = true;
+            HolePunchCancelAnswered(peer);
         } else if (peer.m_holepunch_punch_sent != NodeClock::time_point{}) {
             // We answered a rendezvous; close as soon as the punch is on the wire (R-12.5).
             const bool flushed{WITH_LOCK(node.cs_vSend, return node.vSendMsg.empty() && std::get<0>(node.m_transport->GetBytesToSend(/*have_next_message=*/false)).empty())};
             if (flushed) {
+                WITH_LOCK(peer.m_holepunch_mutex, peer.m_holepunch_answered_requester.reset());
                 LogDebug(BCLog::HOLEPUNCH, "punch sent, %s", node.DisconnectMsg());
                 node.fDisconnect = true;
             }

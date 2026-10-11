@@ -533,6 +533,25 @@ BOOST_AUTO_TEST_CASE(session_unmatched_connection_is_closed)
     BOOST_CHECK_EQUAL(results_a.Count(), 0);
 }
 
+BOOST_AUTO_TEST_CASE(session_cancel)
+{
+    const uint16_t port_a{FreePort()};
+    const uint16_t port_dead{FreePort()}; // nothing listens here
+    Results results_a;
+    SessionManager a{LocalOptions(port_a), results_a.Fn()};
+    BOOST_REQUIRE(a.Start());
+
+    const CService dead{LookupNumeric("127.0.0.1", port_dead)};
+    BOOST_REQUIRE(!a.Punch(Role::RESPONDER, dead));
+    BOOST_CHECK(a.HasSession(dead));
+    a.Cancel(dead);
+    BOOST_CHECK(!a.HasSession(dead));
+    BOOST_CHECK(a.GetSessions().empty());
+    a.Cancel(dead); // cancelling again, or an unknown session, does nothing
+    // A cancelled session is not reported as failed.
+    BOOST_CHECK(!WaitFor([&] { return results_a.Count() > 0; }, std::chrono::milliseconds{500}));
+}
+
 BOOST_AUTO_TEST_CASE(session_fails_after_window_and_grace)
 {
     const uint16_t port_a{FreePort()};
