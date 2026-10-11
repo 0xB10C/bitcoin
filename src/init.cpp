@@ -595,6 +595,8 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-i2pacceptincoming", strprintf("Whether to accept inbound I2P connections (default: %i). Ignored if -i2psam is not set. Listening for inbound I2P connections is done through the SAM proxy, not by binding to a local address and port.", DEFAULT_I2P_ACCEPT_INCOMING), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-onlynet=<net>", "Make automatic outbound connections only to network <net> (" + Join(GetNetworkNames(), ", ") + "). Inbound and manual connections are not affected by this option. It can be specified multiple times to allow multiple networks.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-v2transport", strprintf("Support v2 transport (default: %u)", DEFAULT_V2_TRANSPORT), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-holepunch", strprintf("EXPERIMENTAL: Connect to other nodes behind NATs by TCP hole punching and let them connect to this node. All outbound clearnet connections are then made from the punch port. Requires -v2transport (default: %u)", DEFAULT_HOLEPUNCH), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-holepunchport=<port>", "Local port used for hole punching: for all outbound clearnet connections and for accepting punched connections (default: the -port value plus 2)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-peerbloomfilters", strprintf("Support filtering of blocks and transaction with bloom filters (default: %u)", DEFAULT_PEERBLOOMFILTERS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-peerblockfilters", strprintf("Serve compact block filters to peers per BIP 157 (default: %u)", DEFAULT_PEERBLOCKFILTERS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-txreconciliation", strprintf("Enable transaction reconciliations per BIP 330 (default: %d)", DEFAULT_TXRECONCILIATION_ENABLE), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CONNECTION);
@@ -2391,6 +2393,20 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 
     connOptions.m_i2p_accept_incoming = args.GetBoolArg("-i2pacceptincoming", DEFAULT_I2P_ACCEPT_INCOMING);
+
+    connOptions.m_holepunch.enabled = args.GetBoolArg("-holepunch", DEFAULT_HOLEPUNCH);
+    if (connOptions.m_holepunch.enabled) {
+        if (!(g_local_services & NODE_P2P_V2)) {
+            return InitError(_("-holepunch requires -v2transport"));
+        }
+        const int64_t punch_port{args.GetIntArg("-holepunchport", int64_t{GetListenPort()} + 2)};
+        if (punch_port < 1 || punch_port > 65535) {
+            return InitError(strprintf(_("Invalid port specified in %s: '%s'"), "-holepunchport", args.GetArg("-holepunchport", "")));
+        }
+        connOptions.m_holepunch.port = static_cast<uint16_t>(punch_port);
+        connOptions.m_holepunch.allow_local = chainparams.GetChainType() == ChainType::REGTEST;
+        LogInfo("Hole punching enabled, punch port %d", connOptions.m_holepunch.port);
+    }
 
     if (auto conflict = CheckBindingConflicts(connOptions)) {
         return InitError(strprintf(

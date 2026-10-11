@@ -492,7 +492,19 @@ CNode* CConnman::ConnectNode(CAddress addrConnect,
                 // No proxy needed (none set for target network). Private broadcast connections
                 // must always use a proxy, otherwise they would leak the originator's IP address.
                 if (Assume(conn_type != ConnectionType::PRIVATE_BROADCAST)) {
-                    sock = ConnectDirectly(target_addr, conn_type == ConnectionType::MANUAL);
+                    // With hole punching enabled, every clearnet outbound connection is made from
+                    // the punch port, so that every peer reports our NAT-mapped address and port
+                    // and the mapping stays alive (R-1.1).
+                    const auto bind_addr{HolePunchBindAddress(target_addr)};
+                    sock = ConnectDirectly(target_addr, conn_type == ConnectionType::MANUAL, std::chrono::milliseconds{nConnectTimeout}, bind_addr);
+                    if (sock && bind_addr) {
+                        const uint16_t local_port{GetBindAddress(*sock).GetPort()};
+                        if (local_port == bind_addr->GetPort()) {
+                            LogDebug(BCLog::HOLEPUNCH, "connected to %s from punch port %d\n", target_addr.ToStringAddrPort(), local_port);
+                        } else {
+                            LogDebug(BCLog::HOLEPUNCH, "connected to %s from ephemeral port %d, punch port %d was not usable\n", target_addr.ToStringAddrPort(), local_port, bind_addr->GetPort());
+                        }
+                    }
                 }
             }
             if (!proxyConnectionFailed) {
@@ -3818,6 +3830,20 @@ CConnman::~CConnman()
 {
     Interrupt();
     Stop();
+}
+
+std::optional<CService> CConnman::HolePunchBindAddress(const CService& target) const
+{
+    if (!m_holepunch_opts.enabled) return std::nullopt;
+    if (target.IsIPv4()) {
+        struct in_addr inaddr_any;
+        inaddr_any.s_addr = htonl(INADDR_ANY);
+        return CService{inaddr_any, m_holepunch_opts.port};
+    }
+    if (target.IsIPv6()) {
+        return CService{in6_addr(COMPAT_IN6ADDR_ANY_INIT), m_holepunch_opts.port};
+    }
+    return std::nullopt;
 }
 
 std::vector<CAddress> CConnman::GetAddressesUnsafe(size_t max_addresses, size_t max_pct, std::optional<Network> network, const bool filtered) const

@@ -13,6 +13,7 @@
 #include <consensus/amount.h>
 #include <crypto/siphash.h>
 #include <hash.h>
+#include <holepunch.h>
 #include <i2p.h>
 #include <kernel/messagestartchars.h>
 #include <net_permissions.h>
@@ -90,6 +91,8 @@ inline constexpr bool DEFAULT_BLOCKSONLY = false;
 inline constexpr int64_t DEFAULT_PEER_CONNECT_TIMEOUT = 60;
 /** Default for -privatebroadcast. */
 inline constexpr bool DEFAULT_PRIVATE_BROADCAST{false};
+/** Default for -holepunch */
+inline constexpr bool DEFAULT_HOLEPUNCH{false};
 /** Number of file descriptors required for message capture **/
 inline constexpr int NUM_FDS_MESSAGE_CAPTURE = 1;
 /** Interval for ASMap Health Check **/
@@ -1114,6 +1117,7 @@ public:
         bool whitelist_forcerelay = DEFAULT_WHITELISTFORCERELAY;
         bool whitelist_relay = DEFAULT_WHITELISTRELAY;
         bool m_capture_messages = false;
+        holepunch::Options m_holepunch;
     };
 
     void Init(const Options& connOptions) EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex, !m_total_bytes_sent_mutex)
@@ -1153,7 +1157,10 @@ public:
         whitelist_forcerelay = connOptions.whitelist_forcerelay;
         whitelist_relay = connOptions.whitelist_relay;
         m_capture_messages = connOptions.m_capture_messages;
+        m_holepunch_opts = connOptions.m_holepunch;
     }
+
+    const holepunch::Options& GetHolePunchOptions() const { return m_holepunch_opts; }
 
     // test only
     void SetCaptureMessages(bool cap) { m_capture_messages = cap; }
@@ -1799,6 +1806,15 @@ private:
      * an address and port that are designated for incoming Tor connections.
      */
     std::vector<CService> m_onion_binds;
+
+    holepunch::Options m_holepunch_opts;
+
+    /**
+     * The local address to connect from when hole punching is enabled and the
+     * target is a clearnet address: the wildcard address of the target's family
+     * on the punch port. Empty otherwise.
+     */
+    std::optional<CService> HolePunchBindAddress(const CService& target) const;
 
     /**
      * flag for adding 'forcerelay' permission to whitelisted inbound
