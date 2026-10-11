@@ -1960,8 +1960,11 @@ bool CConnman::AddConnection(const std::string& address, ConnectionType conn_typ
     if (max_connections != std::nullopt && existing_connections >= max_connections) return false;
 
     // Max total automatic outbound or manual connections already exist
-    CountingSemaphoreGrant<> grant(conn_type == ConnectionType::MANUAL ? *semAddnode : *semOutbound, true);
-    if (!grant) return false;
+    CountingSemaphoreGrant<> grant;
+    if (conn_type != ConnectionType::HOLEPUNCH_COORD) {
+        grant = CountingSemaphoreGrant<>(conn_type == ConnectionType::MANUAL ? *semAddnode : *semOutbound, true);
+        if (!grant) return false;
+    }
 
     OpenNetworkConnection(/*addrConnect=*/CAddress{},
                           /*fCountFailure=*/false,
@@ -3164,7 +3167,13 @@ bool CConnman::OpenNetworkConnection(const CAddress& addrConnect,
     }
     if (!pszDest) {
         bool banned_or_discouraged = m_banman && (m_banman->IsDiscouraged(addrConnect) || m_banman->IsBanned(addrConnect));
-        if (IsLocal(addrConnect) || banned_or_discouraged || AlreadyConnectedToAddress(addrConnect)) {
+        if (IsLocal(addrConnect) || banned_or_discouraged) {
+            return false;
+        }
+        // A coordinator may share its address with a peer we have, for example behind one
+        // NAT; the coordination connection is short-lived, so only an identical endpoint
+        // counts as already connected (checked in ConnectNode).
+        if (conn_type != ConnectionType::HOLEPUNCH_COORD && AlreadyConnectedToAddress(addrConnect)) {
             return false;
         }
     } else if (AlreadyConnectedToHost(pszDest)) {
@@ -3418,6 +3427,47 @@ void CConnman::ThreadPrivateBroadcast()
                 LogDebug(BCLog::PRIVBROADCAST, "Failed to connect to %s, will retry to a different address; remaining connections to open: %d", target_str, remaining);
                 m_interrupt_net->sleep_for(100ms); // Prevent busy loop if OpenNetworkConnection() fails fast repeatedly.
             }
+        }
+    }
+}
+
+void CConnman::HolePunchOpenCoordination(const CService& coordinator)
+{
+    LOCK(m_holepunch_coord_mutex);
+    m_holepunch_coord_queue.push_back(coordinator);
+}
+
+void CConnman::ThreadHolePunchCoordination()
+{
+    AssertLockNotHeld(m_nodes_mutex);
+    AssertLockNotHeld(m_unused_i2p_sessions_mutex);
+
+    while (!m_interrupt_net->interrupted()) {
+        std::optional<CService> coordinator;
+        {
+            LOCK(m_holepunch_coord_mutex);
+            if (!m_holepunch_coord_queue.empty()) {
+                coordinator = m_holepunch_coord_queue.front();
+                m_holepunch_coord_queue.pop_front();
+            }
+        }
+        if (!coordinator) {
+            if (!m_interrupt_net->sleep_for(500ms)) break;
+            continue;
+        }
+        if (!fNetworkActive) continue;
+        // A clearnet coordinator is reached directly, from the punch port, so that it
+        // observes our external address; an onion one through the onion proxy.
+        if (OpenNetworkConnection(CAddress{*coordinator, NODE_NONE},
+                                  /*fCountFailure=*/false,
+                                  CountingSemaphoreGrant<>{},
+                                  /*pszDest=*/nullptr,
+                                  ConnectionType::HOLEPUNCH_COORD,
+                                  /*use_v2transport=*/true,
+                                  /*proxy_override=*/std::nullopt)) {
+            LogDebug(BCLog::HOLEPUNCH, "opened a coordination connection to %s\n", coordinator->ToStringAddrPort());
+        } else {
+            LogDebug(BCLog::HOLEPUNCH, "could not open a coordination connection to %s\n", coordinator->ToStringAddrPort());
         }
     }
 }
@@ -3742,6 +3792,7 @@ bool CConnman::Start(CScheduler& scheduler, const Options& connOptions)
             LogWarning("Hole punching: sessions disabled, the punch port %d could not be opened", m_holepunch_opts.port);
             m_holepunch_sessions.reset();
         }
+        threadHolePunchCoordination = std::thread(&util::TraceThread, "hpcoord", [this] { ThreadHolePunchCoordination(); });
     }
 
     // Dump network addresses
@@ -3802,6 +3853,9 @@ void CConnman::StopThreads()
 {
     if (m_holepunch_sessions) {
         m_holepunch_sessions->Stop();
+    }
+    if (threadHolePunchCoordination.joinable()) {
+        threadHolePunchCoordination.join();
     }
     if (threadPrivateBroadcast.joinable()) {
         threadPrivateBroadcast.join();

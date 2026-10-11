@@ -613,7 +613,7 @@ public:
     void FinalizeNode(const CNode& node) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_headers_presync_mutex, !m_tx_download_mutex);
     bool HasAllDesirableServiceFlags(ServiceFlags services) const override;
     bool ProcessMessages(CNode& node, std::atomic<bool>& interrupt) override
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_holepunch_pending_mutex);
     bool SendMessages(CNode& node) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex);
 
@@ -640,8 +640,12 @@ public:
     std::map<CService, NodeId> HolePunchCoordinators() const EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     /** Advertiser: announce ourselves to `node` through one of our coordinators (R-6.5), at most every ANNOUNCE_INTERVAL. */
     void MaybeSendHolePunchAnnouncement(CNode& node, Peer& peer, std::chrono::microseconds current_time) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_peer_mutex);
-    /** Connector: pick a cached announcement and ask its coordinator for a rendezvous (R-7.1 to R-7.3). Runs on the scheduler. */
-    void HolePunchConnect() EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+    /** Connector: pick a cached announcement and ask its coordinator for a rendezvous, on an
+     * existing connection or on a coordination connection opened for it (R-7.1 to R-7.3). Runs on the scheduler. */
+    void HolePunchConnect() EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_holepunch_pending_mutex);
+    /** Targets of the coordination connections being opened, by coordinator, with the time of the request. */
+    Mutex m_holepunch_pending_mutex;
+    std::map<CService, std::pair<CService, NodeClock::time_point>> m_holepunch_pending GUARDED_BY(m_holepunch_pending_mutex);
     std::atomic<NodeClock::time_point> m_holepunch_next_attempt{NodeClock::time_point::min()};
     std::vector<node::TxOrphanage::OrphanInfo> GetOrphanTransactions() override EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
     PeerManagerInfo GetInfo() const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_inv_to_send_mutex);
@@ -662,7 +666,7 @@ public:
 private:
     void ProcessMessage(Peer& peer, CNode& pfrom, const std::string& msg_type, DataStream& vRecv, NodeClock::time_point time_received,
                         const std::atomic<bool>& interruptMsgProc)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_holepunch_pending_mutex);
 
     /** Consider evicting an outbound peer based on the amount of time they've been behind our tip */
     void ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seconds time_in_seconds) EXCLUSIVE_LOCKS_REQUIRED(cs_main, g_msgproc_mutex);
@@ -4180,35 +4184,63 @@ void PeerManagerImpl::MaybeSendHolePunchAnnouncement(CNode& node, Peer& peer, st
     }
 }
 
+/**
+ * Whether a coordination connection can be opened to `coordinator` (R-7.3): a clearnet
+ * one directly, so that it observes our external address, which a proxy would hide; an
+ * onion or I2P one through its proxy.
+ */
+static bool CanOpenHolePunchCoordination(const CService& coordinator)
+{
+    if (coordinator.IsIPv4() || coordinator.IsIPv6()) {
+        return !GetProxy(coordinator.IsIPv4() ? NET_IPV4 : NET_IPV6);
+    }
+    if (coordinator.IsTor() || coordinator.IsI2P()) {
+        const Network net{coordinator.GetNetwork()};
+        return g_reachable_nets.Contains(net) && GetProxy(net).has_value();
+    }
+    return false;
+}
+
 void PeerManagerImpl::HolePunchConnect()
 {
     const auto& opts{m_connman.GetHolePunchOptions()};
     if (!opts.enabled) return;
     const auto now{NodeClock::now()};
+    {
+        // Forget coordination connections that did not come up in time (R-7.3).
+        LOCK(m_holepunch_pending_mutex);
+        std::erase_if(m_holepunch_pending, [&](const auto& entry) { return now - entry.second.second > holepunch::COORD_TIMEOUT; });
+    }
     if (now < m_holepunch_next_attempt.load()) return;
     if (m_connman.GetHolePunchOutboundCount() >= holepunch::HP_OUTBOUND_MAX) return;
     const auto coordinators{HolePunchCoordinators()};
-    if (coordinators.empty()) return;
 
     const auto taken{m_connman.HolePunchTakeAnnouncement([&](const holepunch::Announcement& a) {
-        // Only through a coordinator we are connected to (R-7.3), with an external
-        // address in the target's family (R-7.1), not to ourselves, and within the
-        // outbound diversity rules with the coordinator and target as one group.
-        if (!coordinators.contains(a.coordinator)) return false;
+        // With an external address in the target's family (R-7.1), not to ourselves,
+        // within the outbound diversity rules with the coordinator and target as one
+        // group, and through a coordinator we are connected to or can reach (R-7.3).
         const auto external{m_connman.HolePunchExternalAddress(a.target.IsIPv4() ? NET_IPV4 : NET_IPV6)};
         if (!external) return false;
         if (opts.allow_local ? *external == a.target : static_cast<CNetAddr>(*external) == static_cast<CNetAddr>(a.target)) return false;
         if (!opts.allow_local && (m_connman.HasOutboundPeerInGroup(a.target) || m_connman.HasOutboundPeerInGroup(a.coordinator))) return false;
-        return true;
+        return coordinators.contains(a.coordinator) || CanOpenHolePunchCoordination(a.coordinator);
     })};
     if (!taken) return;
     m_holepunch_next_attempt = now + holepunch::HP_ATTEMPT_INTERVAL;
-    const NodeId coordinator{coordinators.at(taken->coordinator)};
-    if (const auto error{HolePunchRendezvous(coordinator, taken->target)}) {
-        LogDebug(BCLog::HOLEPUNCH, "not asking peer=%d for a rendezvous with %s: %s\n", coordinator, taken->target.ToStringAddrPort(), *error);
+    if (const auto it{coordinators.find(taken->coordinator)}; it != coordinators.end()) {
+        const NodeId coordinator{it->second};
+        if (const auto error{HolePunchRendezvous(coordinator, taken->target)}) {
+            LogDebug(BCLog::HOLEPUNCH, "not asking peer=%d for a rendezvous with %s: %s\n", coordinator, taken->target.ToStringAddrPort(), *error);
+            return;
+        }
+        LogDebug(BCLog::HOLEPUNCH, "asked peer=%d for a rendezvous with %s\n", coordinator, taken->target.ToStringAddrPort());
         return;
     }
-    LogDebug(BCLog::HOLEPUNCH, "asked peer=%d for a rendezvous with %s\n", coordinator, taken->target.ToStringAddrPort());
+    // No connection to the coordinator: open one just for this. The rendezvous goes out
+    // once the handshake on it is done.
+    WITH_LOCK(m_holepunch_pending_mutex, m_holepunch_pending[taken->coordinator] = std::make_pair(taken->target, now));
+    m_connman.HolePunchOpenCoordination(taken->coordinator);
+    LogDebug(BCLog::HOLEPUNCH, "opening a coordination connection to %s for a rendezvous with %s\n", taken->coordinator.ToStringAddrPort(), taken->target.ToStringAddrPort());
 }
 
 void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string& msg_type, DataStream& vRecv,
@@ -4528,6 +4560,25 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         if (pfrom.IsHolePunchCoordConn()) {
             pfrom.fSuccessfullyConnected = true;
             LogDebug(BCLog::HOLEPUNCH, "coordination connection ready, peer=%d\n", pfrom.GetId());
+            if (!pfrom.IsInboundConn()) {
+                // We opened it for a rendezvous (R-7.3).
+                std::optional<CService> target;
+                {
+                    LOCK(m_holepunch_pending_mutex);
+                    if (const auto it{m_holepunch_pending.find(pfrom.addr)}; it != m_holepunch_pending.end()) {
+                        target = it->second.first;
+                        m_holepunch_pending.erase(it);
+                    }
+                }
+                if (!target) {
+                    LogDebug(BCLog::HOLEPUNCH, "nothing to ask peer=%d for\n", pfrom.GetId());
+                } else if (const auto error{HolePunchRendezvous(pfrom.GetId(), *target)}) {
+                    LogDebug(BCLog::HOLEPUNCH, "not asking peer=%d for a rendezvous with %s: %s, %s", pfrom.GetId(), target->ToStringAddrPort(), *error, pfrom.DisconnectMsg());
+                    pfrom.fDisconnect = true;
+                } else {
+                    LogDebug(BCLog::HOLEPUNCH, "asked peer=%d for a rendezvous with %s\n", pfrom.GetId(), target->ToStringAddrPort());
+                }
+            }
             return;
         }
 

@@ -21,6 +21,7 @@ from test_framework.p2p import (
     EncryptedP2PState,
     P2PInterface,
 )
+from test_framework.socks5 import start_socks5_server
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     MAX_NODES,
@@ -34,6 +35,7 @@ import time
 
 
 HOLEPUNCH_FEATURE_ID = "https://delvingbitcoin.org/t/2497"
+ONION = "kpgvmsfpi2usww3uw74pnpj3xbxf3gvxprpq4a5fwq5bws5662wbv3ad.onion"
 CAP_COORDINATOR = 1 << 0
 CAP_ADVERTISED = 1 << 1
 CAP_PUNCHPORT = 1 << 4
@@ -165,6 +167,30 @@ class HolePunchTest(BitcoinTestFramework):
             f"-holepunchcoordbind=127.0.0.1:{holepunch_coord_port(0)}",
             "-whitelist=addr@127.0.0.1",  # no address rate limit for inbound test peers
         ]]
+
+    def setup_nodes(self):
+        # A fake Tor proxy: connections to an onion address are redirected to
+        # whatever self.proxy_destinations maps it to.
+        self.proxy_destinations = {}
+
+        def destinations_factory(requested_to_addr, requested_to_port, proxy_client):
+            dest = self.proxy_destinations.get(requested_to_addr)
+            if dest is None:
+                return None
+            return {"actual_to_addr": dest[0], "actual_to_port": dest[1]}
+
+        self.socks5_server = start_socks5_server(destinations_factory)
+        self.extra_args[0].append(f"-onion={self.socks5_server.conf.addr[0]}:{self.socks5_server.conf.addr[1]}")
+        super().setup_nodes()
+
+    def listen(self, peer, idx):
+        """Make `peer` listen for a connection from the node. Returns its port."""
+        listening = threading.Event()
+        peer.peer_accept_connection(
+            connect_cb=lambda address, port: listening.set(), connect_id=idx, net=self.chain,
+            timeout_factor=self.options.timeout_factor, supports_v2_p2p=True, reconnect=False)()
+        assert listening.wait(timeout=10 * self.options.timeout_factor)
+        return p2p_port(MAX_NODES - idx)
 
     def test_outbound_from_punch_port(self):
         node = self.nodes[0]
@@ -605,6 +631,61 @@ class HolePunchTest(BitcoinTestFramework):
         node.disconnect_p2ps()
         self.wait_until(lambda: len(node.getpeerinfo()) == 0)
 
+    def test_coordination_connect(self):
+        node = self.nodes[0]
+        punch_port = holepunch_port(0)
+        # Reporting peers only, none of them a coordinator.
+        node.add_outbound_p2p_connection(HolePunchPeer(caps=0), p2p_idx=0)
+        node.add_outbound_p2p_connection(HolePunchPeer(caps=0), p2p_idx=1)
+        assert_equal(self.external(node)["address"], f"127.0.0.1:{punch_port}")
+        mocktime = int(time.time())
+
+        def run(coordinator_addr, coordinator_idx, target_idx, expected_caps):
+            nonlocal mocktime
+            coordinator = CoordinationPeer(caps=CAP_COORDINATOR)
+            coordinator_port = self.listen(coordinator, coordinator_idx)
+            self.proxy_destinations[ONION] = ("127.0.0.1", coordinator_port)
+            target = P2PInterface()
+            target_endpoint = endpoint("127.0.0.1", self.listen(target, target_idx))
+            # Past HP_ATTEMPT_INTERVAL since the last attempt.
+            mocktime += 310
+            node.setmocktime(mocktime)
+            coordinator_str = f"{coordinator_addr}:{coordinator_port}"
+            with node.assert_debug_log([f"opening a coordination connection to {coordinator_str}", "asked peer="], timeout=30):
+                node.holepunchaddannouncement(coordinator_str, f"127.0.0.1:{target_endpoint.port}")
+                coordinator.wait_until(lambda: len(coordinator.rendezvous) > 0, timeout=30, check_connected=False)
+            assert_equal(coordinator.rendezvous[0].target, target_endpoint)
+            assert_equal(coordinator.rendezvous[0].requester, endpoint("127.0.0.1", punch_port))
+            assert_equal(coordinator.holepunch_feature, feature_data(expected_caps))
+            info = next(p for p in node.getpeerinfo() if p["connection_type"] == "holepunch-coordination")
+            assert_equal(info["inbound"], False)
+            assert_equal(info["addr"], coordinator_str)
+            self.log.info("The coordinator's punch makes the node connect to the target and close the coordination connection")
+            with node.assert_debug_log(["coordination finished"], timeout=5):
+                coordinator.send_without_ping(msg_punch(msg_punch.ROLE_INITIATOR, target_endpoint))
+                coordinator.wait_for_disconnect()
+            target.wait_for_connect()
+            target.wait_for_verack()
+            punched = [p for p in node.getpeerinfo() if p["hole_punched"]]
+            assert_equal(len(punched), 1)
+            assert_equal(punched[0]["inbound"], False)
+            assert_equal(punched[0]["addr"], f"127.0.0.1:{target_endpoint.port}")
+            target.peer_disconnect()
+            self.wait_until(lambda: not [p for p in node.getpeerinfo() if p["hole_punched"]])
+            return info
+
+        self.log.info("Without a connection to a clearnet coordinator, the connector opens one from the punch port")
+        info = run("127.0.0.1", coordinator_idx=10, target_idx=11, expected_caps=CAP_PUNCHPORT)
+        assert_equal(info["addrbind"], f"127.0.0.1:{punch_port}")
+
+        self.log.info("An onion coordinator is reached through the Tor proxy")
+        info = run(ONION, coordinator_idx=8, target_idx=4, expected_caps=0)
+        assert_equal(info["network"], "onion")
+
+        node.setmocktime(0)
+        node.disconnect_p2ps()
+        self.wait_until(lambda: len(node.getpeerinfo()) == 0)
+
     def test_options(self):
         node = self.nodes[0]
         self.log.info("-holepunch needs -v2transport")
@@ -631,11 +712,16 @@ class HolePunchTest(BitcoinTestFramework):
         self.test_punch_as_responder()
         self.test_own_coordinator()
         self.test_coordinator()
-        self.test_announcement_cache()
-        self.test_relay()
+        # The connector tests run while the announcement cache is empty: entries
+        # left by the cache tests would be attempted as soon as the node has an
+        # external address, and would use up the attempt interval.
         self.test_advertiser()
         self.test_connector()
+        self.test_coordination_connect()
+        self.test_announcement_cache()
+        self.test_relay()
         self.test_options()
+        self.socks5_server.stop()
 
 
 if __name__ == '__main__':
