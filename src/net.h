@@ -1144,7 +1144,7 @@ public:
         holepunch::Options m_holepunch;
     };
 
-    void Init(const Options& connOptions) EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex, !m_total_bytes_sent_mutex)
+    void Init(const Options& connOptions) EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex, !m_total_bytes_sent_mutex, !m_holepunch_coord_mutex)
     {
         AssertLockNotHeld(m_total_bytes_sent_mutex);
 
@@ -1184,6 +1184,10 @@ public:
         m_holepunch_opts = connOptions.m_holepunch;
         if (m_holepunch_opts.enabled) {
             m_holepunch_tracker = std::make_unique<holepunch::ExternalAddressTracker>(m_holepunch_opts.allow_local);
+            if (!m_holepunch_opts.coordination_services.empty()) {
+                LOCK(m_holepunch_coord_mutex);
+                m_holepunch_coord_service = m_holepunch_opts.coordination_services.front();
+            }
         }
     }
 
@@ -1217,8 +1221,27 @@ public:
     void HolePunchOpenCoordination(const CService& coordinator) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
     /** The onion service through which we coordinate our own punches is up (or, if invalid, gone). */
     void SetHolePunchCoordinationService(const CService& service) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
-    /** Our coordination service, if it is up (R-12.1). */
+    /** Our coordination service, if it is up and not being replaced (R-12.1). */
     std::optional<CService> GetHolePunchCoordinationService() const EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
+    /**
+     * Our coordination service to announce `external`, our external address in
+     * `net`'s family, through: the service if it is up and is the identity that
+     * address was first announced with, and not older than its lifetime.
+     * Otherwise none, and a replacement with a fresh key is requested (R-12.1).
+     */
+    std::optional<CService> HolePunchCoordinationServiceFor(Network net, const CService& external) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
+    struct HolePunchServiceInfo {
+        CService service;
+        /** When it was first announced; unset until then. */
+        NodeClock::time_point since;
+        /** When it is replaced at the latest. */
+        NodeClock::time_point rotate_at;
+        /** Whether a replacement has been requested. */
+        bool rotating;
+    };
+    std::optional<HolePunchServiceInfo> GetHolePunchCoordinationServiceInfo() const EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
+    /** How to replace the coordination service with a fresh identity, when Tor runs it. */
+    void SetHolePunchRotateFn(std::function<void()> fn) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
     /**
      * Whether an automatic outbound peer is in the same network group as `addr` (R-7.1).
      * A peer at exactly `except` does not count: the coordinator named in an announcement
@@ -1239,7 +1262,7 @@ public:
 
     ~CConnman();
 
-    bool Start(CScheduler& scheduler, const Options& options) EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex, !m_added_nodes_mutex, !m_addr_fetches_mutex, !mutexMsgProc, !m_anchors_mutex);
+    bool Start(CScheduler& scheduler, const Options& options) EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex, !m_added_nodes_mutex, !m_addr_fetches_mutex, !mutexMsgProc, !m_anchors_mutex, !m_holepunch_coord_mutex);
 
     void StopThreads();
     void StopNodes() EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_reconnections_mutex, !m_anchors_mutex);
@@ -1898,6 +1921,19 @@ private:
     std::deque<CService> m_holepunch_coord_queue GUARDED_BY(m_holepunch_coord_mutex);
     /** Our coordination onion service, while Tor has it up. */
     std::optional<CService> m_holepunch_coord_service GUARDED_BY(m_holepunch_coord_mutex);
+    /** When the service was first announced; unset until then. */
+    NodeClock::time_point m_holepunch_coord_since GUARDED_BY(m_holepunch_coord_mutex){};
+    /** How long the service is announced, drawn below ONION_MAX_LIFETIME. */
+    std::chrono::seconds m_holepunch_coord_lifetime GUARDED_BY(m_holepunch_coord_mutex){0};
+    /** The external address per family the service was first announced with (R-12.1). */
+    std::map<Network, CService> m_holepunch_coord_external GUARDED_BY(m_holepunch_coord_mutex);
+    /** A replacement was requested and has not arrived yet. */
+    bool m_holepunch_coord_rotating GUARDED_BY(m_holepunch_coord_mutex){false};
+    std::function<void()> m_holepunch_rotate GUARDED_BY(m_holepunch_coord_mutex);
+    /** Regtest stand-ins used so far (Options::coordination_services). */
+    size_t m_holepunch_coord_standins_used GUARDED_BY(m_holepunch_coord_mutex){1};
+    /** Replace the coordination service with a fresh identity: through Tor, or the next regtest stand-in. */
+    void HolePunchRotateService() EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
     /** Opens the queued coordination connections. Connecting blocks, and the outbound
      * thread waits for a free slot when the node is full, so this has its own thread. */
     void ThreadHolePunchCoordination() EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex, !m_nodes_mutex, !m_unused_i2p_sessions_mutex);

@@ -8,8 +8,10 @@ P2P and network changes
   (`-holepunchport`, default: a random port chosen at startup), peers negotiate the
   feature with BIP 434, and a new BIP 155 address type (network id 8)
   announces nodes reachable this way. A node with `-listenonion` also runs
-  a second onion service, never advertised, through which it coordinates
-  punches to itself; connectors reach it through their Tor proxy. Off by
+  a second onion service, never advertised and replaced whenever the
+  node's external address changes and at least daily, through which it
+  coordinates punches to itself; connectors reach it through their Tor
+  proxy. Off by
   default; needs `-v2transport`. See `doc/p2p-holepunch.md`.
 - A new connection type, `holepunch-coordination`, is used for the
   short-lived connections that arrange a hole punch. The node sends only

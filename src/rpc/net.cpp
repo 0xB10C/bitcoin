@@ -1399,6 +1399,9 @@ static RPCMethod getholepunchinfo()
                     {
                         {RPCResult::Type::STR, "bind", "(ip:port) The local address that accepts coordination connections, the target of the onion service"},
                         {RPCResult::Type::STR, "onion", /*optional=*/true, "(address:port) The onion service through which this node can be asked for a rendezvous, if it is up"},
+                        {RPCResult::Type::NUM_TIME, "onion_since", /*optional=*/true, "When the onion service was first announced, if it was"},
+                        {RPCResult::Type::NUM_TIME, "onion_rotates", /*optional=*/true, "When the onion service is replaced by a fresh identity at the latest; earlier if the external address changes"},
+                        {RPCResult::Type::BOOL, "onion_rotating", /*optional=*/true, "Whether a replacement of the onion service is under way"},
                     }},
                 {RPCResult::Type::ARR, "external", /*optional=*/true, "Our external address and port per address family, as reported by peers",
                     {
@@ -1449,7 +1452,14 @@ static RPCMethod getholepunchinfo()
             if (opts.coordination_bind) {
                 UniValue coordination(UniValue::VOBJ);
                 coordination.pushKV("bind", opts.coordination_bind->ToStringAddrPort());
-                if (const auto service{connman.GetHolePunchCoordinationService()}) coordination.pushKV("onion", service->ToStringAddrPort());
+                if (const auto info{connman.GetHolePunchCoordinationServiceInfo()}) {
+                    coordination.pushKV("onion", info->service.ToStringAddrPort());
+                    if (info->since != NodeClock::time_point{}) {
+                        coordination.pushKV("onion_since", TicksSinceEpoch<std::chrono::seconds>(info->since));
+                        coordination.pushKV("onion_rotates", TicksSinceEpoch<std::chrono::seconds>(info->rotate_at));
+                    }
+                    if (info->rotating) coordination.pushKV("onion_rotating", true);
+                }
                 obj.pushKV("coordination", std::move(coordination));
             }
             UniValue external(UniValue::VARR);

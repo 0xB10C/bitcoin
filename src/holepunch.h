@@ -145,9 +145,11 @@ struct Options {
     /** Where coordination connections are accepted (R-12.1); the target of
      * the coordination onion service. */
     std::optional<CService> coordination_bind;
-    /** Test networks only: take this onion address as our coordination
-     * service instead of asking Tor for one (-holepunchcoordonion). */
-    std::optional<CService> coordination_service;
+    /**
+     * Regtest only: addresses that stand in for the onion services Tor would
+     * create, used in order as the identity is replaced (-holepunchcoordonion).
+     */
+    std::vector<CService> coordination_services;
 };
 
 /** The wildcard address of `family` (NET_IPV4 or NET_IPV6) with `port`. */
@@ -179,6 +181,10 @@ inline constexpr size_t CACHE_PER_PEER{4};
 inline constexpr auto CACHE_TTL{std::chrono::minutes{10}};
 /** An advertiser announces at most this often per peer (R-6.5). */
 inline constexpr auto ANNOUNCE_INTERVAL{std::chrono::minutes{10}};
+/** The longest a coordination onion identity is announced (R-12.1); the actual lifetime is drawn below this, so that nodes do not all rotate at once. */
+inline constexpr auto ONION_MAX_LIFETIME{std::chrono::hours{24}};
+/** How long a replaced coordination onion identity stays reachable: the cache lifetime plus the clock skew allowance of R-6.2 (R-12.1). */
+inline constexpr auto ONION_RETIRE{CACHE_TTL + std::chrono::minutes{10}};
 /** A connector starts at most one coordination attempt per this interval (R-7.2). */
 inline constexpr auto HP_ATTEMPT_INTERVAL{std::chrono::minutes{5}};
 

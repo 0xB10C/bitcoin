@@ -42,8 +42,12 @@ This is experimental and off by default.
   inbound connections. They take no connection slot and show as
   `"connection_type": "holepunch-coordination"` in `getpeerinfo`.
 - A node with Tor (`-listenonion`) also coordinates punches to itself: it
-  runs a second onion service, with a key that is created at every start
-  and never advertised, terminated on the *coordination bind*
+  runs a second onion service, never advertised, with a key that is
+  replaced whenever the node's external address changes and at least
+  daily, so that the identity never follows the node from one address to
+  the next; a replaced service stays reachable for twenty minutes, and a
+  new one is announced only once Tor has published its descriptor. It is
+  terminated on the *coordination bind*
   (`-holepunchcoordbind`, default: 127.0.0.1 and the punch port plus one).
   It announces that onion address next to the coordinator, to peers reached
   directly over IPv4 or IPv6 only. A connector reaches it through its Tor
@@ -76,8 +80,9 @@ For testing by hand, the hidden RPCs `holepunchaddannouncement` and
 `holepunchrendezvous` put an announcement into the cache and ask a
 connected coordinator for a rendezvous, `addconnection` (regtest) can open
 a `holepunch-coordination` connection, `sendmsgtopeer` can send a raw
-`punch`, and on regtest `-holepunchcoordonion=<address>` stands in for the
-onion service Tor would create.
+`punch`, and on regtest `-holepunchcoordonion=<address>[,<address>...]`
+stands in for the onion services Tor would create, used in order as the
+identity is replaced.
 
 ## Limits
 

@@ -4226,13 +4226,10 @@ void PeerManagerImpl::MaybeSendHolePunchAnnouncement(CNode& node, Peer& peer, st
     // Only while an inbound slot is free (R-6.5).
     if (m_connman.GetNodeCount(ConnectionDirection::In) >= static_cast<size_t>(m_connman.GetMaxInbound())) return;
     // One element per way of reaching us: a coordinator we are connected to (Profile A)
-    // and our own onion service (Profile B), the latter only to direct clearnet peers (R-6.4).
-    std::vector<CService> via;
-    if (const auto coordinators{HolePunchCoordinators()}; !coordinators.empty()) via.push_back(coordinators.begin()->first);
-    if (peer.m_direct_clearnet) {
-        if (const auto service{m_connman.GetHolePunchCoordinationService()}) via.push_back(*service);
-    }
-    if (via.empty()) return;
+    // and our own onion service (Profile B), the latter only to direct clearnet peers (R-6.4)
+    // and only as long as it is the identity our address was first announced with (R-12.1).
+    std::optional<CService> coordinator;
+    if (const auto coordinators{HolePunchCoordinators()}; !coordinators.empty()) coordinator = coordinators.begin()->first;
     std::vector<CAddress> elements;
     for (const Network net : {NET_IPV4, NET_IPV6}) {
         const auto external{m_connman.HolePunchExternalAddress(net)};
@@ -4241,6 +4238,11 @@ void PeerManagerImpl::MaybeSendHolePunchAnnouncement(CNode& node, Peer& peer, st
         if (IsBadPort(external->GetPort())) {
             LogDebug(BCLog::HOLEPUNCH, "not announcing %s to peer=%d: its port is a bad port\n", external->ToStringAddrPort(), peer.m_id);
             continue;
+        }
+        std::vector<CService> via;
+        if (coordinator) via.push_back(*coordinator);
+        if (peer.m_direct_clearnet) {
+            if (const auto service{m_connman.HolePunchCoordinationServiceFor(net, *external)}) via.push_back(*service);
         }
         for (const CService& coordinator : via) {
             const auto made{CNetAddr::MakeHolePunch(coordinator, *external)};

@@ -3442,6 +3442,10 @@ void CConnman::HolePunchOpenCoordination(const CService& coordinator)
 void CConnman::SetHolePunchCoordinationService(const CService& service)
 {
     LOCK(m_holepunch_coord_mutex);
+    // A new identity starts over: nothing announced with it yet.
+    m_holepunch_coord_since = {};
+    m_holepunch_coord_external.clear();
+    m_holepunch_coord_rotating = false;
     if (service.IsValid()) {
         m_holepunch_coord_service = service;
         LogInfo("Hole punch coordination service is %s", service.ToStringAddrPort());
@@ -3454,8 +3458,78 @@ void CConnman::SetHolePunchCoordinationService(const CService& service)
 std::optional<CService> CConnman::GetHolePunchCoordinationService() const
 {
     LOCK(m_holepunch_coord_mutex);
-    if (m_holepunch_coord_service) return m_holepunch_coord_service;
-    return m_holepunch_opts.coordination_service;
+    if (m_holepunch_coord_rotating) return std::nullopt;
+    return m_holepunch_coord_service;
+}
+
+std::optional<CConnman::HolePunchServiceInfo> CConnman::GetHolePunchCoordinationServiceInfo() const
+{
+    LOCK(m_holepunch_coord_mutex);
+    if (!m_holepunch_coord_service) return std::nullopt;
+    return HolePunchServiceInfo{
+        .service = *m_holepunch_coord_service,
+        .since = m_holepunch_coord_since,
+        .rotate_at = m_holepunch_coord_since == NodeClock::time_point{} ? NodeClock::time_point{} : m_holepunch_coord_since + m_holepunch_coord_lifetime,
+        .rotating = m_holepunch_coord_rotating,
+    };
+}
+
+void CConnman::SetHolePunchRotateFn(std::function<void()> fn)
+{
+    LOCK(m_holepunch_coord_mutex);
+    m_holepunch_rotate = std::move(fn);
+}
+
+std::optional<CService> CConnman::HolePunchCoordinationServiceFor(Network net, const CService& external)
+{
+    std::string reason;
+    {
+        LOCK(m_holepunch_coord_mutex);
+        if (!m_holepunch_coord_service || m_holepunch_coord_rotating) return std::nullopt;
+        const auto now{NodeClock::now()};
+        if (m_holepunch_coord_since == NodeClock::time_point{}) {
+            // First announcement: the identity lives up to a day, less a random part so
+            // that nodes do not all rotate at the same time (R-12.1).
+            m_holepunch_coord_since = now;
+            m_holepunch_coord_lifetime = std::chrono::duration_cast<std::chrono::seconds>(holepunch::ONION_MAX_LIFETIME) - std::chrono::seconds{m_holepunch_rng.randrange(2 * 60 * 60)};
+        }
+        if (const auto it{m_holepunch_coord_external.find(net)}; it == m_holepunch_coord_external.end()) {
+            m_holepunch_coord_external.emplace(net, external);
+        } else if (it->second != external) {
+            // Never announce a new address under an identity seen with an old one (R-12.1).
+            reason = strprintf("external address for %s changed from %s to %s", GetNetworkName(net), it->second.ToStringAddrPort(), external.ToStringAddrPort());
+        }
+        if (reason.empty() && now - m_holepunch_coord_since > m_holepunch_coord_lifetime) {
+            reason = strprintf("it has been announced for %d hours", Ticks<std::chrono::hours>(now - m_holepunch_coord_since));
+        }
+        if (reason.empty()) return m_holepunch_coord_service;
+        m_holepunch_coord_rotating = true;
+        LogInfo("Replacing the hole punch coordination service %s: %s", m_holepunch_coord_service->ToStringAddrPort(), reason);
+    }
+    HolePunchRotateService();
+    return std::nullopt;
+}
+
+void CConnman::HolePunchRotateService()
+{
+    std::function<void()> rotate;
+    {
+        LOCK(m_holepunch_coord_mutex);
+        rotate = m_holepunch_rotate;
+    }
+    if (rotate) {
+        rotate();
+        return;
+    }
+    // No Tor: the next regtest stand-in, if any, is "up" at once.
+    CService next;
+    {
+        LOCK(m_holepunch_coord_mutex);
+        if (m_holepunch_coord_standins_used < m_holepunch_opts.coordination_services.size()) {
+            next = m_holepunch_opts.coordination_services[m_holepunch_coord_standins_used++];
+        }
+    }
+    SetHolePunchCoordinationService(next);
 }
 
 void CConnman::ThreadHolePunchCoordination()

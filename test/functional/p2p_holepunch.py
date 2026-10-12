@@ -39,6 +39,10 @@ import time
 
 HOLEPUNCH_FEATURE_ID = "https://delvingbitcoin.org/t/2497"
 ONION = "kpgvmsfpi2usww3uw74pnpj3xbxf3gvxprpq4a5fwq5bws5662wbv3ad.onion"
+# Stand-ins for the identities Tor would create when the first is replaced.
+ONION2 = "bw7esgdblcorieqlj2vdfnf3aglmdvgivuprnhxj4ienr4u2oy7bvkqd.onion"
+ONION3 = "bgc3mhueuxff5krathqxrjjucnddqgwxxvtab7uomnftxroebycp72yd.onion"
+ONION4 = "ncszqs64tufq2onoliwtwec7ln3kapxlo3w7epk7dndx4k6aursgdfad.onion"
 CAP_COORDINATOR = 1 << 0
 CAP_ADVERTISED = 1 << 1
 CAP_PUNCHPORT = 1 << 4
@@ -176,7 +180,7 @@ class HolePunchTest(BitcoinTestFramework):
             "-holepunch=1",
             f"-holepunchport={holepunch_port(0)}",
             f"-holepunchcoordbind=127.0.0.1:{holepunch_coord_port(0)}",
-            f"-holepunchcoordonion={ONION}",  # as if Tor had created the coordination service
+            f"-holepunchcoordonion={ONION},{ONION2},{ONION3},{ONION4}",  # as if Tor had created the coordination services
             f"-bind=127.0.0.1:{tor_port(0)}=onion",  # the config file's bind= suppresses the default onion bind
             "-whitelist=addr@127.0.0.1",  # no address rate limit for inbound test peers
         ]]
@@ -307,7 +311,9 @@ class HolePunchTest(BitcoinTestFramework):
         node = self.nodes[0]
         coord_port = holepunch_coord_port(0)
         self.log.info("getholepunchinfo shows the coordination bind and the onion service")
-        assert_equal(node.getholepunchinfo()["coordination"], {"bind": f"127.0.0.1:{coord_port}", "onion": f"{ONION}:18444"})
+        coordination = node.getholepunchinfo()["coordination"]
+        assert_equal(coordination["bind"], f"127.0.0.1:{coord_port}")
+        assert_equal(coordination["onion"], f"{ONION}:18444")
         self.log.info("A connection to the coordination bind is a coordination connection reached through Tor")
         peer = node.add_p2p_connection(CoordinationPeer(caps=0), dstport=coord_port)
         info = next(p for p in node.getpeerinfo() if p["connection_type"] == "holepunch-coordination")
@@ -676,6 +682,37 @@ class HolePunchTest(BitcoinTestFramework):
         node.disconnect_p2ps()
         self.wait_until(lambda: len(node.getpeerinfo()) == 0)
 
+    def test_onion_rotation(self):
+        node = self.nodes[0]
+        self.log.info("The coordination onion identity is replaced when the external address changes")
+        info = node.getholepunchinfo()["coordination"]
+        assert_equal(info["onion"], f"{ONION}:18444")
+        assert info["onion_rotates"] - info["onion_since"] <= 24 * 3600
+        # Two reporting peers in distinct network groups see the node at a new address;
+        # the replacement happens as soon as the second report completes the address.
+        peers = [node.add_outbound_p2p_connection(HolePunchPeer(caps=0, support_addrv2=True, report=("127.0.0.1", 40100)), p2p_idx=0)]
+        with node.assert_debug_log([f"Replacing the hole punch coordination service {ONION}:18444: external address for ipv4 changed from", f"Hole punch coordination service is {ONION2}:18444"], timeout=15):
+            peers.append(node.add_outbound_p2p_connection(HolePunchPeer(caps=0, support_addrv2=True, report=("127.0.0.1", 40100)), p2p_idx=1))
+            self.wait_until(lambda: self.external(node).get("address") == "127.0.0.1:40100")
+            self.wait_until(lambda: all(any(e.coordinator.ip == ONION2 for e in p.announcements) for p in peers), timeout=15)
+        self.log.info("The new address was never announced under the old identity")
+        for p in peers:
+            for e in p.announcements:
+                assert not (e.coordinator.net == CAddress.NET_TORV3 and e.coordinator.ip == ONION and e.port == 40100), e
+        assert_equal(node.getholepunchinfo()["coordination"]["onion"], f"{ONION2}:18444")
+
+        self.log.info("The identity is replaced after at most a day anyway")
+        mocktime = int(time.time()) + 24 * 3600
+        with node.assert_debug_log([f"Replacing the hole punch coordination service {ONION2}:18444: it has been announced for", f"Hole punch coordination service is {ONION3}:18444"], timeout=15):
+            node.setmocktime(mocktime)
+            self.wait_until(lambda: node.getholepunchinfo()["coordination"]["onion"] == f"{ONION3}:18444")
+        # The announcement re-check runs on the node's clock, which is frozen now.
+        node.setmocktime(mocktime + 15)
+        self.wait_until(lambda: all(any(e.coordinator.ip == ONION3 for e in p.announcements) for p in peers), timeout=15)
+        node.setmocktime(0)
+        node.disconnect_p2ps()
+        self.wait_until(lambda: len(node.getpeerinfo()) == 0)
+
     def test_connector(self):
         node = self.nodes[0]
         punch_port = holepunch_port(0)
@@ -846,6 +883,7 @@ class HolePunchTest(BitcoinTestFramework):
         # external address, and would use up the attempt interval.
         self.test_bad_external_port()
         self.test_advertiser()
+        self.test_onion_rotation()
         self.test_connector()
         self.test_coordination_connect()
         self.test_handshake_deadline()
