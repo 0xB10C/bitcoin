@@ -15,8 +15,10 @@ This is experimental and off by default.
   peer then reports the same NAT mapping back in `version.addr_recv`, which
   is how the node learns its *external address*: at least two peers in
   different network groups have to agree on it.
-- Support is negotiated per connection with a BIP 434 `feature` message.
-  Peers that have hole punching on act as *coordinator* for each other.
+- Support is negotiated per connection with a BIP 434 `feature` message
+  that carries the highest protocol version each side supports; the lower
+  one is used. Peers that have hole punching on act as *coordinator* for
+  each other.
 - A node with an external address and a free inbound slot *announces*
   itself to its peers: an `addrv2` element of the new HOLEPUNCH address type
   names a coordinator it is connected to and its own external address.

@@ -636,6 +636,8 @@ public:
     /** Send our hole punching feature, with the capabilities that apply to this connection (R-3.1). */
     void PushHolePunchFeature(CNode& pfrom, Peer& peer);
     /** Whether both sides negotiated hole punching version 0 on this connection (R-3.1). */
+    /** The protocol version negotiated with a peer that sent the feature (R-3.2). */
+    uint8_t HolePunchVersion(const Peer& peer) const;
     bool HolePunchNegotiated(const Peer& peer) const;
     /** Why `peer` cannot be the other party of a session in `role` (R-5.1), or nothing if it can. */
     std::optional<std::string> HolePunchPeerProblem(holepunch::Role role, const CService& peer) const;
@@ -3942,10 +3944,17 @@ void PeerManagerImpl::PushHolePunchFeature(CNode& pfrom, Peer& peer)
     LogDebug(BCLog::HOLEPUNCH, "sent feature with caps %s to peer=%d\n", util::Join(holepunch::CapNames(caps), "|"), pfrom.GetId());
 }
 
+uint8_t PeerManagerImpl::HolePunchVersion(const Peer& peer) const
+{
+    // Each side sends the highest version it supports; the lower one is used (R-3.2).
+    return std::min(peer.m_holepunch_version.load(), holepunch::FEATURE_DATA_VERSION);
+}
+
 bool PeerManagerImpl::HolePunchNegotiated(const Peer& peer) const
 {
+    // Only version 0 exists, so every negotiated version is one we support.
     return peer.m_holepunch_feature_sent && peer.m_holepunch_feature_received &&
-           peer.m_holepunch_version == holepunch::FEATURE_DATA_VERSION;
+           HolePunchVersion(peer) <= holepunch::FEATURE_DATA_VERSION;
 }
 
 std::optional<std::string> PeerManagerImpl::HolePunchPeerProblem(holepunch::Role role, const CService& peer) const
@@ -4113,7 +4122,7 @@ void PeerManagerImpl::ProcessRendezvous(CNode& pfrom, Peer& peer, DataStream& vR
         for (const NodeId id : candidates) {
             if (id == pfrom.GetId()) continue;
             const PeerRef target_peer{GetPeerRef(id)};
-            if (!target_peer || !target_peer->m_holepunch_feature_received || target_peer->m_holepunch_version != holepunch::FEATURE_DATA_VERSION) continue;
+            if (!target_peer || !HolePunchNegotiated(*target_peer)) continue;
             constexpr uint32_t needed{holepunch::CAP_ADVERTISED | holepunch::CAP_PUNCHPORT};
             if ((target_peer->m_holepunch_caps & needed) != needed) continue;
             if (now - target_peer->m_holepunch_punch_sent < holepunch::WINDOW + holepunch::GRACE) {
@@ -4783,8 +4792,8 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             peer.m_holepunch_version = data.version;
             peer.m_holepunch_caps = data.caps;
             peer.m_holepunch_feature_received = true;
-            LogDebug(BCLog::HOLEPUNCH, "peer=%d supports hole punching version %d with caps %s%s\n",
-                     pfrom.GetId(), data.version, util::Join(holepunch::CapNames(data.caps), "|"),
+            LogDebug(BCLog::HOLEPUNCH, "peer=%d supports hole punching up to version %d, negotiated %d, with caps %s%s\n",
+                     pfrom.GetId(), data.version, HolePunchVersion(peer), util::Join(holepunch::CapNames(data.caps), "|"),
                      m_connman.GetHolePunchOptions().enabled ? "" : " (hole punching is off here)");
             return;
         }

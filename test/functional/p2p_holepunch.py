@@ -356,6 +356,11 @@ class HolePunchTest(BitcoinTestFramework):
         node.add_p2p_connection(HolePunchPeer(raw_feature_data=feature_data(CAP_COORDINATOR) + b"\x00\x01"))
         assert_equal(node.getpeerinfo()[-1]["holepunch_caps"], ["COORDINATOR"])
 
+        self.log.info("A peer on a higher version negotiates the lower one, ours")
+        with node.assert_debug_log(["supports hole punching up to version 3, negotiated 0"], timeout=5):
+            node.add_p2p_connection(HolePunchPeer(raw_feature_data=feature_data(CAP_COORDINATOR, version=3)))
+        assert_equal(node.getpeerinfo()[-1]["holepunch_caps"], ["COORDINATOR"])
+
         self.log.info("A peer without the feature has no holepunch_caps")
         node.add_p2p_connection(P2PInterface())
         assert "holepunch_caps" not in node.getpeerinfo()[-1]

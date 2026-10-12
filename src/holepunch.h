@@ -121,6 +121,7 @@ std::vector<std::string> CapNames(uint32_t caps);
 
 /** Payload of the BIP 434 feature message for hole punching. */
 struct FeatureData {
+    /** The highest version the sender supports; the lower of the two is used (R-3.2). */
     uint8_t version{FEATURE_DATA_VERSION};
     uint32_t caps{0};
 
