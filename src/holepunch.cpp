@@ -227,8 +227,8 @@ static const char* RoleName(Role role)
     return role == Role::INITIATOR ? "initiator" : "responder";
 }
 
-SessionManager::SessionManager(const Options& opts, ResultFn on_result)
-    : m_opts{opts}, m_on_result{std::move(on_result)}
+SessionManager::SessionManager(const Options& opts, ResultFn on_result, Counters* counters)
+    : m_opts{opts}, m_on_result{std::move(on_result)}, m_counters{counters}
 {
 }
 
@@ -303,6 +303,7 @@ std::optional<std::string> SessionManager::Punch(Role role, const CService& peer
     m_recent_starts.push_back(now);
     m_last_start[AddrKey(peer)] = now;
     m_sessions.emplace(peer, Session{.role = role, .peer = peer, .started = now, .deadline = now + WINDOW, .next_attempt = now, .attempt = nullptr, .attempts = 0, .wait_for_accept = false});
+    if (m_counters) ++m_counters->sessions[static_cast<size_t>(role)].started;
     LogDebug(BCLog::HOLEPUNCH, "session with %s started as %s\n", peer.ToStringAddrPort(), RoleName(role));
     return std::nullopt;
 }
@@ -318,6 +319,7 @@ void SessionManager::Cancel(const CService& peer)
     LOCK(m_mutex);
     const auto it{m_sessions.find(peer)};
     if (it == m_sessions.end()) return;
+    if (m_counters) ++m_counters->sessions_cancelled;
     LogDebug(BCLog::HOLEPUNCH, "session with %s cancelled as %s after %d attempt(s)\n", peer.ToStringAddrPort(), RoleName(it->second.role), it->second.attempts);
     m_sessions.erase(it);
 }
@@ -338,8 +340,10 @@ void SessionManager::Finish(const CService& peer, std::shared_ptr<Sock> sock, st
     if (it == m_sessions.end()) return;
     Session& session{it->second};
     if (sock) {
+        if (m_counters) ++m_counters->sessions[static_cast<size_t>(session.role)].established;
         LogDebug(BCLog::HOLEPUNCH, "session with %s established as %s after %d attempt(s)\n", peer.ToStringAddrPort(), RoleName(session.role), session.attempts);
     } else {
+        if (m_counters) ++m_counters->sessions[static_cast<size_t>(session.role)].failed;
         LogDebug(BCLog::HOLEPUNCH, "session with %s failed as %s after %d attempt(s)\n", peer.ToStringAddrPort(), RoleName(session.role), session.attempts);
     }
     results.push_back({.peer = peer, .role = session.role, .sock = std::move(sock), .deadline = session.deadline + GRACE});

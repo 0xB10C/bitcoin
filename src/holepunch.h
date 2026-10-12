@@ -14,6 +14,7 @@
 #include <util/threadinterrupt.h>
 #include <util/time.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -129,6 +130,32 @@ struct FeatureData {
     {
         READWRITE(obj.version, obj.caps);
     }
+};
+
+/** What happened so far, for getholepunchinfo. Every field only ever grows. */
+struct Counters {
+    /** Per role (index Role), from the session manager. */
+    struct PerRole {
+        std::atomic<uint64_t> started{0};
+        std::atomic<uint64_t> established{0};
+        std::atomic<uint64_t> failed{0};
+    };
+    PerRole sessions[2];
+    std::atomic<uint64_t> sessions_cancelled{0};
+    /** Our own announcements sent, as elements, and others' accepted into the cache. */
+    std::atomic<uint64_t> announcements_sent{0};
+    std::atomic<uint64_t> announcements_received{0};
+    /** As connector. */
+    std::atomic<uint64_t> rendezvous_sent{0};
+    std::atomic<uint64_t> coordination_opened{0};
+    std::atomic<uint64_t> coordination_failed{0};
+    /** As a party: punches that started a session, and ones ignored. */
+    std::atomic<uint64_t> punches_accepted{0};
+    std::atomic<uint64_t> punches_rejected{0};
+    /** As coordinator: pairs made for others, requests answered on our own service, requests ignored. */
+    std::atomic<uint64_t> rendezvous_answered{0};
+    std::atomic<uint64_t> rendezvous_answered_own{0};
+    std::atomic<uint64_t> rendezvous_rejected{0};
 };
 
 /** Settings, filled in from the command line options. */
@@ -252,7 +279,8 @@ public:
      */
     using ResultFn = std::function<void(const CService& peer, Role role, std::shared_ptr<Sock> sock, NodeClock::time_point deadline)>;
 
-    SessionManager(const Options& opts, ResultFn on_result);
+    /** `counters`, if given, is kept up to date with what happens to sessions. */
+    SessionManager(const Options& opts, ResultFn on_result, Counters* counters = nullptr);
     ~SessionManager() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Open the punch listeners and start the thread. False if no listener could be opened. */
@@ -321,6 +349,7 @@ private:
 
     const Options m_opts;
     const ResultFn m_on_result;
+    Counters* const m_counters;
     std::vector<std::shared_ptr<Sock>> m_listeners;
     mutable Mutex m_mutex;
     std::map<CService, Session> m_sessions GUARDED_BY(m_mutex);

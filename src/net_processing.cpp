@@ -4039,10 +4039,12 @@ bool PeerManagerImpl::ProcessPunch(CNode& pfrom, Peer& peer, DataStream& vRecv)
     if (!reject.empty()) {
         // A rejected answer leaves the rendezvous outstanding until its deadline: the
         // next punch is checked against it too, and no new request goes out (R-4.4).
+        ++m_connman.HolePunchCounters().punches_rejected;
         LogDebug(BCLog::HOLEPUNCH, "ignoring punch from peer=%d (%s with %s): %s\n", pfrom.GetId(), role_name, msg.peer.ToStringAddrPort(), reject);
         return false;
     }
     if (answered_target) WITH_LOCK(peer.m_holepunch_mutex, peer.m_holepunch_rendezvous_target.reset());
+    ++m_connman.HolePunchCounters().punches_accepted;
     LogDebug(BCLog::HOLEPUNCH, "punch from peer=%d: session with %s started as %s%s\n", pfrom.GetId(), msg.peer.ToStringAddrPort(), role_name, answered_target ? " (answers our rendezvous)" : "");
     return true;
 }
@@ -4086,9 +4088,11 @@ void PeerManagerImpl::ProcessRendezvous(CNode& pfrom, Peer& peer, DataStream& vR
             reject = *refused;
         }
         if (!reject.empty()) {
+            ++m_connman.HolePunchCounters().rendezvous_rejected;
             LogDebug(BCLog::HOLEPUNCH, "ignoring rendezvous from peer=%d for %s: %s\n", pfrom.GetId(), msg.target.ToStringAddrPort(), reject);
             return;
         }
+        ++m_connman.HolePunchCounters().rendezvous_answered_own;
         // The connector is always the initiator (R-12.5); the connection is closed once this is out.
         MakeAndPushMessage(pfrom, NetMsgType::PUNCH, holepunch::PunchMsg{.role = static_cast<uint8_t>(holepunch::Role::INITIATOR), .peer = msg.target});
         peer.m_holepunch_punch_sent = now;
@@ -4139,6 +4143,7 @@ void PeerManagerImpl::ProcessRendezvous(CNode& pfrom, Peer& peer, DataStream& vR
         if (!target_id && reject.empty()) reject = "no advertised peer with that endpoint";
     }
     if (!reject.empty()) {
+        ++m_connman.HolePunchCounters().rendezvous_rejected;
         LogDebug(BCLog::HOLEPUNCH, "ignoring rendezvous from peer=%d for %s: %s\n", pfrom.GetId(), msg.target.ToStringAddrPort(), reject);
         return;
     }
@@ -4149,12 +4154,14 @@ void PeerManagerImpl::ProcessRendezvous(CNode& pfrom, Peer& peer, DataStream& vR
         return true;
     })};
     if (!sent) {
+        ++m_connman.HolePunchCounters().rendezvous_rejected;
         LogDebug(BCLog::HOLEPUNCH, "ignoring rendezvous from peer=%d for %s: the target disconnected\n", pfrom.GetId(), msg.target.ToStringAddrPort());
         return;
     }
     if (const PeerRef target_peer{GetPeerRef(*target_id)}) target_peer->m_holepunch_punch_sent = now;
     MakeAndPushMessage(pfrom, NetMsgType::PUNCH, holepunch::PunchMsg{.role = static_cast<uint8_t>(holepunch::Role::INITIATOR), .peer = msg.target});
     peer.m_holepunch_punch_sent = now;
+    ++m_connman.HolePunchCounters().rendezvous_answered;
     LogDebug(BCLog::HOLEPUNCH, "rendezvous from peer=%d (%s): punch sent to it as initiator and to peer=%d (%s) as responder\n", pfrom.GetId(), requester.ToStringAddrPort(), *target_id, msg.target.ToStringAddrPort());
 }
 
@@ -4193,6 +4200,7 @@ std::optional<std::string> PeerManagerImpl::HolePunchRendezvous(NodeId coordinat
     if (!sent) return "peer disconnected";
     peer->m_holepunch_rendezvous_target = target;
     peer->m_holepunch_rendezvous_sent = now;
+    ++m_connman.HolePunchCounters().rendezvous_sent;
     LogDebug(BCLog::HOLEPUNCH, "sent rendezvous for %s to peer=%d, requester %s\n", target.ToStringAddrPort(), coordinator, external->ToStringAddrPort());
     return std::nullopt;
 }
@@ -4252,6 +4260,7 @@ void PeerManagerImpl::MaybeSendHolePunchAnnouncement(CNode& node, Peer& peer, st
     }
     if (elements.empty()) return;
     // Sent alone (R-6.3), bypassing the known-addresses filter so that repeats go out.
+    m_connman.HolePunchCounters().announcements_sent += elements.size();
     MakeAndPushMessage(node, NetMsgType::ADDRV2, CAddress::V2_NETWORK(elements));
     peer.m_holepunch_next_announce = current_time + holepunch::ANNOUNCE_INTERVAL;
     for (const auto& element : elements) {

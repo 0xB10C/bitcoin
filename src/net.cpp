@@ -3560,8 +3560,10 @@ void CConnman::ThreadHolePunchCoordination()
                                   ConnectionType::HOLEPUNCH_COORD,
                                   /*use_v2transport=*/true,
                                   /*proxy_override=*/std::nullopt)) {
+            ++m_holepunch_counters.coordination_opened;
             LogDebug(BCLog::HOLEPUNCH, "opened a coordination connection to %s\n", coordinator->ToStringAddrPort());
         } else {
+            ++m_holepunch_counters.coordination_failed;
             LogDebug(BCLog::HOLEPUNCH, "could not open a coordination connection to %s\n", coordinator->ToStringAddrPort());
         }
     }
@@ -3882,7 +3884,8 @@ bool CConnman::Start(CScheduler& scheduler, const Options& connOptions)
             m_holepunch_opts,
             [this](const CService& peer, holepunch::Role role, std::shared_ptr<Sock> sock, NodeClock::time_point deadline) {
                 OnHolePunchResult(peer, role, std::move(sock), deadline);
-            });
+            },
+            &m_holepunch_counters);
         if (!m_holepunch_sessions->Start()) {
             LogWarning("Hole punching: sessions disabled, the punch port %d could not be opened", m_holepunch_opts.port);
             m_holepunch_sessions.reset();
@@ -4131,6 +4134,7 @@ std::optional<holepunch::Announcement> CConnman::HolePunchAddAnnouncement(NodeId
     if (!m_holepunch_opts.enabled) return std::nullopt;
     const auto added{m_holepunch_announcements.Add(from, element, NodeClock::now(), m_holepunch_opts.allow_local)};
     if (added) {
+        ++m_holepunch_counters.announcements_received;
         LogDebug(BCLog::HOLEPUNCH, "announcement from peer=%d: %s via coordinator %s\n", from, added->target.ToStringAddrPort(), added->coordinator.ToStringAddrPort());
     } else {
         LogDebug(BCLog::HOLEPUNCH, "ignoring announcement %s from peer=%d\n", element.ToStringAddrPort(), from);

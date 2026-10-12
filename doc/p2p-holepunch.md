@@ -70,7 +70,10 @@ and a node behind one detects that from disagreeing reports and stays out.
   `-listenonion` and a Tor control port, like the regular one.
 - `getholepunchinfo`: the punch port, the coordination bind and onion
   service, the external address per address family with the number of
-  peers reporting it, cached announcements, and punch sessions in progress.
+  peers reporting it, cached announcements, punch sessions in progress,
+  and counters of everything that happened since the start: sessions by
+  role and outcome, announcements, requests sent and answered, punches
+  accepted and ignored.
 - `getpeerinfo`: `hole_punched` and `holepunch_caps` per peer, and the
   `holepunch-coordination` connection type.
 - `-debug=holepunch`: log every step, including why a request or a

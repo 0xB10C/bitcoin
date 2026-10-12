@@ -118,6 +118,12 @@ class HolePunchOnionTest(BitcoinTestFramework):
         assert_equal(a.getholepunchinfo()["sessions"], [])
         assert_equal(b.getholepunchinfo()["sessions"], [])
 
+        self.log.info("The counters show the exchange")
+        assert_equal(a.getholepunchinfo()["counters"]["rendezvous_answered_own"], 1)
+        assert_equal(a.getholepunchinfo()["counters"]["sessions"]["responder"]["established"], 1)
+        assert_equal(b.getholepunchinfo()["counters"]["coordination_opened"], 1)
+        assert_equal(b.getholepunchinfo()["counters"]["sessions"]["initiator"]["established"], 1)
+
         self.log.info("The punched connection relays blocks")
         a.disconnect_p2ps()
         self.disconnect_nodes(D, A)

@@ -1192,6 +1192,9 @@ public:
     }
 
     const holepunch::Options& GetHolePunchOptions() const { return m_holepunch_opts; }
+    /** What happened so far; message handlers add to it. */
+    holepunch::Counters& HolePunchCounters() { return m_holepunch_counters; }
+    const holepunch::Counters& HolePunchCounters() const { return m_holepunch_counters; }
 
     /**
      * Record what `node` reports as our address and port in version.addr_recv.
@@ -1912,6 +1915,7 @@ private:
     std::vector<CService> m_onion_binds;
 
     holepunch::Options m_holepunch_opts;
+    holepunch::Counters m_holepunch_counters;
     std::unique_ptr<holepunch::ExternalAddressTracker> m_holepunch_tracker;
     std::unique_ptr<holepunch::SessionManager> m_holepunch_sessions;
     holepunch::AnnouncementCache m_holepunch_announcements;

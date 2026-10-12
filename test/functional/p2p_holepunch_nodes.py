@@ -149,6 +149,21 @@ class HolePunchNodesTest(BitcoinTestFramework):
                 node.setmocktime(mocktime)
             self.wait_until(lambda: not [p for p in e.getpeerinfo() if p["connection_type"] == "holepunch-coordination"])
 
+        self.log.info("The counters add up")
+        counters = {n: node.getholepunchinfo()["counters"] for n, node in zip("acbde", self.nodes)}
+        assert_equal(counters["a"]["sessions"]["responder"], {"started": 2, "established": 2, "failed": 0})
+        assert_equal(counters["b"]["sessions"]["initiator"], {"started": 1, "established": 1, "failed": 0})
+        assert_equal(counters["e"]["sessions"]["initiator"], {"started": 1, "established": 1, "failed": 0})
+        assert_equal(counters["b"]["rendezvous_sent"], 3)  # one by the connector, two by hand
+        assert_equal(counters["c"]["rendezvous_answered"], 3)
+        assert_equal(counters["c"]["rendezvous_rejected"], 1)
+        assert_equal(counters["a"]["punches_accepted"], 2)
+        assert_equal(counters["a"]["punches_rejected"], 1)
+        assert_equal(counters["b"]["punches_rejected"], 1)
+        assert_equal(counters["e"]["coordination_opened"], 1)
+        assert counters["a"]["announcements_sent"] >= 2
+        assert counters["b"]["announcements_received"] >= 1
+
         self.log.info("The punched connection relays blocks")
         self.disconnect_nodes(A, C)
         self.disconnect_nodes(A, D)

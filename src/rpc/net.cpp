@@ -1424,6 +1424,35 @@ static RPCMethod getholepunchinfo()
                                 {RPCResult::Type::NUM, "from", "The id of the peer the announcement came from"},
                             }},
                     }},
+                {RPCResult::Type::OBJ, "counters", /*optional=*/true, "What happened since the node started",
+                    {
+                        {RPCResult::Type::OBJ, "sessions", "Punch sessions, by this node's role",
+                            {
+                                {RPCResult::Type::OBJ, "initiator", "",
+                                    {
+                                        {RPCResult::Type::NUM, "started", ""},
+                                        {RPCResult::Type::NUM, "established", "Sessions that produced a connection"},
+                                        {RPCResult::Type::NUM, "failed", "Sessions that ran out of time"},
+                                    }},
+                                {RPCResult::Type::OBJ, "responder", "",
+                                    {
+                                        {RPCResult::Type::NUM, "started", ""},
+                                        {RPCResult::Type::NUM, "established", ""},
+                                        {RPCResult::Type::NUM, "failed", ""},
+                                    }},
+                                {RPCResult::Type::NUM, "cancelled", "Sessions dropped because the punch could not be delivered"},
+                            }},
+                        {RPCResult::Type::NUM, "announcements_sent", "Our own announcement elements sent"},
+                        {RPCResult::Type::NUM, "announcements_received", "Others' announcements accepted into the cache"},
+                        {RPCResult::Type::NUM, "rendezvous_sent", "Rendezvous requests sent as connector"},
+                        {RPCResult::Type::NUM, "coordination_opened", "Connections opened only to ask for a rendezvous"},
+                        {RPCResult::Type::NUM, "coordination_failed", "Such connections that could not be opened"},
+                        {RPCResult::Type::NUM, "punches_accepted", "Punches that started a session"},
+                        {RPCResult::Type::NUM, "punches_rejected", "Punches ignored"},
+                        {RPCResult::Type::NUM, "rendezvous_answered", "Pairs made as coordinator for others"},
+                        {RPCResult::Type::NUM, "rendezvous_answered_own", "Requests answered on our own coordination service"},
+                        {RPCResult::Type::NUM, "rendezvous_rejected", "Requests ignored as coordinator"},
+                    }},
                 {RPCResult::Type::ARR, "sessions", /*optional=*/true, "Punch sessions in progress",
                     {
                         {RPCResult::Type::OBJ, "", "",
@@ -1485,6 +1514,32 @@ static RPCMethod getholepunchinfo()
                 announcements.push_back(std::move(o));
             }
             obj.pushKV("announcements", std::move(announcements));
+            {
+                const holepunch::Counters& c{connman.HolePunchCounters()};
+                UniValue counters(UniValue::VOBJ);
+                UniValue by_role(UniValue::VOBJ);
+                for (const auto [role, name] : {std::pair{holepunch::Role::INITIATOR, "initiator"}, std::pair{holepunch::Role::RESPONDER, "responder"}}) {
+                    const auto& r{c.sessions[static_cast<size_t>(role)]};
+                    UniValue o(UniValue::VOBJ);
+                    o.pushKV("started", r.started.load());
+                    o.pushKV("established", r.established.load());
+                    o.pushKV("failed", r.failed.load());
+                    by_role.pushKV(name, std::move(o));
+                }
+                by_role.pushKV("cancelled", c.sessions_cancelled.load());
+                counters.pushKV("sessions", std::move(by_role));
+                counters.pushKV("announcements_sent", c.announcements_sent.load());
+                counters.pushKV("announcements_received", c.announcements_received.load());
+                counters.pushKV("rendezvous_sent", c.rendezvous_sent.load());
+                counters.pushKV("coordination_opened", c.coordination_opened.load());
+                counters.pushKV("coordination_failed", c.coordination_failed.load());
+                counters.pushKV("punches_accepted", c.punches_accepted.load());
+                counters.pushKV("punches_rejected", c.punches_rejected.load());
+                counters.pushKV("rendezvous_answered", c.rendezvous_answered.load());
+                counters.pushKV("rendezvous_answered_own", c.rendezvous_answered_own.load());
+                counters.pushKV("rendezvous_rejected", c.rendezvous_rejected.load());
+                obj.pushKV("counters", std::move(counters));
+            }
             UniValue sessions(UniValue::VARR);
             const auto now{NodeClock::now()};
             for (const auto& session : connman.GetHolePunchSessions()) {
