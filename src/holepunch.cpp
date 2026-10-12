@@ -36,6 +36,31 @@ std::vector<std::string> CapNames(uint32_t caps)
     return names;
 }
 
+//! Whether `port` can be bound on the wildcard address of every available family.
+static bool PortIsFree(uint16_t port)
+{
+    for (const Network net : {NET_IPV4, NET_IPV6}) {
+        // One socket at a time: a dual-stack [::] bind conflicts with a live 0.0.0.0 one.
+        auto sock{CreateSock(net == NET_IPV4 ? AF_INET : AF_INET6, SOCK_STREAM, IPPROTO_TCP)};
+        if (!sock) continue; // the family is not available here
+        sockaddr_storage storage;
+        socklen_t len{sizeof(storage)};
+        if (!WildcardAddress(net, port).GetSockAddr(reinterpret_cast<sockaddr*>(&storage), &len)) return false;
+        if (sock->Bind(reinterpret_cast<sockaddr*>(&storage), len) != 0) return false;
+    }
+    return true;
+}
+
+std::optional<uint16_t> PickRandomPunchPort(FastRandomContext& rng)
+{
+    for (int i = 0; i < 20; ++i) {
+        const auto port{static_cast<uint16_t>(PUNCH_PORT_MIN + rng.randrange(PUNCH_PORT_MAX - PUNCH_PORT_MIN + 1))};
+        if (IsBadPort(port) || IsBadPort(port + 1)) continue;
+        if (PortIsFree(port) && PortIsFree(port + 1)) return port;
+    }
+    return std::nullopt;
+}
+
 bool IsWellFormedEndpoint(const CService& endpoint)
 {
     // Unknown BIP 155 network ids and IPv4-mapped IPv6 addresses (R-1.4) both

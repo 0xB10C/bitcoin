@@ -534,6 +534,22 @@ BOOST_AUTO_TEST_CASE(session_unmatched_connection_is_closed)
     BOOST_CHECK_EQUAL(results_a.Count(), 0);
 }
 
+BOOST_AUTO_TEST_CASE(pick_random_punch_port)
+{
+    FastRandomContext rng;
+    const auto port{PickRandomPunchPort(rng)};
+    BOOST_REQUIRE(port);
+    BOOST_CHECK(*port >= PUNCH_PORT_MIN && *port <= PUNCH_PORT_MAX);
+    BOOST_CHECK(!IsBadPort(*port));
+    BOOST_CHECK(!IsBadPort(*port + 1));
+    // The port and the next one, for the coordination bind, can be bound.
+    for (const uint16_t p : {*port, static_cast<uint16_t>(*port + 1)}) {
+        auto sock{CreateSock(AF_INET, SOCK_STREAM, IPPROTO_TCP)};
+        BOOST_REQUIRE(sock);
+        BOOST_CHECK(BindToSharedPort(*sock, LookupNumeric("127.0.0.1", p)));
+    }
+}
+
 BOOST_AUTO_TEST_CASE(session_cancel)
 {
     const uint16_t port_a{FreePort()};

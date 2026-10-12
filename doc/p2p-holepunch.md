@@ -9,7 +9,8 @@ This is experimental and off by default.
 ## How it works
 
 - The node reserves one local port, the *punch port* (`-holepunchport`,
-  default: the P2P port plus two), and makes every outbound connection to an
+  default: a random port from the dynamic range, chosen at startup and
+  kept for the run), and makes every outbound connection to an
   IPv4 or IPv6 peer that does not go through a proxy from that port. Every
   peer then reports the same NAT mapping back in `version.addr_recv`, which
   is how the node learns its *external address*: at least two peers in
@@ -54,7 +55,9 @@ and a node behind one detects that from disagreeing reports and stays out.
 ## Options and RPCs
 
 - `-holepunch=1`: enable hole punching (needs `-v2transport`).
-- `-holepunchport=<port>`: the punch port (default: `-port` plus two).
+- `-holepunchport=<port>`: the punch port (default: random from the
+  dynamic range at startup; nothing depends on the number, and a fixed
+  one would mark the node's connections behind a port-preserving NAT).
 - `-holepunchcoordbind=<addr>[:<port>]`: where coordination connections are
   accepted, the target of the coordination onion service (default:
   127.0.0.1 and the punch port plus one). The onion service itself needs

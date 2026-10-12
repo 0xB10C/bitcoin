@@ -5,7 +5,7 @@ P2P and network changes
   firewall can connect to each other by TCP hole punching, as specified in
   the draft BIP "TCP Hole Punching for Peer Connections". All outbound
   clearnet connections are then made from the punch port
-  (`-holepunchport`, default: the P2P port plus two), peers negotiate the
+  (`-holepunchport`, default: a random port chosen at startup), peers negotiate the
   feature with BIP 434, and a new BIP 155 address type (network id 8)
   announces nodes reachable this way. A node with `-listenonion` also runs
   a second onion service, never advertised, through which it coordinates

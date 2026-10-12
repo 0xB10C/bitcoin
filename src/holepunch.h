@@ -43,6 +43,22 @@ enum class Role : uint8_t {
 };
 
 /**
+ * The range the default punch port is chosen from: the dynamic port range, with
+ * room for the coordination bind at the next port.
+ */
+inline constexpr uint16_t PUNCH_PORT_MIN{49152};
+inline constexpr uint16_t PUNCH_PORT_MAX{65534};
+
+/**
+ * Pick a punch port at random from the dynamic range: one that is not a bad port
+ * and that can be bound, as can the next port. Nothing on the wire depends on
+ * the number; a fixed well-known port would mark the node's connections behind
+ * a port-preserving NAT and collide with other nodes behind the same NAT.
+ * Returns nullopt if no such port was found in a few tries.
+ */
+std::optional<uint16_t> PickRandomPunchPort(FastRandomContext& rng);
+
+/**
  * Whether an endpoint received in a message is well formed (R-4.2): an IPv4 or
  * IPv6 address that is not an IPv4-mapped IPv6 address (R-1.4). Validity for
  * use (routable, port, own address) is checked separately.

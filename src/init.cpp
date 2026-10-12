@@ -603,7 +603,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-onlynet=<net>", "Make automatic outbound connections only to network <net> (" + Join(GetNetworkNames(), ", ") + "). Inbound and manual connections are not affected by this option. It can be specified multiple times to allow multiple networks.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-v2transport", strprintf("Support v2 transport (default: %u)", DEFAULT_V2_TRANSPORT), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-holepunch", strprintf("EXPERIMENTAL: Connect to other nodes behind NATs by TCP hole punching and let them connect to this node. All outbound clearnet connections are then made from the punch port. Requires -v2transport (default: %u)", DEFAULT_HOLEPUNCH), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
-    argsman.AddArg("-holepunchport=<port>", "Local port used for hole punching: for all outbound clearnet connections and for accepting punched connections (default: the -port value plus 2)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-holepunchport=<port>", "Local port used for hole punching: for all outbound clearnet connections and for accepting punched connections (default: a random port from the dynamic range, chosen at startup)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-holepunchcoordonion=<address>", "Regtest only: use this onion address as the hole punch coordination service instead of creating one through Tor", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
     argsman.AddArg("-holepunchcoordbind=<addr>[:<port>]", "Address to accept hole punch coordination connections on. Other nodes reach it only through the hole punching onion service (default: 127.0.0.1 and the punch port plus 1)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-peerbloomfilters", strprintf("Support filtering of blocks and transaction with bloom filters (default: %u)", DEFAULT_PEERBLOOMFILTERS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
@@ -2427,9 +2427,19 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         if (!(g_local_services & NODE_P2P_V2)) {
             return InitError(_("-holepunch requires -v2transport"));
         }
-        const int64_t punch_port{args.GetIntArg("-holepunchport", int64_t{GetListenPort()} + 2)};
-        if (punch_port < 1 || punch_port > 65535) {
-            return InitError(strprintf(_("Invalid port specified in %s: '%s'"), "-holepunchport", args.GetArg("-holepunchport", "")));
+        int64_t punch_port{0};
+        if (args.IsArgSet("-holepunchport")) {
+            punch_port = args.GetIntArg("-holepunchport", 0);
+            if (punch_port < 1 || punch_port > 65535) {
+                return InitError(strprintf(_("Invalid port specified in %s: '%s'"), "-holepunchport", args.GetArg("-holepunchport", "")));
+            }
+        } else {
+            // A random port, fixed for this run: nothing depends on its number, and a
+            // well-known one would mark our connections to observers (BIP footnote).
+            FastRandomContext rng;
+            const auto picked{holepunch::PickRandomPunchPort(rng)};
+            if (!picked) return InitError(_("No free port for hole punching was found, set -holepunchport"));
+            punch_port = *picked;
         }
         connOptions.m_holepunch.port = static_cast<uint16_t>(punch_port);
         connOptions.m_holepunch.allow_local = chainparams.GetChainType() == ChainType::REGTEST;

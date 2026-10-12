@@ -787,6 +787,15 @@ class HolePunchTest(BitcoinTestFramework):
         with node.assert_debug_log([f"Hole punch coordination service is {ONION}:18444 (-holepunchcoordonion)"]):
             self.start_node(0, extra_args=self.extra_args[0])
         self.stop_node(0)
+        self.log.info("Without -holepunchport, a random port from the dynamic range is used for the run")
+        self.start_node(0, extra_args=["-holepunch=1", "-v2transport=1"])
+        port = node.getholepunchinfo()["port"]
+        assert 49152 <= port <= 65534, port
+        assert_equal(node.getholepunchinfo()["coordination"]["bind"], f"127.0.0.1:{port + 1}")
+        peer = node.add_outbound_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR), p2p_idx=0)
+        assert_equal(peer.dstport, port)
+        node.disconnect_p2ps()
+        self.stop_node(0)
         self.log.info("Without -holepunch, outbound connections use an ephemeral port and no feature is sent")
         self.start_node(0, extra_args=["-v2transport=1"])
         peer = node.add_outbound_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR), p2p_idx=0)
