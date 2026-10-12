@@ -2433,6 +2433,9 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
             if (punch_port < 1 || punch_port > 65535) {
                 return InitError(strprintf(_("Invalid port specified in %s: '%s'"), "-holepunchport", args.GetArg("-holepunchport", "")));
             }
+            if (IsBadPort(static_cast<uint16_t>(punch_port))) {
+                return InitError(strprintf(_("Port %d in %s is one other nodes refuse to connect to, choose another"), punch_port, "-holepunchport"));
+            }
         } else {
             // A random port, fixed for this run: nothing depends on its number, and a
             // well-known one would mark our connections to observers (BIP footnote).

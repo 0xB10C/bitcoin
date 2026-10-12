@@ -4234,6 +4234,11 @@ void PeerManagerImpl::MaybeSendHolePunchAnnouncement(CNode& node, Peer& peer, st
     for (const Network net : {NET_IPV4, NET_IPV6}) {
         const auto external{m_connman.HolePunchExternalAddress(net)};
         if (!external) continue;
+        // Connectors ignore endpoints with a bad port (R-5.2), so there is no point (R-6.5).
+        if (IsBadPort(external->GetPort())) {
+            LogDebug(BCLog::HOLEPUNCH, "not announcing %s to peer=%d: its port is a bad port\n", external->ToStringAddrPort(), peer.m_id);
+            continue;
+        }
         for (const CService& coordinator : via) {
             const auto made{CNetAddr::MakeHolePunch(coordinator, *external)};
             if (!made) continue;

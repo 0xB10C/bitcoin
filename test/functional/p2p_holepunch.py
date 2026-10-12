@@ -93,8 +93,8 @@ class ReportingPeer(P2PInterface):
     By default it reports what it sees on the socket, which is what a real
     peer does. A different report can be given to play a lying peer."""
 
-    def __init__(self, report=None):
-        super().__init__()
+    def __init__(self, report=None, **kwargs):
+        super().__init__(**kwargs)
         self.report = report
 
     def connection_made(self, transport):
@@ -628,6 +628,16 @@ class HolePunchTest(BitcoinTestFramework):
         node.disconnect_p2ps()
         self.wait_until(lambda: len(node.getpeerinfo()) == 0)
 
+    def test_bad_external_port(self):
+        node = self.nodes[0]
+        self.log.info("An external address with a bad port is not announced: nobody would punch to it")
+        node.add_outbound_p2p_connection(ReportingPeer(report=("127.0.0.1", 6667), support_addrv2=True), p2p_idx=0)
+        with node.assert_debug_log(["not announcing 127.0.0.1:6667 to peer="], timeout=10):
+            node.add_outbound_p2p_connection(ReportingPeer(report=("127.0.0.1", 6667), support_addrv2=True), p2p_idx=1)
+        assert_equal(self.external(node)["address"], "127.0.0.1:6667")
+        node.disconnect_p2ps()
+        self.wait_until(lambda: len(node.getpeerinfo()) == 0)
+
     def test_advertiser(self):
         node = self.nodes[0]
         punch_port = holepunch_port(0)
@@ -785,6 +795,9 @@ class HolePunchTest(BitcoinTestFramework):
         node.assert_start_raises_init_error(
             ["-holepunch=1", "-v2transport=1", "-holepunchport=70000"],
             "Error: Invalid port specified in -holepunchport: '70000'")
+        node.assert_start_raises_init_error(
+            ["-holepunch=1", "-v2transport=1", "-holepunchport=6667"],
+            "Error: Port 6667 in -holepunchport is one other nodes refuse to connect to, choose another")
         self.log.info("-holepunchcoordonion sets the coordination service by hand")
         node.assert_start_raises_init_error(
             ["-holepunch=1", "-v2transport=1", "-holepunchcoordonion=1.2.3.4"],
@@ -821,6 +834,7 @@ class HolePunchTest(BitcoinTestFramework):
         # The connector tests run while the announcement cache is empty: entries
         # left by the cache tests would be attempted as soon as the node has an
         # external address, and would use up the attempt interval.
+        self.test_bad_external_port()
         self.test_advertiser()
         self.test_connector()
         self.test_coordination_connect()
