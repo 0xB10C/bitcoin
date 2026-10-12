@@ -6,12 +6,14 @@
 #include <boost/test/unit_test.hpp>
 
 #include <map>
+#include <optional>
 #include <string>
 #include <utility>
 
 
 std::pair<std::string, std::string> SplitTorReplyLine(const std::string& s);
 std::map<std::string, std::string> ParseTorReplyMapping(const std::string& s);
+std::optional<std::string> ParseHsDescUploaded(const std::string& line);
 
 
 BOOST_AUTO_TEST_SUITE(torcontrol_tests)
@@ -197,6 +199,18 @@ BOOST_AUTO_TEST_CASE(util_ParseTorReplyMapping)
     CheckParseTorReplyMapping("MORE  ARGS", {});
     CheckParseTorReplyMapping("EVEN more=ARGS", {});
     CheckParseTorReplyMapping("EVEN+more ARGS", {});
+}
+
+BOOST_AUTO_TEST_CASE(hs_desc_uploaded)
+{
+    const std::string addr{"kpgvmsfpi2usww3uw74pnpj3xbxf3gvxprpq4a5fwq5bws5662wbv3ad"};
+    BOOST_CHECK_EQUAL(ParseHsDescUploaded("HS_DESC UPLOADED " + addr + " UNKNOWN $ABCDEF HSDIR_INDEX=12").value_or(""), addr);
+    BOOST_CHECK_EQUAL(ParseHsDescUploaded("HS_DESC UPLOADED " + addr + " UNKNOWN $ABCDEF").value_or(""), addr);
+    BOOST_CHECK(!ParseHsDescUploaded("HS_DESC UPLOAD " + addr + " UNKNOWN $ABCDEF"));
+    BOOST_CHECK(!ParseHsDescUploaded("HS_DESC RECEIVED " + addr + " UNKNOWN $ABCDEF"));
+    BOOST_CHECK(!ParseHsDescUploaded("HS_DESC UPLOADED UNKNOWN UNKNOWN $ABCDEF"));
+    BOOST_CHECK(!ParseHsDescUploaded("CIRC 1 LAUNCHED"));
+    BOOST_CHECK(!ParseHsDescUploaded("HS_DESC UPLOADED"));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

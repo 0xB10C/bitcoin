@@ -195,9 +195,9 @@ bool TorControlConnection::ProcessBuffer()
 
         if (separator == ' ') {
             if (m_message.code >= 600) {
-                // Async notifications are currently unused
                 // Synchronous and asynchronous messages are never interleaved
                 LogDebug(BCLog::TOR, "Received async notification %i", m_message.code);
+                if (m_async_handler) m_async_handler(*this, m_message);
             } else if (!m_reply_handlers.empty()) {
                 // Invoke reply handler with message
                 m_reply_handlers.front()(*this, m_message);
@@ -348,6 +348,16 @@ std::map<std::string,std::string> ParseTorReplyMapping(const std::string &s)
     return mapping;
 }
 
+static std::string MakeAddOnionCmd(const std::string& private_key, const std::string& target, bool enable_pow);
+
+std::optional<std::string> ParseHsDescUploaded(const std::string& line)
+{
+    // HS_DESC UPLOADED <HSAddress> <AuthType> <HsDir> ... (control-spec 4.1.25)
+    const auto words{SplitString(line, ' ')};
+    if (words.size() < 3 || words[0] != "HS_DESC" || words[1] != "UPLOADED" || words[2] == "UNKNOWN") return std::nullopt;
+    return words[2];
+}
+
 TorController::TorController(const std::string& tor_control_center, const CService& target, TorServiceOptions options)
     : m_tor_control_center(tor_control_center),
       m_conn(m_interrupt),
@@ -364,7 +374,57 @@ TorController::TorController(const std::string& tor_control_center, const CServi
             m_private_key = pkf.second;
         }
     }
+    m_conn.SetAsyncHandler(std::bind_front(&TorController::async_cb, this));
     m_thread = std::thread(&util::TraceThread, "torcontrol", [this] { ThreadControl(); });
+}
+
+void TorController::async_cb(TorControlConnection& _conn, const TorControlReply& reply)
+{
+    if (reply.lines.empty()) return;
+    const auto uploaded{ParseHsDescUploaded(reply.lines[0])};
+    if (!uploaded) return;
+    if (*uploaded == m_service_id && !m_service_reported) {
+        LogDebug(BCLog::TOR, "Descriptor of service %s is uploaded", m_service_id);
+        ReportService();
+    }
+}
+
+void TorController::ReportService()
+{
+    if (m_service_reported || !m_service.IsValid()) return;
+    m_service_reported = true;
+    if (m_options.advertise) AddLocal(m_service, LOCAL_MANUAL);
+    if (m_options.on_service) m_options.on_service(m_service);
+}
+
+void TorController::RequestOnion(const std::string& private_key)
+{
+    m_conn.Command(MakeAddOnionCmd(private_key, m_target.ToStringAddrPort(), /*enable_pow=*/true),
+                   [this](TorControlConnection& conn, const TorControlReply& reply) {
+                       add_onion_cb(conn, reply, /*pow_was_enabled=*/true);
+                   });
+}
+
+void TorController::Tick()
+{
+    if (!m_conn.IsConnected()) return;
+    const auto now{NodeClock::now()};
+    for (auto it{m_retiring.begin()}; it != m_retiring.end();) {
+        if (it->second > now) {
+            ++it;
+            continue;
+        }
+        LogDebug(BCLog::TOR, "Deleting replaced service %s", it->first);
+        m_conn.Command("DEL_ONION " + it->first, [](TorControlConnection&, const TorControlReply& reply) {
+            if (reply.code != TOR_REPLY_OK) LogWarning("tor: DEL_ONION failed; error code %d", reply.code);
+        });
+        it = m_retiring.erase(it);
+    }
+    if (m_rotate_requested.exchange(false)) {
+        if (!m_service.IsValid()) return; // nothing to replace yet; the next ADD_ONION is fresh anyway
+        LogInfo("Replacing tor service %s with a fresh one", m_service_id);
+        RequestOnion("NEW:ED25519-V3");
+    }
 }
 
 TorController::~TorController()
@@ -399,11 +459,14 @@ void TorController::ThreadControl()
             connected_cb(m_conn);
             while (!m_interrupt) {
                 if (!m_conn.WaitForData(std::chrono::seconds(1))) {
-                    if (m_conn.IsConnected()) continue;
-                    LogDebug(BCLog::TOR, "Lost connection to Tor control port");
+                    if (!m_conn.IsConnected()) {
+                        LogDebug(BCLog::TOR, "Lost connection to Tor control port");
+                        break;
+                    }
+                } else if (!m_conn.ReceiveAndProcess()) {
                     break;
                 }
-                if (!m_conn.ReceiveAndProcess()) break;
+                Tick();
             }
         } else {
             LogWarning("tor: Initiating connection to Tor control port %s failed", m_tor_control_center);
@@ -498,6 +561,7 @@ void TorController::add_onion_cb(TorControlConnection& _conn, const TorControlRe
 {
     if (reply.code == TOR_REPLY_OK) {
         LogDebug(BCLog::TOR, "ADD_ONION successful (PoW defenses %s)", pow_was_enabled ? "enabled" : "disabled");
+        const std::string previous_id{m_service_id};
         for (const std::string &s : reply.lines) {
             std::map<std::string,std::string> m = ParseTorReplyMapping(s);
             std::map<std::string,std::string>::iterator i;
@@ -513,7 +577,17 @@ void TorController::add_onion_cb(TorControlConnection& _conn, const TorControlRe
             }
             return;
         }
+        if (m_service.IsValid() && m_service_id != previous_id) {
+            // A rotation: the old service stays up for a while for those who were told about it.
+            if (m_options.keep_previous > std::chrono::seconds{0}) {
+                m_retiring.emplace_back(previous_id, NodeClock::now() + m_options.keep_previous);
+            } else {
+                m_retiring.emplace_back(previous_id, NodeClock::now());
+            }
+            if (m_options.advertise) RemoveLocal(m_service);
+        }
         m_service = LookupNumeric(std::string(m_service_id+".onion"), Params().GetDefaultPort());
+        m_service_reported = false;
         LogInfo("Got tor service ID %s, %s service %s", m_service_id, m_options.advertise ? "advertising" : "running", m_service.ToStringAddrPort());
         if (!m_options.ephemeral) {
             if (WriteBinaryFile(GetPrivateKeyFile(), m_private_key)) {
@@ -522,8 +596,11 @@ void TorController::add_onion_cb(TorControlConnection& _conn, const TorControlRe
                 LogWarning("tor: Error writing service private key to %s", fs::PathToString(GetPrivateKeyFile()));
             }
         }
-        if (m_options.advertise) AddLocal(m_service, LOCAL_MANUAL);
-        if (m_options.on_service) m_options.on_service(m_service);
+        if (m_options.wait_for_descriptor) {
+            LogDebug(BCLog::TOR, "Waiting for the descriptor of service %s to be uploaded", m_service_id);
+        } else {
+            ReportService();
+        }
         // ... onion requested - keep connection open
     } else if (reply.code == TOR_REPLY_UNRECOGNIZED) {
         LogWarning("tor: Add onion failed with unrecognized command (You probably need to upgrade Tor)");
@@ -549,15 +626,17 @@ void TorController::auth_cb(TorControlConnection& _conn, const TorControlReply& 
             _conn.Command("GETINFO net/listeners/socks", std::bind_front(&TorController::get_socks_cb, this));
         }
 
+        if (m_options.wait_for_descriptor) {
+            _conn.Command("SETEVENTS HS_DESC", [](TorControlConnection&, const TorControlReply& reply) {
+                if (reply.code != TOR_REPLY_OK) LogWarning("tor: SETEVENTS HS_DESC failed; error code %d", reply.code);
+            });
+        }
         // Finally - now create the service
-        if (m_private_key.empty()) { // No private key, generate one
+        if (m_private_key.empty() || m_options.ephemeral) { // No private key, or none kept: generate one
             m_private_key = "NEW:ED25519-V3"; // Explicitly request key type - see issue #9214
         }
         // Request onion service, redirect port.
-        _conn.Command(MakeAddOnionCmd(m_private_key, m_target.ToStringAddrPort(), /*enable_pow=*/true),
-                      [this](TorControlConnection& conn, const TorControlReply& reply) {
-                          add_onion_cb(conn, reply, /*pow_was_enabled=*/true);
-                      });
+        RequestOnion(m_private_key);
     } else {
         LogWarning("tor: Authentication failed");
     }
@@ -716,11 +795,13 @@ void TorController::connected_cb(TorControlConnection& _conn)
 void TorController::disconnected_cb(TorControlConnection& _conn)
 {
     // Stop advertising service when disconnected
-    if (m_service.IsValid()) {
+    if (m_service.IsValid() && m_service_reported) {
         if (m_options.advertise) RemoveLocal(m_service);
         if (m_options.on_service) m_options.on_service(CService{});
     }
     m_service = CService();
+    m_service_reported = false;
+    m_retiring.clear(); // Tor drops ephemeral services with the control connection
     if (!m_reconnect)
         return;
 

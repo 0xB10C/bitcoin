@@ -17,7 +17,10 @@
 #include <deque>
 #include <functional>
 #include <memory>
+#include <chrono>
+#include <optional>
 #include <string>
+#include <util/time.h>
 #include <thread>
 #include <vector>
 
@@ -56,6 +59,8 @@ class TorControlConnection
 {
 public:
     typedef std::function<void(TorControlConnection &,const TorControlReply &)> ReplyHandlerCB;
+    /** Handler for asynchronous notifications (reply codes 600 and up), as enabled with SETEVENTS. */
+    using AsyncHandlerCB = std::function<void(TorControlConnection&, const TorControlReply&)>;
 
     /** Create a new TorControlConnection.
      */
@@ -79,6 +84,8 @@ public:
      * Return true on success.
      */
     bool Command(const std::string &cmd, const ReplyHandlerCB& reply_handler);
+    /** Receive asynchronous notifications. */
+    void SetAsyncHandler(AsyncHandlerCB handler) { m_async_handler = std::move(handler); }
 
     /**
      * Check if the connection is established.
@@ -108,6 +115,8 @@ private:
     TorControlReply m_message;
     /** Response handlers */
     std::deque<ReplyHandlerCB> m_reply_handlers;
+    /** Handler for asynchronous notifications, if any. */
+    AsyncHandlerCB m_async_handler;
     /** Buffer for incoming data */
     std::string m_recv_buffer;
     /** Process complete lines from the receive buffer */
@@ -122,9 +131,23 @@ struct TorServiceOptions {
     bool ephemeral{false};
     /** Add the service to the local addresses advertised to peers. */
     bool advertise{true};
+    /**
+     * Only report the service once Tor says its descriptor is uploaded, so that
+     * others can reach it by the time they are told about it. Needs Tor's HS_DESC
+     * events, which the controller subscribes to.
+     */
+    bool wait_for_descriptor{false};
+    /** How long a service replaced by Rotate() stays up before it is deleted. */
+    std::chrono::seconds keep_previous{0};
     /** Called with the service address once it is up, and with an invalid one when it is gone. */
     std::function<void(const CService&)> on_service;
 };
+
+/**
+ * The onion address of an HS_DESC UPLOADED notification line (without the
+ * leading reply code), or nullopt for any other line.
+ */
+std::optional<std::string> ParseHsDescUploaded(const std::string& line);
 
 /** Controller that connects to Tor control socket, authenticate, then create
  * and maintain an ephemeral onion service.
@@ -137,6 +160,13 @@ public:
         // Used for testing only.
     }
     ~TorController();
+
+    /**
+     * Replace the service by one with a fresh key. The old one stays up for
+     * `keep_previous`, then is deleted. The new one is reported through
+     * `on_service` like the first. May be called from any thread.
+     */
+    void Rotate() { m_rotate_requested = true; }
 
     /** Get name of file to store private key in */
     fs::path GetPrivateKeyFile();
@@ -153,6 +183,11 @@ private:
     TorControlConnection m_conn;
     std::string m_private_key;
     std::string m_service_id;
+    /** Whether `on_service` has been called for the current service. */
+    bool m_service_reported{false};
+    std::atomic<bool> m_rotate_requested{false};
+    /** Replaced services, with the time to delete them. Control thread only. */
+    std::vector<std::pair<std::string, NodeClock::time_point>> m_retiring;
     std::atomic<bool> m_reconnect;
     std::chrono::duration<double> m_reconnect_timeout;
     CService m_service;
@@ -165,6 +200,13 @@ private:
 
     /// \anchor torcontrol
     void ThreadControl();
+    /** Periodic work on the control thread: rotation requests and retiring services. */
+    void Tick();
+    /** Issue ADD_ONION for a fresh key. */
+    void RequestOnion(const std::string& private_key);
+    /** Report the current service through `on_service`, once. */
+    void ReportService();
+    void async_cb(TorControlConnection& conn, const TorControlReply& reply);
 
 public:
     /** Callback for GETINFO net/listeners/socks result */
