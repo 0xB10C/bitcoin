@@ -3924,6 +3924,9 @@ void PeerManagerImpl::PushHolePunchFeature(CNode& pfrom, Peer& peer)
 {
     const auto& opts{m_connman.GetHolePunchOptions()};
     if (!opts.enabled) return;
+    // Feelers and address fetches close right after the handshake and never
+    // coordinate; the feature would only tell one more node that we take part (R-3.5).
+    if (pfrom.IsFeelerConn() || pfrom.IsAddrFetchConn()) return;
     // On a connection we opened from the punch port the peer observes our external address.
     const bool from_punch_port{!pfrom.IsInboundConn() && pfrom.addrBind.GetPort() == opts.port};
     uint32_t caps{0};

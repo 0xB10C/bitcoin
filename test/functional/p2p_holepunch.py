@@ -361,6 +361,16 @@ class HolePunchTest(BitcoinTestFramework):
             node.add_p2p_connection(HolePunchPeer(raw_feature_data=feature_data(CAP_COORDINATOR, version=3)))
         assert_equal(node.getpeerinfo()[-1]["holepunch_caps"], ["COORDINATOR"])
 
+        self.log.info("No feature is sent on feelers and address fetches")
+        feeler = node.add_outbound_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR), p2p_idx=2, connection_type="feeler", wait_for_verack=False)
+        feeler.wait_for_disconnect()
+        assert "version" in feeler.message_count
+        assert_equal(feeler.holepunch_feature, None)
+        fetch = node.add_outbound_p2p_connection(HolePunchPeer(caps=CAP_COORDINATOR), p2p_idx=3, connection_type="addr-fetch")
+        fetch.sync_with_ping()
+        assert_equal(fetch.holepunch_feature, None)
+        fetch.peer_disconnect()
+
         self.log.info("A peer without the feature has no holepunch_caps")
         node.add_p2p_connection(P2PInterface())
         assert "holepunch_caps" not in node.getpeerinfo()[-1]
