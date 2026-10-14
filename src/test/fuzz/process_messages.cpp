@@ -14,6 +14,7 @@
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
 #include <test/fuzz/util.h>
+#include <test/fuzz/util/cost.h>
 #include <test/fuzz/util/net.h>
 #include <test/util/net.h>
 #include <test/util/random.h>
@@ -53,7 +54,20 @@ void initialize_process_messages()
     // Replace validation_signals before creating chainman and mempool so they use it.
     g_setup->m_node.validation_signals = std::make_unique<ValidationSignals>(std::make_unique<ImmediateBackgroundTaskRunner>());
     ResetChainmanAndMempool(*g_setup, init_clock, {.init_block_filter_basic = true});
+
+    fuzz_cost::Init(ALL_NET_MESSAGE_TYPES);
 }
+
+namespace {
+void AddQueuedReplies(fuzz_cost::Trial& cost, CNode& node)
+{
+    if (!fuzz_cost::Enabled()) return;
+    LOCK(node.cs_vSend);
+    for (const auto& msg : node.vSendMsg) {
+        cost.AddBytesOut(msg.m_type, msg.data.size() + CMessageHeader::HEADER_SIZE);
+    }
+}
+} // namespace
 
 FUZZ_TARGET(process_messages, .init = initialize_process_messages)
 {
@@ -115,21 +129,31 @@ FUZZ_TARGET(process_messages, .init = initialize_process_messages)
         CSerializedNetMsg net_msg;
         net_msg.m_type = random_message_type;
         net_msg.data = ConsumeRandomLengthByteVector(fuzzed_data_provider, MAX_PROTOCOL_MESSAGE_LENGTH);
+        const size_t net_msg_size{net_msg.data.size()};
 
         CNode& random_node = *PickValue(fuzzed_data_provider, peers);
 
         connman.FlushSendBuffer(random_node);
         (void)connman.ReceiveMsgFrom(random_node, std::move(net_msg));
 
-        bool more_work{true};
-        while (more_work) { // Ensure that every message is eventually processed in some way or another
-            random_node.fPauseSend = false;
+        // One scope per message. Unlike process_message, HEAP_KEPT matters
+        // here: it is heap the node is still holding after the message was
+        // handled, i.e. state an attacker made it accumulate.
+        fuzz_cost::Trial cost{fuzz_cost::LabelIndex(random_message_type),
+                              net_msg_size + CMessageHeader::HEADER_SIZE,
+                              buffer, /*repeatable=*/false};
+        while (cost.Next()) {
+            bool more_work{true};
+            while (more_work) { // Ensure that every message is eventually processed in some way or another
+                random_node.fPauseSend = false;
 
-            try {
-                more_work = connman.ProcessMessagesOnce(random_node);
-            } catch (const std::ios_base::failure&) {
+                try {
+                    more_work = connman.ProcessMessagesOnce(random_node);
+                } catch (const std::ios_base::failure&) {
+                }
+                node.peerman->SendMessages(random_node);
             }
-            node.peerman->SendMessages(random_node);
+            AddQueuedReplies(cost, random_node);
         }
     }
     node.validation_signals->SyncWithValidationInterfaceQueue();

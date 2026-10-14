@@ -4,6 +4,9 @@
 
 add_subdirectory(util)
 
+# Per-input resource accounting ("cost meter"). See perf-fuzz-impl-plan.md.
+option(FUZZ_COST "Build the fuzz cost meter into the fuzz binary" OFF)
+
 add_executable(fuzz
   addition_overflow.cpp
   addrman.cpp
@@ -79,6 +82,7 @@ add_executable(fuzz
   netbase_dns_lookup.cpp
   node_eviction.cpp
   overflow.cpp
+  p2p_deserialize_cost.cpp
   p2p_handshake.cpp
   p2p_headers_presync.cpp
   p2p_private_broadcast.cpp
@@ -145,6 +149,14 @@ add_executable(fuzz
 
 if(ENABLE_IPC)
   add_subdirectory(${PROJECT_SOURCE_DIR}/src/ipc/test/fuzz ipc)
+endif()
+
+# cost.cpp lives in the executable, not in test_fuzz: it interposes the
+# allocator and owns a __libfuzzer_extra_counters section, both of which have to
+# be in the final binary. Without FUZZ_COST it compiles to no-ops.
+target_sources(fuzz PRIVATE util/cost.cpp)
+if(FUZZ_COST)
+  target_compile_definitions(fuzz PRIVATE FUZZ_COST)
 endif()
 
 add_windows_application_manifest(fuzz)

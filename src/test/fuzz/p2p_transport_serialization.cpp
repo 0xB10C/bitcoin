@@ -9,6 +9,7 @@
 #include <protocol.h>
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
+#include <test/fuzz/util/cost.h>
 #include <test/fuzz/util.h>
 #include <util/chaintype.h>
 
@@ -28,16 +29,14 @@ void initialize_p2p_transport_serialization()
     static ECC_Context ecc_context{};
     SelectParams(ChainType::REGTEST);
     std::sort(g_all_messages.begin(), g_all_messages.end());
+    static const std::array<std::string, 1> labels{"v1transport"};
+    fuzz_cost::Init(labels);
 }
 
 } // namespace
 
 FUZZ_TARGET(p2p_transport_serialization, .init = initialize_p2p_transport_serialization)
 {
-    // Construct transports for both sides, with dummy NodeIds.
-    V1Transport recv_transport{NodeId{0}};
-    V1Transport send_transport{NodeId{1}};
-
     FuzzedDataProvider fuzzed_data_provider{buffer.data(), buffer.size()};
 
     auto checksum_assist = fuzzed_data_provider.ConsumeBool();
@@ -72,6 +71,14 @@ FUZZ_TARGET(p2p_transport_serialization, .init = initialize_p2p_transport_serial
     }
 
     mutable_msg_bytes.insert(mutable_msg_bytes.end(), payload_bytes.begin(), payload_bytes.end());
+
+    // Framing, checksum and re-serialization cost per wire byte. The transports
+    // are rebuilt inside the trial so the measured work is repeatable.
+    fuzz_cost::Trial cost{0, mutable_msg_bytes.size(), buffer, /*repeatable=*/true};
+    while (cost.Next()) {
+    // Construct transports for both sides, with dummy NodeIds.
+    V1Transport recv_transport{NodeId{0}};
+    V1Transport send_transport{NodeId{1}};
     std::span<const uint8_t> msg_bytes{mutable_msg_bytes};
     while (msg_bytes.size() > 0) {
         if (!recv_transport.ReceivedBytes(msg_bytes)) {
@@ -99,6 +106,7 @@ FUZZ_TARGET(p2p_transport_serialization, .init = initialize_p2p_transport_serial
             }
         }
     }
+    } // cost trial
 }
 
 namespace {

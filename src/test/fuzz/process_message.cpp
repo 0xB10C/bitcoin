@@ -14,6 +14,7 @@
 #include <test/fuzz/FuzzedDataProvider.h>
 #include <test/fuzz/fuzz.h>
 #include <test/fuzz/util.h>
+#include <test/fuzz/util/cost.h>
 #include <test/fuzz/util/net.h>
 #include <test/util/net.h>
 #include <test/util/random.h>
@@ -61,7 +62,22 @@ void initialize_process_message()
     };
     g_setup = testing_setup.get();
     ResetChainmanAndMempool(*g_setup, init_clock, {.init_block_filter_basic = true});
+
+    fuzz_cost::Init(ALL_NET_MESSAGE_TYPES);
 }
+
+namespace {
+//! Sum what the measured block queued for sending back, per reply type.
+//! Must run before the trial closes, i.e. inside the measured loop.
+void AddQueuedReplies(fuzz_cost::Trial& cost, CNode& node)
+{
+    if (!fuzz_cost::Enabled()) return;
+    LOCK(node.cs_vSend);
+    for (const auto& msg : node.vSendMsg) {
+        cost.AddBytesOut(msg.m_type, msg.data.size() + CMessageHeader::HEADER_SIZE);
+    }
+}
+} // namespace
 
 FUZZ_TARGET(process_message, .init = initialize_process_message)
 {
@@ -113,6 +129,7 @@ FUZZ_TARGET(process_message, .init = initialize_process_message)
     CSerializedNetMsg net_msg;
     net_msg.m_type = random_message_type;
     net_msg.data = ConsumeRandomLengthByteVector(fuzzed_data_provider, MAX_PROTOCOL_MESSAGE_LENGTH);
+    const size_t net_msg_size{net_msg.data.size()};
 
     connman.FlushSendBuffer(p2p_node);
     (void)connman.ReceiveMsgFrom(p2p_node, std::move(net_msg));
@@ -121,14 +138,26 @@ FUZZ_TARGET(process_message, .init = initialize_process_message)
         chainman.JumpOutOfIbd();
     }
 
-    bool more_work{true};
-    while (more_work) {
-        p2p_node.fPauseSend = false;
-        try {
-            more_work = connman.ProcessMessagesOnce(p2p_node);
-        } catch (const std::ios_base::failure&) {
+    // Measure only the processing loop: not the node setup above, not the
+    // validation-queue drain or the chainstate reset below. Processing mutates
+    // mempool, chainstate and peer state, so it must not be re-run; champion
+    // timings are re-measured by replaying the input in a fresh process.
+    fuzz_cost::Trial cost{fuzz_cost::LabelIndex(random_message_type),
+                          net_msg_size + CMessageHeader::HEADER_SIZE,
+                          buffer, /*repeatable=*/false};
+    while (cost.Next()) {
+        bool more_work{true};
+        while (more_work) {
+            p2p_node.fPauseSend = false;
+            try {
+                more_work = connman.ProcessMessagesOnce(p2p_node);
+            } catch (const std::ios_base::failure&) {
+            }
+            node.peerman->SendMessages(p2p_node);
         }
-        node.peerman->SendMessages(p2p_node);
+        AddQueuedReplies(cost, p2p_node);
+        cost.SetDisconnect(p2p_node.fDisconnect);
+        cost.SetConnected(p2p_node.fSuccessfullyConnected);
     }
     node.validation_signals->SyncWithValidationInterfaceQueue();
     node.validation_signals->UnregisterValidationInterface(node.peerman.get());

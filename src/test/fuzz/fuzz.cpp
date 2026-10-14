@@ -3,6 +3,7 @@
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
 #include <test/fuzz/fuzz.h>
+#include <test/fuzz/util/cost.h>
 
 #include <netaddress.h>
 #include <netbase.h>
@@ -16,6 +17,7 @@
 #include <util/time.h>
 
 #include <algorithm>
+#include <array>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -78,6 +80,8 @@ void FuzzFrameworkRegisterTarget(std::string_view name, TypeTestOneInput target,
 }
 
 static std::string_view g_fuzz_target;
+//! Label index for the generic per-target cost scope; SIZE_MAX means off.
+static size_t g_cost_label{SIZE_MAX};
 static const TypeTestOneInput* g_test_one_input{nullptr};
 
 static void test_one_input(FuzzBufferType buffer)
@@ -164,6 +168,17 @@ static void initialize()
     g_test_one_input = &it->second.test_one_input;
     it->second.opts.init();
 
+    // Generic per-target resource accounting. With FUZZ_COST_AUTO set, every
+    // one of the 200+ targets is measured as a whole, labelled by target name,
+    // with no per-target code. Targets that place their own finer-grained
+    // scopes (the P2P ones) keep working: the nesting guard in cost.cpp means
+    // the outer scope wins when this is on, and the inner ones when it is not.
+    if (std::getenv("FUZZ_COST_AUTO")) {
+        const std::array<std::string, 1> label{std::string{g_fuzz_target}};
+        fuzz_cost::Init(label);
+        g_cost_label = fuzz_cost::LabelIndex(g_fuzz_target);
+    }
+
     ResetCoverageCounters();
 }
 
@@ -211,7 +226,14 @@ void signal_handler(int signal)
 // This function is used by libFuzzer
 extern "C" int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size)
 {
-    test_one_input({data, size});
+    if (g_cost_label == SIZE_MAX) {
+        test_one_input({data, size});
+        return 0;
+    }
+    fuzz_cost::Trial cost{g_cost_label, size, {data, size}, /*repeatable=*/false};
+    while (cost.Next()) {
+        test_one_input({data, size});
+    }
     return 0;
 }
 
