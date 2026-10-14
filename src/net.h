@@ -32,6 +32,7 @@
 #include <uint256.h>
 #include <util/check.h>
 #include <util/not_null.h>
+#include <util/result.h>
 #include <util/sock.h>
 #include <util/threadinterrupt.h>
 
@@ -207,6 +208,7 @@ public:
     int nVersion;
     std::string cleanSubVer;
     bool fInbound;
+    bool m_hole_punched;
     // We requested high bandwidth connection to peer
     bool m_bip152_highbandwidth_to;
     // Peer requested high bandwidth connection
@@ -680,6 +682,8 @@ struct CNodeOptions
     bool prefer_evict = false;
     size_t recv_flood_size{DEFAULT_MAXRECEIVEBUFFER * 1000};
     bool use_v2transport = false;
+    /** The connection was made by TCP hole punching. */
+    bool hole_punched = false;
 };
 
 /** Information about a peer */
@@ -731,6 +735,8 @@ public:
     const std::string m_dest;
     //! Whether this peer is an inbound onion, i.e. connected via our Tor onion service.
     const bool m_inbound_onion;
+    //! Whether this connection was made by TCP hole punching.
+    const bool m_hole_punched;
     std::atomic<int> nVersion{0};
     Mutex m_subver_mutex;
     /**
@@ -1164,6 +1170,23 @@ public:
     /** The punch port, 0 when hole punching is off. */
     uint16_t GetHolePunchPort() const { return m_holepunch_port; }
 
+    /** What a hole punch made. */
+    struct HolePunchInfo {
+        NodeId id;
+        /** The peer's address and port as seen on the connection. */
+        CService peer;
+        int attempts;
+        std::chrono::milliseconds elapsed;
+    };
+    /**
+     * Connect to `peer` by TCP hole punching and make it a peer: a manual
+     * outbound one with `outbound`, an inbound one otherwise. The other node
+     * has to do the same towards this node at about the same time. Blocks for
+     * up to `window`. Only one hole punch runs at a time.
+     */
+    util::Result<HolePunchInfo> HolePunch(const CService& peer, bool outbound, std::chrono::milliseconds window)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+
     // test only
     void SetCaptureMessages(bool cap) { m_capture_messages = cap; }
 
@@ -1496,11 +1519,18 @@ private:
      * @param[in] permission_flags The peer's permissions.
      * @param[in] addr_bind The address and port at our side of the connection.
      * @param[in] addr The address and port at the peer's side of the connection.
+     * @param[in] hole_punched Whether the connection was made by hole punching.
+     * @return The id of the new node, or nothing if the connection was dropped.
      */
-    void CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
-                                      NetPermissionFlags permission_flags,
-                                      const CService& addr_bind,
-                                      const CService& addr)
+    std::optional<NodeId> CreateNodeFromAcceptedSocket(std::shared_ptr<Sock> sock,
+                                                       NetPermissionFlags permission_flags,
+                                                       const CService& addr_bind,
+                                                       const CService& addr,
+                                                       bool hole_punched = false)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+
+    /** Make a manual outbound peer from a hole-punched connection and return its id. */
+    NodeId CreateNodeFromPunchedSocket(std::shared_ptr<Sock> sock, const CService& peer, const CService& addr_bind)
         EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
     void DisconnectNodes() EXCLUSIVE_LOCKS_REQUIRED(!m_reconnections_mutex, !m_nodes_mutex);
@@ -1810,6 +1840,8 @@ private:
     std::vector<CService> m_onion_binds;
 
     uint16_t m_holepunch_port{0};
+    /** Whether a hole punch is running. Two at once would share the listener. */
+    std::atomic<bool> m_holepunch_busy{false};
 
     /**
      * The local address to connect from when hole punching is on and the
