@@ -55,6 +55,7 @@ add_executable(test_bitcoin
   hash_tests.cpp
   headers_sync_chainwork_tests.cpp
   httpserver_tests.cpp
+  holepunch_tests.cpp
   i2p_tests.cpp
   interfaces_tests.cpp
   key_io_tests.cpp
