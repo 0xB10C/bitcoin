@@ -1707,4 +1707,83 @@ BOOST_AUTO_TEST_CASE(addlocal_onlynet_externalip)
     fDiscover = discover_orig;
 }
 
+BOOST_AUTO_TEST_CASE(inbound_reconnect_tracking)
+{
+    auto& connman{static_cast<ConnmanTestMsg&>(*m_node.connman)};
+    const auto addr{[](const std::string& s) { return LookupHost(s, /*fAllowLookup=*/false).value(); }};
+    const auto attempt{[&](const std::string& s, NodeClock::time_point t) { return connman.RecordInboundAttemptPublic(addr(s), t); }};
+    constexpr auto W{INBOUND_RECONNECT_WINDOW};
+    const auto t0{NodeClock::now()};
+
+    // The first two attempts from an address are not recent, the third is.
+    BOOST_CHECK(!attempt("1.2.3.4", t0));
+    BOOST_CHECK(!attempt("1.2.3.4", t0 + 1s));
+    BOOST_CHECK(attempt("1.2.3.4", t0 + 2s));
+    // Other IPv4 hosts are distinct keys.
+    BOOST_CHECK(!attempt("1.2.3.5", t0 + 2s));
+
+    // IPv6 is keyed by /48.
+    BOOST_CHECK(!attempt("2001:db8:1:2::1", t0 + 3s));
+    BOOST_CHECK(!attempt("2001:db8:1:3::1", t0 + 3s));
+    BOOST_CHECK(attempt("2001:db8:1:ffff:ffff:ffff:ffff:ffff", t0 + 3s));
+    BOOST_CHECK(!attempt("2001:db8:2::1", t0 + 3s));
+    // An IPv4 address and an IPv6 /48 starting with the same bytes don't collide.
+    BOOST_CHECK(!attempt("102:304:506::1", t0 + 4s));
+
+    // Still remembered one and a half windows after the last attempt.
+    BOOST_CHECK(attempt("1.2.3.4", t0 + W + W / 2));
+
+    // Forgotten two windows after the last attempt, with other traffic
+    // driving the rotations in between. The attempts of that other address
+    // are counted across the rotations.
+    BOOST_CHECK(!attempt("5.6.7.8", t0 + 2 * W + W / 2));
+    BOOST_CHECK(!attempt("5.6.7.8", t0 + 3 * W + W / 2));
+    BOOST_CHECK(!attempt("1.2.3.4", t0 + 3 * W + W / 2));
+    BOOST_CHECK(attempt("5.6.7.8", t0 + 3 * W + W / 2 + 1s));
+
+    // Forgotten after a quiet period of two windows, in which no attempt
+    // triggered a rotation.
+    BOOST_CHECK(!attempt("5.6.7.8", t0 + 5 * W + W / 2));
+    BOOST_CHECK(!attempt("1.2.3.4", t0 + 5 * W + W / 2));
+
+    // An address that keeps reconnecting at least twice per window stays
+    // recent indefinitely, also when an attempt lands right after a rotation.
+    const auto t1{t0 + 5 * W + W / 2};
+    BOOST_CHECK(!attempt("9.9.9.9", t1));
+    BOOST_CHECK(!attempt("9.9.9.9", t1 + 1s));
+    BOOST_CHECK(attempt("9.9.9.9", t1 + 2s));
+    BOOST_CHECK(attempt("9.9.9.9", t1 + W));
+    BOOST_CHECK(attempt("9.9.9.9", t1 + W + 1s));
+    BOOST_CHECK(attempt("9.9.9.9", t1 + 2 * W));
+    BOOST_CHECK(attempt("9.9.9.9", t1 + 2 * W + 1s));
+    BOOST_CHECK(attempt("9.9.9.9", t1 + 3 * W));
+
+    // An address that connects only once per window never counts as recent,
+    // however long it keeps doing so: attempts age out with the window they
+    // were made in, they are not refreshed by later ones.
+    const auto t2{t1 + 10 * W};
+    for (int i = 0; i < 6; ++i) {
+        BOOST_CHECK(!attempt("8.8.8.8", t2 + i * W));
+    }
+
+    // Rotating late must not extend the lifetime of the entries it rotates:
+    // the last attempt of this address is at u0+1s, so by u0+25min it is more
+    // than two windows old, even though an unrelated address rotated the
+    // filters at u0+19min.
+    const auto u0{t2 + 10 * W};
+    BOOST_CHECK(!attempt("10.0.0.1", u0));
+    BOOST_CHECK(!attempt("10.0.0.1", u0 + 1s));
+    BOOST_CHECK(!attempt("10.0.0.2", u0 + W + W * 9 / 10)); // unrelated, u0+19min
+    BOOST_CHECK(!attempt("10.0.0.1", u0 + 2 * W + W / 2));  // u0+25min
+
+    // One attempt in a window must not carry a count of two forward. Here the
+    // attempts are v0, v0+1s, v0+11min and v0+22min; by the last one only the
+    // v0+11min attempt is still inside the window, so it is not yet recent.
+    const auto v0{u0 + 10 * W};
+    BOOST_CHECK(!attempt("10.0.1.1", v0));
+    BOOST_CHECK(!attempt("10.0.1.1", v0 + 1s));
+    BOOST_CHECK(attempt("10.0.1.1", v0 + W + W / 10));     // v0+11min
+    BOOST_CHECK(!attempt("10.0.1.1", v0 + 2 * W + W / 5)); // v0+22min
+}
+
 BOOST_AUTO_TEST_SUITE_END()

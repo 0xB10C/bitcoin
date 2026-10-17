@@ -82,6 +82,16 @@ inline constexpr bool DEFAULT_LISTEN = true;
 inline constexpr unsigned int DEFAULT_MAX_PEER_CONNECTIONS{200};
 /** Default percentage of inbound connection slots that tx-relaying peers can use */
 inline constexpr int DEFAULT_FULL_RELAY_INBOUND_PCT{50};
+/** Length of the window in which an inbound connection attempt counts as recent.
+ *  An address is remembered for between one and two windows after its last
+ *  attempt, see CConnman::RecordInboundAttempt(). */
+inline constexpr std::chrono::minutes INBOUND_RECONNECT_WINDOW{10};
+/** How many earlier inbound connection attempts an address must have made
+ *  within that time before a further attempt may no longer evict an existing
+ *  peer. Two, so that a single honest retry is never enough: the connecting
+ *  peer retries once with v1 when we closed its connection before it received
+ *  anything, and a restarting node reconnects once. */
+inline constexpr int INBOUND_RECONNECT_THRESHOLD{2};
 /** The default for -maxuploadtarget. 0 = Unlimited */
 inline const std::string DEFAULT_MAX_UPLOAD_TARGET{"0M"};
 /** Default for blocks only*/
@@ -1737,6 +1747,33 @@ private:
     int m_max_automatic_outbound;
     int m_max_inbound;
     int m_max_inbound_full_relay;
+
+    /** Addresses (IPv6: /48s) that made inbound connection attempts in the
+     *  current and the previous INBOUND_RECONNECT_WINDOW. Used to avoid
+     *  evicting an existing peer for an address that was here a moment ago.
+     *
+     *  The time bounds come from rotating the two filters on the wall clock:
+     *  an entry is never kept for more than two windows. The filters' own
+     *  expiry is by insert count, so an entry is only guaranteed to last one
+     *  full window while fewer than 5000 new entries (at most two per address)
+     *  are inserted per window. Beyond that the oldest entries are forgotten
+     *  early, which only means that an address is treated as new again, i.e.
+     *  the behaviour degrades towards not having this check at all. */
+    Mutex m_recent_inbound_mutex;
+    CRollingBloomFilter m_recent_inbound_cur GUARDED_BY(m_recent_inbound_mutex){5000, 0.000001};
+    CRollingBloomFilter m_recent_inbound_prev GUARDED_BY(m_recent_inbound_mutex){5000, 0.000001};
+    NodeClock::time_point m_recent_inbound_rotated GUARDED_BY(m_recent_inbound_mutex){};
+
+    /**
+     * Record an inbound connection attempt from an address.
+     * @param[in]   addr    The peer's address. IPv6 addresses are keyed by their /48.
+     * @param[in]   now     The current time.
+     * @return      bool    True if the same key already made at least
+     *                      INBOUND_RECONNECT_THRESHOLD attempts within the
+     *                      last one to two INBOUND_RECONNECT_WINDOWs, not
+     *                      counting this call.
+     */
+    bool RecordInboundAttempt(const CNetAddr& addr, NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(!m_recent_inbound_mutex);
 
     bool m_use_addrman_outgoing;
     CClientUIInterface* m_client_interface;
