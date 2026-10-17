@@ -1888,6 +1888,21 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
         return;
     }
 
+    // Remember the address and check whether it connected recently. Inbound
+    // Tor connections all come from the local Tor proxy, so skip them (same
+    // reasoning as for AddWhitelistPermissionFlags above) and local addresses
+    // in general. NoBan peers are never dropped by this check, so don't track
+    // them either.
+    const bool recent_reconnect{!inbound_onion &&
+                                (!addr.IsLocal() || m_reconnect_check_local) &&
+                                !NetPermissions::HasFlag(permission_flags, NetPermissionFlags::NoBan) &&
+                                RecordInboundAttempt(addr, NodeClock::now())};
+    if (recent_reconnect && nInbound >= m_max_inbound) {
+        LogDebug(BCLog::NET, "connection%s dropped (reconnected too soon, inbound slots full)\n",
+                 fLogIPs ? strprintf(" from %s", addr.ToStringAddrPort()) : "");
+        return;
+    }
+
     if (nInbound >= m_max_inbound)
     {
         if (!AttemptToEvictConnection(/*evict_tx_relay_peer_only=*/false)) {
@@ -1923,6 +1938,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                              CNodeOptions{
                                  .permission_flags = permission_flags,
                                  .prefer_evict = discouraged,
+                                 .recent_reconnect = recent_reconnect,
                                  .recv_flood_size = nReceiveFloodSize,
                                  .use_v2transport = use_v2transport,
                              });
@@ -4184,6 +4200,7 @@ CNode::CNode(NodeId idIn,
       m_dest(addrNameIn),
       m_inbound_onion{inbound_onion},
       m_prefer_evict{node_opts.prefer_evict},
+      m_recent_reconnect{node_opts.recent_reconnect},
       nKeyedNetGroup{nKeyedNetGroupIn},
       m_network_key{network_key},
       m_conn_type{conn_type_in},
