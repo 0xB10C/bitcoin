@@ -66,6 +66,8 @@ from test_framework.messages import (
     msg_sendaddrv2,
     msg_sendcmpct,
     msg_sendheaders,
+    msg_punch,
+    msg_rendezvous,
     msg_sendtxrcncl,
     msg_tx,
     MSG_TX,
@@ -149,6 +151,8 @@ MESSAGEMAP = {
     b"sendaddrv2": msg_sendaddrv2,
     b"sendcmpct": msg_sendcmpct,
     b"sendheaders": msg_sendheaders,
+    b"punch": msg_punch,
+    b"rendezvous": msg_rendezvous,
     b"sendtxrcncl": msg_sendtxrcncl,
     b"tx": msg_tx,
     b"verack": msg_verack,
@@ -566,6 +570,8 @@ class P2PInterface(P2PConnection):
     def on_merkleblock(self, message): pass
     def on_notfound(self, message): pass
     def on_pong(self, message): pass
+    def on_punch(self, message): pass
+    def on_rendezvous(self, message): pass
     def on_sendaddrv2(self, message): pass
     def on_sendcmpct(self, message): pass
     def on_sendheaders(self, message): pass

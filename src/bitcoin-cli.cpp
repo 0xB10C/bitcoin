@@ -456,6 +456,7 @@ private:
         if (conn_type == "manual" || conn_type == "feeler") return conn_type;
         if (conn_type == "addr-fetch") return "addr";
         if (conn_type == "private-broadcast") return "priv";
+        if (conn_type == "holepunch-coordination") return "punch";
         return "";
     }
     std::string FormatServices(const UniValue& services)
@@ -708,6 +709,7 @@ public:
         "           \"feeler\" - short-lived connection for testing addresses\n"
         "           \"addr\"   - address fetch; short-lived connection for requesting addresses\n"
         "           \"priv\"   - private broadcast; short-lived connection for broadcasting our transactions\n"
+        "           \"punch\"  - hole punch coordination; short-lived connection for arranging a hole-punched connection\n"
         "  net      Network the peer connected through (\"ipv4\", \"ipv6\", \"onion\", \"i2p\", \"cjdns\", or \"npr\" (not publicly routable))\n"
         "  serv     Services offered by the peer\n"
         "           \"n\" - NETWORK: peer can serve the full block chain\n"

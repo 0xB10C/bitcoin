@@ -66,6 +66,8 @@ struct CNodeStateStats {
     uint64_t m_addr_processed = 0;
     uint64_t m_addr_rate_limited = 0;
     bool m_addr_relay_enabled{false};
+    /** Hole punching capabilities the peer announced, if it sent the feature. */
+    std::optional<uint32_t> m_holepunch_caps;
     ServiceFlags their_services;
     int64_t presync_height{-1};
     std::chrono::seconds time_offset{0};
@@ -138,6 +140,13 @@ public:
 
     /** Get info about transactions currently being privately broadcast. */
     virtual std::vector<PrivateBroadcast::TxBroadcastInfo> GetPrivateBroadcastInfo() const = 0;
+
+    /**
+     * Send a hole punching rendezvous for `target` to the peer `coordinator` and
+     * expect its punch as the answer. For testing.
+     * @return the reason if nothing was sent.
+     */
+    virtual std::optional<std::string> HolePunchRendezvous(NodeId coordinator, const CService& target) = 0;
 
     /**
      * Abort private broadcast attempts for transactions currently being privately broadcast.

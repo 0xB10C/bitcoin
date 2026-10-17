@@ -299,6 +299,10 @@ void Interrupt(NodeContext& node)
     if (node.tor_controller) {
         node.tor_controller->Interrupt();
     }
+    if (node.holepunch_tor_controller) {
+        if (node.connman) node.connman->SetHolePunchRotateFn(nullptr);
+        node.holepunch_tor_controller->Interrupt();
+    }
     InterruptMapPort();
     if (node.connman)
         node.connman->Interrupt();
@@ -344,6 +348,10 @@ void Shutdown(NodeContext& node)
     if (node.tor_controller) {
         node.tor_controller->Join();
         node.tor_controller.reset();
+    }
+    if (node.holepunch_tor_controller) {
+        node.holepunch_tor_controller->Join();
+        node.holepunch_tor_controller.reset();
     }
 
     if (node.background_init_thread.joinable()) node.background_init_thread.join();
@@ -590,6 +598,10 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-i2pacceptincoming", strprintf("Whether to accept inbound I2P connections (default: %i). Ignored if -i2psam is not set. Listening for inbound I2P connections is done through the SAM proxy, not by binding to a local address and port.", DEFAULT_I2P_ACCEPT_INCOMING), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-onlynet=<net>", "Make automatic outbound connections only to network <net> (" + Join(GetNetworkNames(), ", ") + "). Inbound and manual connections are not affected by this option. It can be specified multiple times to allow multiple networks.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-v2transport", strprintf("Support v2 transport (default: %u)", DEFAULT_V2_TRANSPORT), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-holepunch", strprintf("EXPERIMENTAL: Connect to other nodes behind NATs by TCP hole punching and let them connect to this node. All outbound clearnet connections are then made from the punch port. Requires -v2transport (default: %u)", DEFAULT_HOLEPUNCH), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-holepunchport=<port>", "Local port used for hole punching: for all outbound clearnet connections and for accepting punched connections (default: a random port from the dynamic range, chosen at startup)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-holepunchcoordonion=<address>[,<address>...]", "Regtest only: use this onion address as the hole punch coordination service instead of creating one through Tor", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::DEBUG_TEST);
+    argsman.AddArg("-holepunchcoordbind=<addr>[:<port>]", "Address to accept hole punch coordination connections on. Other nodes reach it only through the hole punching onion service (default: 127.0.0.1 and the punch port plus 1)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-peerbloomfilters", strprintf("Support filtering of blocks and transaction with bloom filters (default: %u)", DEFAULT_PEERBLOOMFILTERS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-peerblockfilters", strprintf("Serve compact block filters to peers per BIP 157 (default: %u)", DEFAULT_PEERBLOCKFILTERS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-txreconciliation", strprintf("Enable transaction reconciliations per BIP 330 (default: %d)", DEFAULT_TXRECONCILIATION_ENABLE), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CONNECTION);
@@ -1384,6 +1396,10 @@ static std::optional<CService> CheckBindingConflicts(const CConnman::Options& co
         if (!seen.insert(onion_bind).second) {
             return onion_bind;
         }
+    }
+
+    if (conn_options.m_holepunch.coordination_bind && !seen.insert(*conn_options.m_holepunch.coordination_bind).second) {
+        return conn_options.m_holepunch.coordination_bind;
     }
 
     return std::nullopt;
@@ -2309,6 +2325,26 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                                   onion_service_target.ToStringAddrPort()));
         }
         node.tor_controller = std::make_unique<TorController>(gArgs.GetArg("-torcontrol", DEFAULT_TOR_CONTROL), onion_service_target);
+
+        if (connOptions.m_holepunch.enabled && connOptions.m_holepunch.coordination_bind && connOptions.m_holepunch.coordination_services.empty()) {
+            // The service through which hole punches to this node are coordinated: a key
+            // used for nothing else and never kept, not advertised to peers, and
+            // terminated on the coordination bind so that connections through it are
+            // recognised as coordination connections.
+            node.holepunch_tor_controller = std::make_unique<TorController>(
+                gArgs.GetArg("-torcontrol", DEFAULT_TOR_CONTROL),
+                *connOptions.m_holepunch.coordination_bind,
+                TorServiceOptions{
+                    .ephemeral = true,
+                    .advertise = false,
+                    // Announced only once reachable, replaced on address change and
+                    // daily, the old one kept for those who were told about it (R-12.1).
+                    .wait_for_descriptor = true,
+                    .keep_previous = std::chrono::duration_cast<std::chrono::seconds>(holepunch::ONION_RETIRE),
+                    .on_service = [connman = node.connman.get()](const CService& service) { connman->SetHolePunchCoordinationService(service); },
+                });
+            node.connman->SetHolePunchRotateFn([controller = node.holepunch_tor_controller.get()] { controller->Rotate(); });
+        }
     }
 
     bool should_discover = connOptions.bind_on_any;
@@ -2387,10 +2423,54 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
 
     connOptions.m_i2p_accept_incoming = args.GetBoolArg("-i2pacceptincoming", DEFAULT_I2P_ACCEPT_INCOMING);
 
+    connOptions.m_holepunch.enabled = args.GetBoolArg("-holepunch", DEFAULT_HOLEPUNCH);
+    if (connOptions.m_holepunch.enabled) {
+        if (!(g_local_services & NODE_P2P_V2)) {
+            return InitError(_("-holepunch requires -v2transport"));
+        }
+        int64_t punch_port{0};
+        if (args.IsArgSet("-holepunchport")) {
+            punch_port = args.GetIntArg("-holepunchport", 0);
+            if (punch_port < 1 || punch_port > 65535) {
+                return InitError(strprintf(_("Invalid port specified in %s: '%s'"), "-holepunchport", args.GetArg("-holepunchport", "")));
+            }
+            if (IsBadPort(static_cast<uint16_t>(punch_port))) {
+                return InitError(strprintf(_("Port %d in %s is one other nodes refuse to connect to, choose another"), punch_port, "-holepunchport"));
+            }
+        } else {
+            // A random port, fixed for this run: nothing depends on its number, and a
+            // well-known one would mark our connections to observers (BIP footnote).
+            FastRandomContext rng;
+            const auto picked{holepunch::PickRandomPunchPort(rng)};
+            if (!picked) return InitError(_("No free port for hole punching was found, set -holepunchport"));
+            punch_port = *picked;
+        }
+        connOptions.m_holepunch.port = static_cast<uint16_t>(punch_port);
+        connOptions.m_holepunch.allow_local = chainparams.GetChainType() == ChainType::REGTEST;
+        const uint16_t coord_port{static_cast<uint16_t>(punch_port + 1)};
+        if (args.IsArgSet("-holepunchcoordbind")) {
+            const std::string bind_arg{args.GetArg("-holepunchcoordbind", "")};
+            connOptions.m_holepunch.coordination_bind = Lookup(bind_arg, coord_port, /*fAllowLookup=*/false);
+            if (!connOptions.m_holepunch.coordination_bind) return InitError(ResolveErrMsg("holepunchcoordbind", bind_arg));
+        } else {
+            connOptions.m_holepunch.coordination_bind = DefaultOnionServiceTarget(coord_port);
+        }
+        LogInfo("Hole punching enabled, punch port %d, coordination bind %s", connOptions.m_holepunch.port, connOptions.m_holepunch.coordination_bind->ToStringAddrPort());
+        if (args.IsArgSet("-holepunchcoordonion")) {
+            if (!connOptions.m_holepunch.allow_local) return InitError(Untranslated("-holepunchcoordonion is for regtest only"));
+            for (const std::string& addr : util::SplitString(args.GetArg("-holepunchcoordonion", ""), ',')) {
+                const auto service{Lookup(addr, Params().GetDefaultPort(), /*fAllowLookup=*/false)};
+                if (!service || !service->IsTor()) return InitError(Untranslated("-holepunchcoordonion must be an onion address"));
+                connOptions.m_holepunch.coordination_services.push_back(*service);
+            }
+            LogInfo("Hole punch coordination service is %s (-holepunchcoordonion)", connOptions.m_holepunch.coordination_services.front().ToStringAddrPort());
+        }
+    }
+
     if (auto conflict = CheckBindingConflicts(connOptions)) {
         return InitError(strprintf(
             _("Duplicate binding configuration for address %s. "
-                "Please check your -bind, -bind=...=onion and -whitebind settings."),
+                "Please check your -bind, -bind=...=onion, -whitebind and -holepunchcoordbind settings."),
                     conflict->ToStringAddrPort()));
     }
 

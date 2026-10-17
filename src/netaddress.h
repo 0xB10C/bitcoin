@@ -15,6 +15,8 @@
 #include <util/string.h>
 
 #include <array>
+#include <span>
+#include <optional>
 #include <cstdint>
 #include <ios>
 #include <string>
@@ -52,6 +54,12 @@ enum Network {
     /// A set of addresses that represent the hash of a string or FQDN. We use
     /// them in AddrMan to keep track of which DNS seeds were used.
     NET_INTERNAL,
+
+    /// TCP hole punching announcement (draft BIP, BIP 155 network id 8): a
+    /// node reachable by hole punching, given as the coordinator's address and
+    /// port plus the node's own address; the port of the element is the node's
+    /// port. Such addresses are relayed but never connected to or stored.
+    NET_HOLEPUNCH,
 
     /// Dummy value to indicate the number of NET_* constants.
     NET_MAX,
@@ -101,6 +109,11 @@ inline constexpr size_t ADDR_CJDNS_SIZE = 16;
 /// Size of "internal" (NET_INTERNAL) address (in bytes).
 inline constexpr size_t ADDR_INTERNAL_SIZE = 10;
 
+/// Possible sizes of a HOLEPUNCH address (in bytes): coordinator network id
+/// (1), coordinator address (4, 16 or 32), coordinator port (2), target
+/// network id (1) and target address (4 or 16).
+inline constexpr std::array<size_t, 5> ADDR_HOLEPUNCH_SIZES{12, 24, 36, 40, 52};
+
 /// SAM 3.1 and earlier do not support specifying ports and force the port to 0.
 inline constexpr uint16_t I2P_SAM31_PORT{0};
 
@@ -109,6 +122,8 @@ std::string OnionToString(std::span<const uint8_t> addr);
 /**
  * Network address.
  */
+class CService;
+
 class CNetAddr
 {
 protected:
@@ -181,6 +196,20 @@ public:
     bool IsRoutable() const;
     bool IsInternal() const;
     bool IsValid() const;
+    [[nodiscard]] bool IsHolePunch() const { return m_net == NET_HOLEPUNCH; }
+
+    /**
+     * Build a hole punching announcement address: `target` is the announced
+     * node's address and `coordinator` the coordinator's endpoint (IPv4, IPv6,
+     * Tor or I2P; I2P with port 0). Empty if the networks are not allowed.
+     */
+    static std::optional<CNetAddr> MakeHolePunch(const CService& coordinator, const CNetAddr& target);
+    /** The coordinator's endpoint of a HOLEPUNCH address, if it is well formed. */
+    std::optional<CService> HolePunchCoordinator() const;
+    /** The announced node's address (without port) of a HOLEPUNCH address, if it is well formed. */
+    std::optional<CNetAddr> HolePunchTarget() const;
+    /** An address from its BIP 155 network id and raw bytes (IPv4, IPv6, Tor v3 or I2P only). */
+    static std::optional<CNetAddr> FromBIP155Bytes(uint8_t bip155_net, std::span<const uint8_t> bytes);
 
     /**
      * Whether this object is a privacy network.
@@ -218,7 +247,7 @@ public:
      */
     bool IsRelayable() const
     {
-        return IsIPv4() || IsIPv6() || IsTor() || IsI2P() || IsCJDNS();
+        return IsIPv4() || IsIPv6() || IsTor() || IsI2P() || IsCJDNS() || IsHolePunch();
     }
 
     enum class Encoding {
@@ -268,6 +297,7 @@ public:
         TORV3 = 4,
         I2P = 5,
         CJDNS = 6,
+        HOLEPUNCH = 8,
     };
 
     friend class CSubNet;
@@ -345,6 +375,7 @@ private:
             return;
         case NET_ONION:
         case NET_I2P:
+        case NET_HOLEPUNCH:
         case NET_CJDNS:
             break;
         case NET_UNROUTABLE:

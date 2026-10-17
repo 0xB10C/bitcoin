@@ -1735,4 +1735,28 @@ BOOST_AUTO_TEST_CASE(addlocal_onlynet_externalip)
     fDiscover = discover_orig;
 }
 
+BOOST_AUTO_TEST_CASE(holepunch_outbound_peer_in_group)
+{
+    ConnmanTestMsg connman{0x1337, 0x1337, *m_node.addrman, *m_node.netgroupman, Params()};
+    const CService coordinator{LookupNumeric("1.2.3.4", 8333)};
+    connman.AddTestNode(*new CNode{/*id=*/0,
+                                   /*sock=*/nullptr,
+                                   CAddress{coordinator, NODE_NONE},
+                                   /*nKeyedNetGroupIn=*/0,
+                                   /*nLocalHostNonceIn=*/0,
+                                   CAddress(),
+                                   /*addrNameIn=*/"",
+                                   ConnectionType::OUTBOUND_FULL_RELAY,
+                                   /*inbound_onion=*/false,
+                                   /*network_key=*/0});
+    const CNetAddr same_group{LookupNumeric("1.2.9.9", 8333)};
+    BOOST_CHECK(connman.HasOutboundPeerInGroup(same_group));
+    BOOST_CHECK(!connman.HasOutboundPeerInGroup(LookupNumeric("5.6.7.8", 8333)));
+    // The connection to the coordinator itself does not count, but only at exactly that endpoint.
+    BOOST_CHECK(!connman.HasOutboundPeerInGroup(same_group, coordinator));
+    BOOST_CHECK(!connman.HasOutboundPeerInGroup(coordinator, coordinator));
+    BOOST_CHECK(connman.HasOutboundPeerInGroup(same_group, LookupNumeric("1.2.3.4", 8334)));
+    connman.ClearTestNodes();
+}
+
 BOOST_AUTO_TEST_SUITE_END()

@@ -369,7 +369,7 @@ bool CConnman::CheckIncomingNonce(uint64_t nonce)
         // - Upon a disconnect, the peer knows our clearnet address. They go back to the short
         //   lived privacy broadcast connection and continue with VERACK.
         if (!pnode->fSuccessfullyConnected && !pnode->IsInboundConn() && !pnode->IsPrivateBroadcastConn() &&
-            pnode->GetLocalNonce() == nonce)
+            !pnode->IsHolePunchCoordConn() && pnode->GetLocalNonce() == nonce)
             return false;
     }
     return true;
@@ -459,7 +459,7 @@ CNode* CConnman::ConnectNode(CAddress addrConnect,
                 // If an I2P SAM session already exists, normally we would re-use it. But in the case of
                 // private broadcast we force a new transient session. A Connect() using m_i2p_sam_session
                 // would use our permanent I2P address as a source address.
-                if (m_i2p_sam_session && conn_type != ConnectionType::PRIVATE_BROADCAST) {
+                if (m_i2p_sam_session && conn_type != ConnectionType::PRIVATE_BROADCAST && conn_type != ConnectionType::HOLEPUNCH_COORD) {
                     connected = m_i2p_sam_session->Connect(target_addr, conn, proxyConnectionFailed);
                 } else {
                     {
@@ -492,7 +492,19 @@ CNode* CConnman::ConnectNode(CAddress addrConnect,
                 // No proxy needed (none set for target network). Private broadcast connections
                 // must always use a proxy, otherwise they would leak the originator's IP address.
                 if (Assume(conn_type != ConnectionType::PRIVATE_BROADCAST)) {
-                    sock = ConnectDirectly(target_addr, conn_type == ConnectionType::MANUAL);
+                    // With hole punching enabled, every clearnet outbound connection is made from
+                    // the punch port, so that every peer reports our NAT-mapped address and port
+                    // and the mapping stays alive (R-1.1).
+                    const auto bind_addr{HolePunchBindAddress(target_addr)};
+                    sock = ConnectDirectly(target_addr, conn_type == ConnectionType::MANUAL, std::chrono::milliseconds{nConnectTimeout}, bind_addr);
+                    if (sock && bind_addr) {
+                        const uint16_t local_port{GetBindAddress(*sock).GetPort()};
+                        if (local_port == bind_addr->GetPort()) {
+                            LogDebug(BCLog::HOLEPUNCH, "connected to %s from punch port %d\n", target_addr.ToStringAddrPort(), local_port);
+                        } else {
+                            LogDebug(BCLog::HOLEPUNCH, "connected to %s from ephemeral port %d, punch port %d was not usable\n", target_addr.ToStringAddrPort(), local_port, bind_addr->GetPort());
+                        }
+                    }
                 }
             }
             if (!proxyConnectionFailed) {
@@ -637,6 +649,7 @@ void CNode::CopyStats(CNodeStats& stats)
         X(cleanSubVer);
     }
     stats.fInbound = IsInboundConn();
+    stats.m_hole_punched = m_hole_punched;
     X(m_bip152_highbandwidth_to);
     X(m_bip152_highbandwidth_from);
     {
@@ -1779,16 +1792,21 @@ void CConnman::AcceptConnection(const ListenSocket& hListenSocket) {
     CreateNodeFromAcceptedSocket(std::move(sock), permission_flags, addr_bind, addr);
 }
 
-void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
+void CConnman::CreateNodeFromAcceptedSocket(std::shared_ptr<Sock> sock,
                                             NetPermissionFlags permission_flags,
                                             const CService& addr_bind,
-                                            const CService& addr)
+                                            const CService& addr,
+                                            bool hole_punched,
+                                            NodeClock::time_point holepunch_deadline)
 {
     AssertLockNotHeld(m_nodes_mutex);
 
     int nInbound = 0;
+    size_t n_coordination{0};
 
-    const bool inbound_onion = std::find(m_onion_binds.begin(), m_onion_binds.end(), addr_bind) != m_onion_binds.end();
+    // The coordination bind is reached only through the hole punching onion service (R-12.1).
+    const bool coordination{m_holepunch_opts.enabled && m_holepunch_opts.coordination_bind == addr_bind};
+    const bool inbound_onion = coordination || std::find(m_onion_binds.begin(), m_onion_binds.end(), addr_bind) != m_onion_binds.end();
 
     // Tor inbound connections do not reveal the peer's actual network address.
     // Therefore do not apply address-based whitelist permissions to them.
@@ -1797,7 +1815,13 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
     {
         LOCK(m_nodes_mutex);
         for (const CNode* pnode : m_nodes) {
-            if (pnode->IsInboundConn()) nInbound++;
+            if (!pnode->IsInboundConn()) continue;
+            // Coordination connections have their own limit and take no inbound slot (R-12.2).
+            if (pnode->IsHolePunchCoordConn()) {
+                ++n_coordination;
+            } else {
+                nInbound++;
+            }
         }
     }
 
@@ -1829,18 +1853,25 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
 
     // Only accept connections from discouraged peers if our inbound slots aren't (almost) full.
     bool discouraged = m_banman && m_banman->IsDiscouraged(addr);
-    if (!NetPermissions::HasFlag(permission_flags, NetPermissionFlags::NoBan) && nInbound + 1 >= m_max_inbound && discouraged)
-    {
-        LogDebug(BCLog::NET, "connection from %s dropped (discouraged)\n", addr.ToStringAddrPort());
-        return;
-    }
-
-    if (nInbound >= m_max_inbound)
-    {
-        if (!AttemptToEvictConnection(/*evict_tx_relay_peer_only=*/false)) {
-            // No connection to evict, disconnect the new connection
-            LogDebug(BCLog::NET, "failed to find an eviction candidate - connection dropped (full)\n");
+    if (coordination) {
+        if (n_coordination >= holepunch::COORD_INBOUND_MAX) {
+            LogDebug(BCLog::HOLEPUNCH, "coordination connection dropped: %d are open already\n", n_coordination);
             return;
+        }
+    } else {
+        if (!NetPermissions::HasFlag(permission_flags, NetPermissionFlags::NoBan) && nInbound + 1 >= m_max_inbound && discouraged)
+        {
+            LogDebug(BCLog::NET, "connection from %s dropped (discouraged)\n", addr.ToStringAddrPort());
+            return;
+        }
+
+        if (nInbound >= m_max_inbound)
+        {
+            if (!AttemptToEvictConnection(/*evict_tx_relay_peer_only=*/false)) {
+                // No connection to evict, disconnect the new connection
+                LogDebug(BCLog::NET, "failed to find an eviction candidate - connection dropped (full)\n");
+                return;
+            }
         }
     }
 
@@ -1864,7 +1895,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                              nonce,
                              addr_bind,
                              /*addrNameIn=*/"",
-                             ConnectionType::INBOUND,
+                             coordination ? ConnectionType::HOLEPUNCH_COORD : ConnectionType::INBOUND,
                              inbound_onion,
                              network_id,
                              CNodeOptions{
@@ -1872,6 +1903,9 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                                  .prefer_evict = discouraged,
                                  .recv_flood_size = nReceiveFloodSize,
                                  .use_v2transport = use_v2transport,
+                                 .hole_punched = hole_punched,
+                                 .holepunch_deadline = holepunch_deadline,
+                                 .accepted = coordination,
                              });
     pnode->AddRef();
     m_msgproc->InitializeNode(*pnode, local_services);
@@ -1879,7 +1913,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
         LOCK(m_nodes_mutex);
         m_nodes.push_back(pnode);
     }
-    LogDebug(BCLog::NET, "connection from %s accepted\n", addr.ToStringAddrPort());
+    LogDebug(BCLog::NET, "%sconnection from %s accepted\n", coordination ? "coordination " : hole_punched ? "hole-punched " : "", addr.ToStringAddrPort());
     TRACEPOINT(net, inbound_connection,
         pnode->GetId(),
         pnode->m_addr_name.c_str(),
@@ -1903,6 +1937,9 @@ bool CConnman::AddConnection(const std::string& address, ConnectionType conn_typ
     // no separate per-type limit for MANUAL because semAddnode limits them
     case ConnectionType::MANUAL:
         break;
+    // no limit for HOLEPUNCH_COORD: short-lived, and the connector opens at most one per attempt interval
+    case ConnectionType::HOLEPUNCH_COORD:
+        break;
     case ConnectionType::OUTBOUND_FULL_RELAY:
         max_connections = m_max_outbound_full_relay;
         break;
@@ -1925,8 +1962,11 @@ bool CConnman::AddConnection(const std::string& address, ConnectionType conn_typ
     if (max_connections != std::nullopt && existing_connections >= max_connections) return false;
 
     // Max total automatic outbound or manual connections already exist
-    CountingSemaphoreGrant<> grant(conn_type == ConnectionType::MANUAL ? *semAddnode : *semOutbound, true);
-    if (!grant) return false;
+    CountingSemaphoreGrant<> grant;
+    if (conn_type != ConnectionType::HOLEPUNCH_COORD) {
+        grant = CountingSemaphoreGrant<>(conn_type == ConnectionType::MANUAL ? *semAddnode : *semOutbound, true);
+        if (!grant) return false;
+    }
 
     OpenNetworkConnection(/*addrConnect=*/CAddress{},
                           /*fCountFailure=*/false,
@@ -1973,7 +2013,8 @@ void CConnman::DisconnectNodes()
                 // Add to reconnection list if appropriate. We don't reconnect right here, because
                 // the creation of a connection is a blocking operation (up to several seconds),
                 // and we don't want to hold up the socket handler thread for that long.
-                if (network_active && pnode->m_transport->ShouldReconnectV1()) {
+                // A punched connection cannot be remade by a plain reconnect, and it is v2 only anyway.
+                if (network_active && !pnode->m_hole_punched && pnode->m_transport->ShouldReconnectV1()) {
                     reconnections_to_add.push_back({
                         .proxy_override = pnode->m_proxy_override,
                         .addr_connect = pnode->addr,
@@ -2494,7 +2535,7 @@ int CConnman::GetFullOutboundConnCount() const
     {
         LOCK(m_nodes_mutex);
         for (const CNode* pnode : m_nodes) {
-            if (pnode->fSuccessfullyConnected && pnode->IsFullOutboundConn()) ++nRelevant;
+            if (pnode->fSuccessfullyConnected && pnode->IsFullOutboundConn() && !pnode->m_hole_punched) ++nRelevant;
         }
     }
     return nRelevant;
@@ -2560,7 +2601,7 @@ std::unordered_set<Network> CConnman::GetReachableEmptyNetworks() const
     std::unordered_set<Network> networks{};
     for (int n = 0; n < NET_MAX; n++) {
         enum Network net = (enum Network)n;
-        if (net == NET_UNROUTABLE || net == NET_INTERNAL) continue;
+        if (net == NET_UNROUTABLE || net == NET_INTERNAL || net == NET_HOLEPUNCH) continue;
         if (g_reachable_nets.Contains(net) && addrman.get().Size(net, std::nullopt) == 0) {
             networks.insert(net);
         }
@@ -2730,6 +2771,8 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
         {
             LOCK(m_nodes_mutex);
             for (const CNode* pnode : m_nodes) {
+                // A hole-punched outbound has its own slot and does not count here (R-8.1).
+                if (pnode->m_hole_punched) continue;
                 if (pnode->IsFullOutboundConn()) nOutboundFullRelay++;
                 if (pnode->IsBlockOnlyConn()) nOutboundBlockRelay++;
 
@@ -2744,6 +2787,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
                     case ConnectionType::ADDR_FETCH:
                     case ConnectionType::FEELER:
                     case ConnectionType::PRIVATE_BROADCAST:
+                    case ConnectionType::HOLEPUNCH_COORD:
                         break;
                     case ConnectionType::MANUAL:
                     case ConnectionType::OUTBOUND_FULL_RELAY:
@@ -3125,7 +3169,13 @@ bool CConnman::OpenNetworkConnection(const CAddress& addrConnect,
     }
     if (!pszDest) {
         bool banned_or_discouraged = m_banman && (m_banman->IsDiscouraged(addrConnect) || m_banman->IsBanned(addrConnect));
-        if (IsLocal(addrConnect) || banned_or_discouraged || AlreadyConnectedToAddress(addrConnect)) {
+        if (IsLocal(addrConnect) || banned_or_discouraged) {
+            return false;
+        }
+        // A coordinator may share its address with a peer we have, for example behind one
+        // NAT; the coordination connection is short-lived, so only an identical endpoint
+        // counts as already connected (checked in ConnectNode).
+        if (conn_type != ConnectionType::HOLEPUNCH_COORD && AlreadyConnectedToAddress(addrConnect)) {
             return false;
         }
     } else if (AlreadyConnectedToHost(pszDest)) {
@@ -3383,6 +3433,142 @@ void CConnman::ThreadPrivateBroadcast()
     }
 }
 
+void CConnman::HolePunchOpenCoordination(const CService& coordinator)
+{
+    LOCK(m_holepunch_coord_mutex);
+    m_holepunch_coord_queue.push_back(coordinator);
+}
+
+void CConnman::SetHolePunchCoordinationService(const CService& service)
+{
+    LOCK(m_holepunch_coord_mutex);
+    // A new identity starts over: nothing announced with it yet.
+    m_holepunch_coord_since = {};
+    m_holepunch_coord_external.clear();
+    m_holepunch_coord_rotating = false;
+    if (service.IsValid()) {
+        m_holepunch_coord_service = service;
+        LogInfo("Hole punch coordination service is %s", service.ToStringAddrPort());
+    } else {
+        m_holepunch_coord_service.reset();
+        LogInfo("Hole punch coordination service is gone");
+    }
+}
+
+std::optional<CService> CConnman::GetHolePunchCoordinationService() const
+{
+    LOCK(m_holepunch_coord_mutex);
+    if (m_holepunch_coord_rotating) return std::nullopt;
+    return m_holepunch_coord_service;
+}
+
+std::optional<CConnman::HolePunchServiceInfo> CConnman::GetHolePunchCoordinationServiceInfo() const
+{
+    LOCK(m_holepunch_coord_mutex);
+    if (!m_holepunch_coord_service) return std::nullopt;
+    return HolePunchServiceInfo{
+        .service = *m_holepunch_coord_service,
+        .since = m_holepunch_coord_since,
+        .rotate_at = m_holepunch_coord_since == NodeClock::time_point{} ? NodeClock::time_point{} : m_holepunch_coord_since + m_holepunch_coord_lifetime,
+        .rotating = m_holepunch_coord_rotating,
+    };
+}
+
+void CConnman::SetHolePunchRotateFn(std::function<void()> fn)
+{
+    LOCK(m_holepunch_coord_mutex);
+    m_holepunch_rotate = std::move(fn);
+}
+
+std::optional<CService> CConnman::HolePunchCoordinationServiceFor(Network net, const CService& external)
+{
+    std::string reason;
+    {
+        LOCK(m_holepunch_coord_mutex);
+        if (!m_holepunch_coord_service || m_holepunch_coord_rotating) return std::nullopt;
+        const auto now{NodeClock::now()};
+        if (m_holepunch_coord_since == NodeClock::time_point{}) {
+            // First announcement: the identity lives up to a day, less a random part so
+            // that nodes do not all rotate at the same time (R-12.1).
+            m_holepunch_coord_since = now;
+            m_holepunch_coord_lifetime = std::chrono::duration_cast<std::chrono::seconds>(holepunch::ONION_MAX_LIFETIME) - std::chrono::seconds{m_holepunch_rng.randrange(2 * 60 * 60)};
+        }
+        if (const auto it{m_holepunch_coord_external.find(net)}; it == m_holepunch_coord_external.end()) {
+            m_holepunch_coord_external.emplace(net, external);
+        } else if (it->second != external) {
+            // Never announce a new address under an identity seen with an old one (R-12.1).
+            reason = strprintf("external address for %s changed from %s to %s", GetNetworkName(net), it->second.ToStringAddrPort(), external.ToStringAddrPort());
+        }
+        if (reason.empty() && now - m_holepunch_coord_since > m_holepunch_coord_lifetime) {
+            reason = strprintf("it has been announced for %d hours", Ticks<std::chrono::hours>(now - m_holepunch_coord_since));
+        }
+        if (reason.empty()) return m_holepunch_coord_service;
+        m_holepunch_coord_rotating = true;
+        LogInfo("Replacing the hole punch coordination service %s: %s", m_holepunch_coord_service->ToStringAddrPort(), reason);
+    }
+    HolePunchRotateService();
+    return std::nullopt;
+}
+
+void CConnman::HolePunchRotateService()
+{
+    std::function<void()> rotate;
+    {
+        LOCK(m_holepunch_coord_mutex);
+        rotate = m_holepunch_rotate;
+    }
+    if (rotate) {
+        rotate();
+        return;
+    }
+    // No Tor: the next regtest stand-in, if any, is "up" at once.
+    CService next;
+    {
+        LOCK(m_holepunch_coord_mutex);
+        if (m_holepunch_coord_standins_used < m_holepunch_opts.coordination_services.size()) {
+            next = m_holepunch_opts.coordination_services[m_holepunch_coord_standins_used++];
+        }
+    }
+    SetHolePunchCoordinationService(next);
+}
+
+void CConnman::ThreadHolePunchCoordination()
+{
+    AssertLockNotHeld(m_nodes_mutex);
+    AssertLockNotHeld(m_unused_i2p_sessions_mutex);
+
+    while (!m_interrupt_net->interrupted()) {
+        std::optional<CService> coordinator;
+        {
+            LOCK(m_holepunch_coord_mutex);
+            if (!m_holepunch_coord_queue.empty()) {
+                coordinator = m_holepunch_coord_queue.front();
+                m_holepunch_coord_queue.pop_front();
+            }
+        }
+        if (!coordinator) {
+            if (!m_interrupt_net->sleep_for(500ms)) break;
+            continue;
+        }
+        if (!fNetworkActive) continue;
+        // A clearnet coordinator is reached directly, from the punch port, so that it
+        // observes our external address; an onion one through the onion proxy.
+        if (OpenNetworkConnection(CAddress{*coordinator, NODE_NONE},
+                                  /*fCountFailure=*/false,
+                                  CountingSemaphoreGrant<>{},
+                                  /*pszDest=*/nullptr,
+                                  ConnectionType::HOLEPUNCH_COORD,
+                                  /*use_v2transport=*/true,
+                                  /*proxy_override=*/std::nullopt)) {
+            ++m_holepunch_counters.coordination_opened;
+            LogDebug(BCLog::HOLEPUNCH, "opened a coordination connection to %s\n", coordinator->ToStringAddrPort());
+        } else {
+            ++m_holepunch_counters.coordination_failed;
+            LogDebug(BCLog::HOLEPUNCH, "could not open a coordination connection to %s\n", coordinator->ToStringAddrPort());
+        }
+    }
+}
+
 bool CConnman::BindListenPort(const CService& addrBind, bilingual_str& strError, NetPermissionFlags permissions)
 {
     int nOne = 1;
@@ -3567,6 +3753,11 @@ bool CConnman::InitBinds(const Options& options)
             return false;
         }
     }
+    if (options.m_holepunch.enabled && options.m_holepunch.coordination_bind) {
+        if (!Bind(*options.m_holepunch.coordination_bind, BF_REPORT_ERROR | BF_DONT_ADVERTISE, NetPermissionFlags::None)) {
+            return false;
+        }
+    }
     if (options.bind_on_any) {
         // Don't consider errors to bind on IPv6 "::" fatal because the host OS
         // may not have IPv6 support and the user did not explicitly ask us to
@@ -3688,6 +3879,20 @@ bool CConnman::Start(CScheduler& scheduler, const Options& connOptions)
             std::thread(&util::TraceThread, "privbcast", [this] { ThreadPrivateBroadcast(); });
     }
 
+    if (m_holepunch_opts.enabled) {
+        m_holepunch_sessions = std::make_unique<holepunch::SessionManager>(
+            m_holepunch_opts,
+            [this](const CService& peer, holepunch::Role role, std::shared_ptr<Sock> sock, NodeClock::time_point deadline) {
+                OnHolePunchResult(peer, role, std::move(sock), deadline);
+            },
+            &m_holepunch_counters);
+        if (!m_holepunch_sessions->Start()) {
+            LogWarning("Hole punching: sessions disabled, the punch port %d could not be opened", m_holepunch_opts.port);
+            m_holepunch_sessions.reset();
+        }
+        threadHolePunchCoordination = std::thread(&util::TraceThread, "hpcoord", [this] { ThreadHolePunchCoordination(); });
+    }
+
     // Dump network addresses
     scheduler.scheduleEvery([this] { DumpAddresses(); }, DUMP_PEERS_INTERVAL);
 
@@ -3744,6 +3949,12 @@ void CConnman::Interrupt()
 
 void CConnman::StopThreads()
 {
+    if (m_holepunch_sessions) {
+        m_holepunch_sessions->Stop();
+    }
+    if (threadHolePunchCoordination.joinable()) {
+        threadHolePunchCoordination.join();
+    }
     if (threadPrivateBroadcast.joinable()) {
         threadPrivateBroadcast.join();
     }
@@ -3818,6 +4029,193 @@ CConnman::~CConnman()
 {
     Interrupt();
     Stop();
+}
+
+void CConnman::CreateNodeFromPunchedSocket(std::shared_ptr<Sock> sock, const CService& peer, NodeClock::time_point deadline)
+{
+    AssertLockNotHeld(m_nodes_mutex);
+    if (!fNetworkActive || m_interrupt_net->interrupted()) return;
+    if (m_banman && (m_banman->IsBanned(peer) || m_banman->IsDiscouraged(peer))) {
+        LogDebug(BCLog::HOLEPUNCH, "dropping punched connection to %s: banned or discouraged\n", peer.ToStringAddrPort());
+        return;
+    }
+    if (GetHolePunchOutboundCount() >= holepunch::HP_OUTBOUND_MAX) {
+        LogDebug(BCLog::HOLEPUNCH, "dropping punched connection to %s: hole punch slot is taken\n", peer.ToStringAddrPort());
+        return;
+    }
+
+    const NodeId id{GetNewNodeId()};
+    const uint64_t nonce{GetDeterministicRandomizer(RANDOMIZER_ID_LOCALHOSTNONCE).Write(id).Finalize()};
+    const CService addr_bind{GetBindAddress(*sock)};
+    const uint64_t network_id{GetDeterministicRandomizer(RANDOMIZER_ID_NETWORKKEY)
+                                  .Write(peer.GetNetClass())
+                                  .Write(addr_bind.GetAddrBytes())
+                                  .Write(0)
+                                  .Finalize()};
+    CNode* pnode = new CNode(id,
+                             std::move(sock),
+                             CAddress{peer, NODE_NONE},
+                             CalculateKeyedNetGroup(peer),
+                             nonce,
+                             addr_bind,
+                             /*addrNameIn=*/"",
+                             ConnectionType::OUTBOUND_FULL_RELAY,
+                             /*inbound_onion=*/false,
+                             network_id,
+                             CNodeOptions{
+                                 .recv_flood_size = nReceiveFloodSize,
+                                 .use_v2transport = true, // punched connections use the v2 transport only (R-5.9)
+                                 .hole_punched = true,
+                                 .holepunch_deadline = deadline,
+                             });
+    pnode->AddRef();
+    m_msgproc->InitializeNode(*pnode, m_local_services);
+    {
+        LOCK(m_nodes_mutex);
+        m_nodes.push_back(pnode);
+    }
+    LogDebug(BCLog::HOLEPUNCH, "hole-punched outbound connection to %s, peer=%d\n", peer.ToStringAddrPort(), id);
+    TRACEPOINT(net, outbound_connection,
+        pnode->GetId(),
+        pnode->m_addr_name.c_str(),
+        pnode->ConnectionTypeAsString().c_str(),
+        pnode->ConnectedThroughNetwork(),
+        GetNodeCount(ConnectionDirection::Out));
+}
+
+void CConnman::OnHolePunchResult(const CService& peer, holepunch::Role role, std::shared_ptr<Sock> sock, NodeClock::time_point deadline)
+{
+    if (!sock) {
+        LogDebug(BCLog::HOLEPUNCH, "punch with %s failed\n", peer.ToStringAddrPort());
+        return;
+    }
+    if (role == holepunch::Role::INITIATOR) {
+        CreateNodeFromPunchedSocket(std::move(sock), peer, deadline);
+    } else {
+        const CService addr_bind{GetBindAddress(*sock)};
+        CreateNodeFromAcceptedSocket(std::move(sock), NetPermissionFlags::None, addr_bind, peer, /*hole_punched=*/true, deadline);
+    }
+}
+
+std::optional<std::string> CConnman::HolePunch(holepunch::Role role, const CService& peer)
+{
+    if (!m_holepunch_sessions) return "hole punching is not running";
+    return m_holepunch_sessions->Punch(role, peer);
+}
+
+bool CConnman::HasHolePunchSession(const CService& peer) const
+{
+    return m_holepunch_sessions && m_holepunch_sessions->HasSession(peer);
+}
+
+void CConnman::HolePunchCancel(const CService& peer)
+{
+    if (m_holepunch_sessions) m_holepunch_sessions->Cancel(peer);
+}
+
+std::vector<holepunch::SessionManager::SessionInfo> CConnman::GetHolePunchSessions() const
+{
+    if (!m_holepunch_sessions) return {};
+    return m_holepunch_sessions->GetSessions();
+}
+
+int CConnman::GetHolePunchOutboundCount() const
+{
+    int count{0};
+    LOCK(m_nodes_mutex);
+    for (const CNode* pnode : m_nodes) {
+        if (pnode->m_hole_punched && !pnode->IsInboundConn() && !pnode->fDisconnect) ++count;
+    }
+    return count;
+}
+
+std::optional<holepunch::Announcement> CConnman::HolePunchAddAnnouncement(NodeId from, const CAddress& element)
+{
+    if (!m_holepunch_opts.enabled) return std::nullopt;
+    const auto added{m_holepunch_announcements.Add(from, element, NodeClock::now(), m_holepunch_opts.allow_local)};
+    if (added) {
+        ++m_holepunch_counters.announcements_received;
+        LogDebug(BCLog::HOLEPUNCH, "announcement from peer=%d: %s via coordinator %s\n", from, added->target.ToStringAddrPort(), added->coordinator.ToStringAddrPort());
+    } else {
+        LogDebug(BCLog::HOLEPUNCH, "ignoring announcement %s from peer=%d\n", element.ToStringAddrPort(), from);
+    }
+    return added;
+}
+
+std::vector<holepunch::Announcement> CConnman::GetHolePunchAnnouncements() const
+{
+    return m_holepunch_announcements.Get(NodeClock::now());
+}
+
+std::optional<holepunch::Announcement> CConnman::HolePunchTakeAnnouncement(const std::function<bool(const holepunch::Announcement&)>& eligible)
+{
+    return m_holepunch_announcements.Take(NodeClock::now(), eligible, m_holepunch_rng);
+}
+
+bool CConnman::HasOutboundPeerInGroup(const CNetAddr& addr, const std::optional<CService>& except) const
+{
+    const auto group{m_netgroupman.GetGroup(addr)};
+    LOCK(m_nodes_mutex);
+    for (const CNode* pnode : m_nodes) {
+        if (pnode->IsInboundConn() || pnode->m_hole_punched || pnode->IsHolePunchCoordConn() || pnode->fDisconnect) continue;
+        if (!pnode->IsFullOutboundConn() && !pnode->IsBlockOnlyConn() && !pnode->IsManualConn()) continue;
+        if (except && pnode->addr == *except) continue;
+        if (m_netgroupman.GetGroup(pnode->addr) == group) return true;
+    }
+    return false;
+}
+
+void CConnman::HolePunchReport(const CNode& node, const CService& reported)
+{
+    if (!m_holepunch_tracker) return;
+    // Reports are meaningful only from peers we reached from the punch port without
+    // a proxy (R-2.1). A proxied connection has an ephemeral local port, so checking
+    // the local port covers both conditions.
+    if (node.IsInboundConn() || node.addrBind.GetPort() != m_holepunch_opts.port) return;
+    if (!m_holepunch_tracker->AddReport(node.GetId(), m_netgroupman.GetGroup(node.addr), reported)) {
+        LogDebug(BCLog::HOLEPUNCH, "ignoring unusable address report %s from peer=%d\n", reported.ToStringAddrPort(), node.GetId());
+        return;
+    }
+    for (const Network net : {NET_IPV4, NET_IPV6}) {
+        const auto info{m_holepunch_tracker->GetInfo(net)};
+        if (info.address) {
+            LogDebug(BCLog::HOLEPUNCH, "external address for %s is %s (%d reporting peers)\n", GetNetworkName(net), info.address->ToStringAddrPort(), info.reporters);
+        } else if (info.conflicting) {
+            LogDebug(BCLog::HOLEPUNCH, "no external address for %s: peers disagree, NAT mapping is not endpoint-independent\n", GetNetworkName(net));
+        }
+    }
+}
+
+void CConnman::HolePunchForgetPeer(NodeId id)
+{
+    if (!m_holepunch_tracker) return;
+    m_holepunch_tracker->RemovePeer(id);
+}
+
+std::optional<CService> CConnman::HolePunchExternalAddress(Network net) const
+{
+    if (!m_holepunch_tracker) return std::nullopt;
+    return m_holepunch_tracker->Get(net);
+}
+
+std::optional<holepunch::ExternalAddressTracker::Info> CConnman::HolePunchExternalAddressInfo(Network net) const
+{
+    if (!m_holepunch_tracker) return std::nullopt;
+    return m_holepunch_tracker->GetInfo(net);
+}
+
+std::optional<CService> CConnman::HolePunchBindAddress(const CService& target) const
+{
+    if (!m_holepunch_opts.enabled) return std::nullopt;
+    if (target.IsIPv4()) {
+        struct in_addr inaddr_any;
+        inaddr_any.s_addr = htonl(INADDR_ANY);
+        return CService{inaddr_any, m_holepunch_opts.port};
+    }
+    if (target.IsIPv6()) {
+        return CService{in6_addr(COMPAT_IN6ADDR_ANY_INIT), m_holepunch_opts.port};
+    }
+    return std::nullopt;
 }
 
 std::vector<CAddress> CConnman::GetAddressesUnsafe(size_t max_addresses, size_t max_pct, std::optional<Network> network, const bool filtered) const
@@ -3909,11 +4307,10 @@ bool CConnman::AddedNodesContain(const CAddress& addr) const
 size_t CConnman::GetNodeCount(ConnectionDirection flags) const
 {
     LOCK(m_nodes_mutex);
-    if (flags == ConnectionDirection::Both) // Shortcut if we want total
-        return m_nodes.size();
-
     int nNum = 0;
     for (const auto& pnode : m_nodes) {
+        // Coordination connections take no inbound or outbound slot.
+        if (pnode->IsHolePunchCoordConn()) continue;
         if (flags & (pnode->IsInboundConn() ? ConnectionDirection::In : ConnectionDirection::Out)) {
             nNum++;
         }
@@ -4120,7 +4517,7 @@ CNode::CNode(NodeId idIn,
              bool inbound_onion,
              uint64_t network_key,
              CNodeOptions&& node_opts)
-    : m_transport{MakeTransport(idIn, node_opts.use_v2transport, conn_type_in == ConnectionType::INBOUND)},
+    : m_transport{MakeTransport(idIn, node_opts.use_v2transport, conn_type_in == ConnectionType::INBOUND || node_opts.accepted)},
       m_permission_flags{node_opts.permission_flags},
       m_sock{sock},
       m_connected{NodeClock::now()},
@@ -4130,6 +4527,9 @@ CNode::CNode(NodeId idIn,
       m_addr_name{addrNameIn.empty() ? addr.ToStringAddrPort() : addrNameIn},
       m_dest(addrNameIn),
       m_inbound_onion{inbound_onion},
+      m_hole_punched{node_opts.hole_punched},
+      m_holepunch_deadline{node_opts.holepunch_deadline},
+      m_accepted{node_opts.accepted},
       m_prefer_evict{node_opts.prefer_evict},
       nKeyedNetGroup{nKeyedNetGroupIn},
       m_network_key{network_key},
@@ -4139,7 +4539,8 @@ CNode::CNode(NodeId idIn,
       m_recv_flood_size{node_opts.recv_flood_size},
       m_i2p_sam_session{std::move(node_opts.i2p_sam_session)}
 {
-    if (inbound_onion) assert(conn_type_in == ConnectionType::INBOUND);
+    if (inbound_onion) assert(IsInboundConn());
+    if (m_accepted) assert(conn_type_in == ConnectionType::HOLEPUNCH_COORD);
 
     for (const auto& msg : ALL_NET_MESSAGE_TYPES) {
         mapRecvBytesPerMsgType[msg] = 0;
@@ -4200,12 +4601,28 @@ static bool IsOutboundMessageAllowedInPrivateBroadcast(std::string_view type) no
            type == NetMsgType::PING;
 }
 
+/// Hole punch coordination connections carry only the messages that arrange a punch (R-7.4).
+static bool IsOutboundMessageAllowedInHolePunchCoordination(std::string_view type) noexcept
+{
+    return type == NetMsgType::VERSION ||
+           type == NetMsgType::VERACK ||
+           type == NetMsgType::FEATURE ||
+           type == NetMsgType::PING ||
+           type == NetMsgType::PONG ||
+           type == NetMsgType::RENDEZVOUS ||
+           type == NetMsgType::PUNCH;
+}
+
 void CConnman::PushMessage(CNode* pnode, CSerializedNetMsg&& msg)
 {
     AssertLockNotHeld(m_total_bytes_sent_mutex);
 
     if (pnode->IsPrivateBroadcastConn() && !IsOutboundMessageAllowedInPrivateBroadcast(msg.m_type)) {
         LogDebug(BCLog::PRIVBROADCAST, "Omitting send of message '%s', %s", msg.m_type, pnode->LogPeer());
+        return;
+    }
+    if (pnode->IsHolePunchCoordConn() && !IsOutboundMessageAllowedInHolePunchCoordination(msg.m_type)) {
+        LogDebug(BCLog::HOLEPUNCH, "not sending %s on a coordination connection, peer=%d\n", msg.m_type, pnode->GetId());
         return;
     }
 

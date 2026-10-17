@@ -75,7 +75,8 @@ const std::vector<std::string> CONNECTION_TYPE_DOC{
         "manual (added via addnode RPC or -addnode/-connect configuration options)",
         "addr-fetch (short-lived automatic connection for soliciting addresses)",
         "feeler (short-lived automatic connection for testing addresses)",
-        "private-broadcast (short-lived automatic connection for broadcasting privacy-sensitive transactions)"
+        "private-broadcast (short-lived automatic connection for broadcasting privacy-sensitive transactions)",
+        "holepunch-coordination (short-lived connection, in either direction, for arranging a hole-punched connection)"
 };
 
 const std::vector<std::string> TRANSPORT_TYPE_DOC{
@@ -186,6 +187,7 @@ static RPCMethod getpeerinfo()
                     {RPCResult::Type::NUM, "version", "The peer version, such as 70001"},
                     {RPCResult::Type::STR, "subver", "The string version"},
                     {RPCResult::Type::BOOL, "inbound", "Inbound (true) or Outbound (false)"},
+                    {RPCResult::Type::BOOL, "hole_punched", "Whether the connection was made by TCP hole punching"},
                     {RPCResult::Type::BOOL, "bip152_hb_to", "Whether we selected peer as (compact blocks) high-bandwidth peer"},
                     {RPCResult::Type::BOOL, "bip152_hb_from", "Whether peer selected us as (compact blocks) high-bandwidth peer"},
                     {RPCResult::Type::NUM, "presynced_headers", "The current height of header pre-synchronization with this peer, or -1 if no low-work sync is in progress"},
@@ -196,6 +198,10 @@ static RPCMethod getpeerinfo()
                         {RPCResult::Type::NUM, "n", "The heights of blocks we're currently asking from this peer"},
                     }},
                     {RPCResult::Type::BOOL, "addr_relay_enabled", "Whether we participate in address relay with this peer"},
+                    {RPCResult::Type::ARR, "holepunch_caps", /*optional=*/true, "Hole punching capabilities the peer announced, if it supports hole punching",
+                    {
+                        {RPCResult::Type::STR, "capability", "COORDINATOR, ADVERTISED, POOL_OK, HANDOFF_OK or PUNCHPORT"},
+                    }},
                     {RPCResult::Type::NUM, "addr_processed", "The total number of addresses processed, excluding those dropped due to rate limiting"},
                     {RPCResult::Type::NUM, "addr_rate_limited", "The total number of addresses dropped due to rate limiting"},
                     {RPCResult::Type::ARR, "permissions", "Any special permissions that have been granted to this peer",
@@ -293,6 +299,7 @@ static RPCMethod getpeerinfo()
         // their ver message.
         obj.pushKV("subver", stats.cleanSubVer);
         obj.pushKV("inbound", stats.fInbound);
+        obj.pushKV("hole_punched", stats.m_hole_punched);
         obj.pushKV("bip152_hb_to", stats.m_bip152_highbandwidth_to);
         obj.pushKV("bip152_hb_from", stats.m_bip152_highbandwidth_from);
         obj.pushKV("presynced_headers", statestats.presync_height);
@@ -304,6 +311,11 @@ static RPCMethod getpeerinfo()
         }
         obj.pushKV("inflight", std::move(heights));
         obj.pushKV("addr_relay_enabled", statestats.m_addr_relay_enabled);
+        if (statestats.m_holepunch_caps) {
+            UniValue caps(UniValue::VARR);
+            for (const auto& name : holepunch::CapNames(*statestats.m_holepunch_caps)) caps.push_back(name);
+            obj.pushKV("holepunch_caps", std::move(caps));
+        }
         obj.pushKV("addr_processed", statestats.m_addr_processed);
         obj.pushKV("addr_rate_limited", statestats.m_addr_rate_limited);
         UniValue permissions(UniValue::VARR);
@@ -423,7 +435,7 @@ static RPCMethod addconnection()
         "Open an outbound connection to a specified node. This RPC is for testing only.\n",
         {
             {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The IP address and port to attempt connecting to."},
-            {"connection_type", RPCArg::Type::STR, RPCArg::Optional::NO, "Type of connection to open (\"outbound-full-relay\", \"block-relay-only\", \"addr-fetch\", \"feeler\" or \"manual\")."},
+            {"connection_type", RPCArg::Type::STR, RPCArg::Optional::NO, "Type of connection to open (\"outbound-full-relay\", \"block-relay-only\", \"addr-fetch\", \"feeler\", \"manual\" or \"holepunch-coordination\")."},
             {"v2transport", RPCArg::Type::BOOL, RPCArg::Optional::NO, "Attempt to connect using BIP324 v2 transport protocol"},
         },
         RPCResult{
@@ -455,6 +467,8 @@ static RPCMethod addconnection()
         conn_type = ConnectionType::FEELER;
     } else if (conn_type_in == "manual") {
         conn_type = ConnectionType::MANUAL;
+    } else if (conn_type_in == "holepunch-coordination") {
+        conn_type = ConnectionType::HOLEPUNCH_COORD;
     } else {
         throw JSONRPCError(RPC_INVALID_PARAMETER, self.ToString());
     }
@@ -656,7 +670,7 @@ static UniValue GetNetworksInfo()
     UniValue networks(UniValue::VARR);
     for (int n = 0; n < NET_MAX; ++n) {
         enum Network network = static_cast<enum Network>(n);
-        if (network == NET_UNROUTABLE || network == NET_INTERNAL) continue;
+        if (network == NET_UNROUTABLE || network == NET_INTERNAL || network == NET_HOLEPUNCH) continue;
         UniValue obj(UniValue::VOBJ);
         obj.pushKV("name", GetNetworkName(network));
         obj.pushKV("limited", !g_reachable_nets.Contains(network));
@@ -1165,7 +1179,7 @@ static RPCMethod getaddrmaninfo()
             UniValue ret(UniValue::VOBJ);
             for (int n = 0; n < NET_MAX; ++n) {
                 enum Network network = static_cast<enum Network>(n);
-                if (network == NET_UNROUTABLE || network == NET_INTERNAL) continue;
+                if (network == NET_UNROUTABLE || network == NET_INTERNAL || network == NET_HOLEPUNCH) continue;
                 UniValue obj(UniValue::VOBJ);
                 obj.pushKV("new", addrman.Size(network, true));
                 obj.pushKV("tried", addrman.Size(network, false));
@@ -1309,10 +1323,244 @@ static RPCMethod getrawaddrman()
     };
 }
 
+static RPCMethod holepunchrendezvous()
+{
+    return RPCMethod{
+        "holepunchrendezvous",
+        "Ask a connected coordinator to pair us with an advertised node by TCP hole punching.\n"
+        "Sends a rendezvous message for the target to the peer and accepts its punch as the answer.\n"
+        "This RPC is for testing only.",
+        {
+            {"peer_id", RPCArg::Type::NUM, RPCArg::Optional::NO, "The coordinator: a connected peer that negotiated hole punching."},
+            {"target", RPCArg::Type::STR, RPCArg::Optional::NO, "The target's endpoint (ip:port) as the coordinator observes it, from the target's announcement."},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "", std::vector<RPCResult>{}},
+        RPCExamples{
+            HelpExampleCli("holepunchrendezvous", "0 \"203.0.113.1:8335\"") + HelpExampleRpc("holepunchrendezvous", R"(0, "203.0.113.1:8335")")},
+        [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue {
+            const NodeId peer_id{request.params[0].getInt<int64_t>()};
+            const auto target{Lookup(std::string{self.Arg<std::string_view>("target")}, /*portDefault=*/0, /*fAllowLookup=*/false)};
+            if (!target || !target->IsValid()) {
+                throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Invalid target endpoint");
+            }
+            NodeContext& node = EnsureAnyNodeContext(request.context);
+            PeerManager& peerman = EnsurePeerman(node);
+            if (const auto error{peerman.HolePunchRendezvous(peer_id, *target)}) {
+                throw JSONRPCError(RPC_MISC_ERROR, "Error: " + *error);
+            }
+            return UniValue{UniValue::VOBJ};
+        },
+    };
+}
+
+static RPCMethod holepunchaddannouncement()
+{
+    return RPCMethod{
+        "holepunchaddannouncement",
+        "Put a hole punching announcement into the cache by hand, as if it had been received from a peer.\n"
+        "The connector then treats it like any other announcement. This RPC is for testing only.",
+        {
+            {"coordinator", RPCArg::Type::STR, RPCArg::Optional::NO, "The coordinator's endpoint (ip:port, or onion/i2p address with port)"},
+            {"target", RPCArg::Type::STR, RPCArg::Optional::NO, "The announced node's endpoint (ip:port)"},
+        },
+        RPCResult{RPCResult::Type::OBJ, "", "", std::vector<RPCResult>{}},
+        RPCExamples{
+            HelpExampleCli("holepunchaddannouncement", "\"192.0.2.3:8333\" \"203.0.113.1:8335\"") + HelpExampleRpc("holepunchaddannouncement", R"("192.0.2.3:8333", "203.0.113.1:8335")")},
+        [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue {
+            const auto coordinator{Lookup(std::string{self.Arg<std::string_view>("coordinator")}, /*portDefault=*/0, /*fAllowLookup=*/false)};
+            const auto target{Lookup(std::string{self.Arg<std::string_view>("target")}, /*portDefault=*/0, /*fAllowLookup=*/false)};
+            if (!coordinator || !coordinator->IsValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Invalid coordinator endpoint");
+            if (!target || !target->IsValid()) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Invalid target endpoint");
+            const auto made{CNetAddr::MakeHolePunch(*coordinator, *target)};
+            if (!made) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Unsupported address types for an announcement");
+            NodeContext& node = EnsureAnyNodeContext(request.context);
+            CConnman& connman = EnsureConnman(node);
+            const CAddress element{CService{*made, target->GetPort()}, ServiceFlags(NODE_NETWORK | NODE_P2P_V2), Now<NodeSeconds>()};
+            if (!connman.HolePunchAddAnnouncement(/*from=*/-1, element)) {
+                throw JSONRPCError(RPC_MISC_ERROR, "Error: Announcement not accepted (is -holepunch on? is the target routable?)");
+            }
+            return UniValue{UniValue::VOBJ};
+        },
+    };
+}
+
+static RPCMethod getholepunchinfo()
+{
+    return RPCMethod{
+        "getholepunchinfo",
+        "Returns the state of TCP hole punching (-holepunch).\n",
+        {},
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::BOOL, "enabled", "Whether hole punching is enabled"},
+                {RPCResult::Type::NUM, "port", /*optional=*/true, "The punch port: the local port of all outbound clearnet connections and of the punch listener"},
+                {RPCResult::Type::OBJ, "coordination", /*optional=*/true, "How this node coordinates punches to itself",
+                    {
+                        {RPCResult::Type::STR, "bind", "(ip:port) The local address that accepts coordination connections, the target of the onion service"},
+                        {RPCResult::Type::STR, "onion", /*optional=*/true, "(address:port) The onion service through which this node can be asked for a rendezvous, if it is up"},
+                        {RPCResult::Type::NUM_TIME, "onion_since", /*optional=*/true, "When the onion service was first announced, if it was"},
+                        {RPCResult::Type::NUM_TIME, "onion_rotates", /*optional=*/true, "When the onion service is replaced by a fresh identity at the latest; earlier if the external address changes"},
+                        {RPCResult::Type::BOOL, "onion_rotating", /*optional=*/true, "Whether a replacement of the onion service is under way"},
+                    }},
+                {RPCResult::Type::ARR, "external", /*optional=*/true, "Our external address and port per address family, as reported by peers",
+                    {
+                        {RPCResult::Type::OBJ, "", "",
+                            {
+                                {RPCResult::Type::STR, "network", "The address family (" + Join(GetNetworkNames(), ", ") + ")"},
+                                {RPCResult::Type::STR, "address", /*optional=*/true, "(ip:port) The external address, if at least two peers in different network groups agree on it"},
+                                {RPCResult::Type::NUM, "reporters", "The number of peers that report the external address"},
+                                {RPCResult::Type::NUM, "reports", "The number of peers whose report is tracked"},
+                                {RPCResult::Type::BOOL, "conflicting", "Whether peers disagree in a way that rules out an external address (NAT mapping not endpoint-independent)"},
+                            }},
+                    }},
+                {RPCResult::Type::ARR, "announcements", /*optional=*/true, "Cached announcements of nodes reachable by hole punching",
+                    {
+                        {RPCResult::Type::OBJ, "", "",
+                            {
+                                {RPCResult::Type::STR, "target", "(ip:port) The announced node's endpoint"},
+                                {RPCResult::Type::STR, "coordinator", "(address:port) The coordinator to ask for a rendezvous"},
+                                {RPCResult::Type::NUM_TIME, "time", "The announcement's time (seconds since epoch)"},
+                                {RPCResult::Type::NUM, "from", "The id of the peer the announcement came from"},
+                            }},
+                    }},
+                {RPCResult::Type::OBJ, "counters", /*optional=*/true, "What happened since the node started",
+                    {
+                        {RPCResult::Type::OBJ, "sessions", "Punch sessions, by this node's role",
+                            {
+                                {RPCResult::Type::OBJ, "initiator", "",
+                                    {
+                                        {RPCResult::Type::NUM, "started", ""},
+                                        {RPCResult::Type::NUM, "established", "Sessions that produced a connection"},
+                                        {RPCResult::Type::NUM, "failed", "Sessions that ran out of time"},
+                                    }},
+                                {RPCResult::Type::OBJ, "responder", "",
+                                    {
+                                        {RPCResult::Type::NUM, "started", ""},
+                                        {RPCResult::Type::NUM, "established", ""},
+                                        {RPCResult::Type::NUM, "failed", ""},
+                                    }},
+                                {RPCResult::Type::NUM, "cancelled", "Sessions dropped because the punch could not be delivered"},
+                            }},
+                        {RPCResult::Type::NUM, "announcements_sent", "Our own announcement elements sent"},
+                        {RPCResult::Type::NUM, "announcements_received", "Others' announcements accepted into the cache"},
+                        {RPCResult::Type::NUM, "rendezvous_sent", "Rendezvous requests sent as connector"},
+                        {RPCResult::Type::NUM, "coordination_opened", "Connections opened only to ask for a rendezvous"},
+                        {RPCResult::Type::NUM, "coordination_failed", "Such connections that could not be opened"},
+                        {RPCResult::Type::NUM, "punches_accepted", "Punches that started a session"},
+                        {RPCResult::Type::NUM, "punches_rejected", "Punches ignored"},
+                        {RPCResult::Type::NUM, "rendezvous_answered", "Pairs made as coordinator for others"},
+                        {RPCResult::Type::NUM, "rendezvous_answered_own", "Requests answered on our own coordination service"},
+                        {RPCResult::Type::NUM, "rendezvous_rejected", "Requests ignored as coordinator"},
+                    }},
+                {RPCResult::Type::ARR, "sessions", /*optional=*/true, "Punch sessions in progress",
+                    {
+                        {RPCResult::Type::OBJ, "", "",
+                            {
+                                {RPCResult::Type::STR, "peer", "(ip:port) The endpoint being punched to"},
+                                {RPCResult::Type::STR, "role", "initiator or responder"},
+                                {RPCResult::Type::NUM, "age", "Seconds since the session started"},
+                                {RPCResult::Type::NUM, "attempts", "Connection attempts made so far"},
+                            }},
+                    }},
+            }},
+        RPCExamples{
+            HelpExampleCli("getholepunchinfo", "")
+            + HelpExampleRpc("getholepunchinfo", "")
+        },
+        [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+        {
+            const NodeContext& node{EnsureAnyNodeContext(request.context)};
+            const CConnman& connman{EnsureConnman(node)};
+            const holepunch::Options& opts{connman.GetHolePunchOptions()};
+
+            UniValue obj(UniValue::VOBJ);
+            obj.pushKV("enabled", opts.enabled);
+            if (!opts.enabled) return obj;
+            obj.pushKV("port", opts.port);
+            if (opts.coordination_bind) {
+                UniValue coordination(UniValue::VOBJ);
+                coordination.pushKV("bind", opts.coordination_bind->ToStringAddrPort());
+                if (const auto info{connman.GetHolePunchCoordinationServiceInfo()}) {
+                    coordination.pushKV("onion", info->service.ToStringAddrPort());
+                    if (info->since != NodeClock::time_point{}) {
+                        coordination.pushKV("onion_since", TicksSinceEpoch<std::chrono::seconds>(info->since));
+                        coordination.pushKV("onion_rotates", TicksSinceEpoch<std::chrono::seconds>(info->rotate_at));
+                    }
+                    if (info->rotating) coordination.pushKV("onion_rotating", true);
+                }
+                obj.pushKV("coordination", std::move(coordination));
+            }
+            UniValue external(UniValue::VARR);
+            for (const Network net : {NET_IPV4, NET_IPV6}) {
+                const auto info{connman.HolePunchExternalAddressInfo(net)};
+                if (!info) continue;
+                UniValue o(UniValue::VOBJ);
+                o.pushKV("network", GetNetworkName(net));
+                if (info->address) o.pushKV("address", info->address->ToStringAddrPort());
+                o.pushKV("reporters", info->reporters);
+                o.pushKV("reports", info->reports);
+                o.pushKV("conflicting", info->conflicting);
+                external.push_back(std::move(o));
+            }
+            obj.pushKV("external", std::move(external));
+            UniValue announcements(UniValue::VARR);
+            for (const auto& a : connman.GetHolePunchAnnouncements()) {
+                UniValue o(UniValue::VOBJ);
+                o.pushKV("target", a.target.ToStringAddrPort());
+                o.pushKV("coordinator", a.coordinator.ToStringAddrPort());
+                o.pushKV("time", TicksSinceEpoch<std::chrono::seconds>(a.time));
+                o.pushKV("from", a.from);
+                announcements.push_back(std::move(o));
+            }
+            obj.pushKV("announcements", std::move(announcements));
+            {
+                const holepunch::Counters& c{connman.HolePunchCounters()};
+                UniValue counters(UniValue::VOBJ);
+                UniValue by_role(UniValue::VOBJ);
+                for (const auto [role, name] : {std::pair{holepunch::Role::INITIATOR, "initiator"}, std::pair{holepunch::Role::RESPONDER, "responder"}}) {
+                    const auto& r{c.sessions[static_cast<size_t>(role)]};
+                    UniValue o(UniValue::VOBJ);
+                    o.pushKV("started", r.started.load());
+                    o.pushKV("established", r.established.load());
+                    o.pushKV("failed", r.failed.load());
+                    by_role.pushKV(name, std::move(o));
+                }
+                by_role.pushKV("cancelled", c.sessions_cancelled.load());
+                counters.pushKV("sessions", std::move(by_role));
+                counters.pushKV("announcements_sent", c.announcements_sent.load());
+                counters.pushKV("announcements_received", c.announcements_received.load());
+                counters.pushKV("rendezvous_sent", c.rendezvous_sent.load());
+                counters.pushKV("coordination_opened", c.coordination_opened.load());
+                counters.pushKV("coordination_failed", c.coordination_failed.load());
+                counters.pushKV("punches_accepted", c.punches_accepted.load());
+                counters.pushKV("punches_rejected", c.punches_rejected.load());
+                counters.pushKV("rendezvous_answered", c.rendezvous_answered.load());
+                counters.pushKV("rendezvous_answered_own", c.rendezvous_answered_own.load());
+                counters.pushKV("rendezvous_rejected", c.rendezvous_rejected.load());
+                obj.pushKV("counters", std::move(counters));
+            }
+            UniValue sessions(UniValue::VARR);
+            const auto now{NodeClock::now()};
+            for (const auto& session : connman.GetHolePunchSessions()) {
+                UniValue o(UniValue::VOBJ);
+                o.pushKV("peer", session.peer.ToStringAddrPort());
+                o.pushKV("role", session.role == holepunch::Role::INITIATOR ? "initiator" : "responder");
+                o.pushKV("age", Ticks<std::chrono::seconds>(now - session.started));
+                o.pushKV("attempts", session.attempts);
+                sessions.push_back(std::move(o));
+            }
+            obj.pushKV("sessions", std::move(sessions));
+            return obj;
+        },
+    };
+}
+
 void RegisterNetRPCCommands(CRPCTable& t)
 {
     static const CRPCCommand commands[]{
         {"network", &getconnectioncount},
+        {"network", &getholepunchinfo},
         {"network", &ping},
         {"network", &getpeerinfo},
         {"network", &addnode},
@@ -1330,6 +1578,8 @@ void RegisterNetRPCCommands(CRPCTable& t)
         {"hidden", &addconnection},
         {"hidden", &addpeeraddress},
         {"hidden", &sendmsgtopeer},
+        {"hidden", &holepunchrendezvous},
+        {"hidden", &holepunchaddannouncement},
         {"hidden", &getrawaddrman},
     };
     for (const auto& c : commands) {

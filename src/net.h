@@ -13,6 +13,7 @@
 #include <consensus/amount.h>
 #include <crypto/siphash.h>
 #include <hash.h>
+#include <holepunch.h>
 #include <i2p.h>
 #include <kernel/messagestartchars.h>
 #include <net_permissions.h>
@@ -90,6 +91,8 @@ inline constexpr bool DEFAULT_BLOCKSONLY = false;
 inline constexpr int64_t DEFAULT_PEER_CONNECT_TIMEOUT = 60;
 /** Default for -privatebroadcast. */
 inline constexpr bool DEFAULT_PRIVATE_BROADCAST{false};
+/** Default for -holepunch */
+inline constexpr bool DEFAULT_HOLEPUNCH{false};
 /** Number of file descriptors required for message capture **/
 inline constexpr int NUM_FDS_MESSAGE_CAPTURE = 1;
 /** Interval for ASMap Health Check **/
@@ -204,6 +207,7 @@ public:
     int nVersion;
     std::string cleanSubVer;
     bool fInbound;
+    bool m_hole_punched;
     // We requested high bandwidth connection to peer
     bool m_bip152_highbandwidth_to;
     // Peer requested high bandwidth connection
@@ -677,6 +681,12 @@ struct CNodeOptions
     bool prefer_evict = false;
     size_t recv_flood_size{DEFAULT_MAXRECEIVEBUFFER * 1000};
     bool use_v2transport = false;
+    /** The connection was made by TCP hole punching. */
+    bool hole_punched = false;
+    /** Only for hole_punched: the session's deadline, by which the handshake must be complete (R-5.11). */
+    NodeClock::time_point holepunch_deadline{};
+    /** Only for ConnectionType::HOLEPUNCH_COORD: the peer connected to us. */
+    bool accepted = false;
 };
 
 /** Information about a peer */
@@ -728,6 +738,13 @@ public:
     const std::string m_dest;
     //! Whether this peer is an inbound onion, i.e. connected via our Tor onion service.
     const bool m_inbound_onion;
+    //! Whether this connection was made by TCP hole punching. An outbound one
+    //! occupies the hole punch slot, not one of the automatic outbound slots.
+    const bool m_hole_punched;
+    //! For hole-punched connections: when the handshake must be complete (R-5.11).
+    const NodeClock::time_point m_holepunch_deadline;
+    //! For hole punch coordination connections: whether the peer connected to us.
+    const bool m_accepted;
     std::atomic<int> nVersion{0};
     Mutex m_subver_mutex;
     /**
@@ -786,6 +803,7 @@ public:
             case ConnectionType::ADDR_FETCH:
             case ConnectionType::FEELER:
             case ConnectionType::PRIVATE_BROADCAST:
+            case ConnectionType::HOLEPUNCH_COORD:
                 return false;
         } // no default case, so the compiler can warn about missing cases
 
@@ -808,6 +826,7 @@ public:
         case ConnectionType::BLOCK_RELAY:
         case ConnectionType::ADDR_FETCH:
         case ConnectionType::PRIVATE_BROADCAST:
+        case ConnectionType::HOLEPUNCH_COORD:
                 return false;
         case ConnectionType::OUTBOUND_FULL_RELAY:
         case ConnectionType::MANUAL:
@@ -834,6 +853,12 @@ public:
         return m_conn_type == ConnectionType::PRIVATE_BROADCAST;
     }
 
+    /** A short-lived connection that only arranges a hole punch, in either direction. */
+    bool IsHolePunchCoordConn() const
+    {
+        return m_conn_type == ConnectionType::HOLEPUNCH_COORD;
+    }
+
     /** Protocol version advertised in our VERSION message.
      *  Private broadcast connections use a fixed version to maximise anonymity. */
     int AdvertisedVersion() const
@@ -841,8 +866,9 @@ public:
         return IsPrivateBroadcastConn() ? WTXID_RELAY_VERSION : PROTOCOL_VERSION;
     }
 
+    /** Whether the peer initiated the connection. */
     bool IsInboundConn() const {
-        return m_conn_type == ConnectionType::INBOUND;
+        return m_conn_type == ConnectionType::INBOUND || m_accepted;
     }
 
     bool ExpectServicesFromConn() const {
@@ -850,6 +876,7 @@ public:
             case ConnectionType::INBOUND:
             case ConnectionType::MANUAL:
             case ConnectionType::FEELER:
+            case ConnectionType::HOLEPUNCH_COORD:
                 return false;
             case ConnectionType::OUTBOUND_FULL_RELAY:
             case ConnectionType::BLOCK_RELAY:
@@ -1114,9 +1141,10 @@ public:
         bool whitelist_forcerelay = DEFAULT_WHITELISTFORCERELAY;
         bool whitelist_relay = DEFAULT_WHITELISTRELAY;
         bool m_capture_messages = false;
+        holepunch::Options m_holepunch;
     };
 
-    void Init(const Options& connOptions) EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex, !m_total_bytes_sent_mutex)
+    void Init(const Options& connOptions) EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex, !m_total_bytes_sent_mutex, !m_holepunch_coord_mutex)
     {
         AssertLockNotHeld(m_total_bytes_sent_mutex);
 
@@ -1153,7 +1181,76 @@ public:
         whitelist_forcerelay = connOptions.whitelist_forcerelay;
         whitelist_relay = connOptions.whitelist_relay;
         m_capture_messages = connOptions.m_capture_messages;
+        m_holepunch_opts = connOptions.m_holepunch;
+        if (m_holepunch_opts.enabled) {
+            m_holepunch_tracker = std::make_unique<holepunch::ExternalAddressTracker>(m_holepunch_opts.allow_local);
+            if (!m_holepunch_opts.coordination_services.empty()) {
+                LOCK(m_holepunch_coord_mutex);
+                m_holepunch_coord_service = m_holepunch_opts.coordination_services.front();
+            }
+        }
     }
+
+    const holepunch::Options& GetHolePunchOptions() const { return m_holepunch_opts; }
+    /** What happened so far; message handlers add to it. */
+    holepunch::Counters& HolePunchCounters() { return m_holepunch_counters; }
+    const holepunch::Counters& HolePunchCounters() const { return m_holepunch_counters; }
+
+    /**
+     * Record what `node` reports as our address and port in version.addr_recv.
+     * Only outbound connections made from the punch port count (hole punching).
+     */
+    void HolePunchReport(const CNode& node, const CService& reported);
+    /** Forget the report of a disconnected peer. */
+    void HolePunchForgetPeer(NodeId id);
+    /** Our external address and port for hole punching in `net` (NET_IPV4 or NET_IPV6), if known. */
+    std::optional<CService> HolePunchExternalAddress(Network net) const;
+    /** Details about the external address for `net`; empty when hole punching is off. */
+    std::optional<holepunch::ExternalAddressTracker::Info> HolePunchExternalAddressInfo(Network net) const;
+    /** Start a punch session with `peer`. Returns the reason if it was not started. */
+    std::optional<std::string> HolePunch(holepunch::Role role, const CService& peer);
+    bool HasHolePunchSession(const CService& peer) const;
+    /** Drop the punch session with `peer`, if any. */
+    void HolePunchCancel(const CService& peer);
+    std::vector<holepunch::SessionManager::SessionInfo> GetHolePunchSessions() const;
+    /** Number of hole-punched outbound peers. */
+    int GetHolePunchOutboundCount() const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+    /** Put a received HOLEPUNCH address element into the announcement cache (R-6.2). */
+    std::optional<holepunch::Announcement> HolePunchAddAnnouncement(NodeId from, const CAddress& element);
+    std::vector<holepunch::Announcement> GetHolePunchAnnouncements() const;
+    /** Remove and return a random eligible announcement, for one coordination attempt (R-7.2). */
+    std::optional<holepunch::Announcement> HolePunchTakeAnnouncement(const std::function<bool(const holepunch::Announcement&)>& eligible);
+    /** Open a coordination connection to `coordinator` (R-7.3), from the hole punch coordination thread. */
+    void HolePunchOpenCoordination(const CService& coordinator) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
+    /** The onion service through which we coordinate our own punches is up (or, if invalid, gone). */
+    void SetHolePunchCoordinationService(const CService& service) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
+    /** Our coordination service, if it is up and not being replaced (R-12.1). */
+    std::optional<CService> GetHolePunchCoordinationService() const EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
+    /**
+     * Our coordination service to announce `external`, our external address in
+     * `net`'s family, through: the service if it is up and is the identity that
+     * address was first announced with, and not older than its lifetime.
+     * Otherwise none, and a replacement with a fresh key is requested (R-12.1).
+     */
+    std::optional<CService> HolePunchCoordinationServiceFor(Network net, const CService& external) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
+    struct HolePunchServiceInfo {
+        CService service;
+        /** When it was first announced; unset until then. */
+        NodeClock::time_point since;
+        /** When it is replaced at the latest. */
+        NodeClock::time_point rotate_at;
+        /** Whether a replacement has been requested. */
+        bool rotating;
+    };
+    std::optional<HolePunchServiceInfo> GetHolePunchCoordinationServiceInfo() const EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
+    /** How to replace the coordination service with a fresh identity, when Tor runs it. */
+    void SetHolePunchRotateFn(std::function<void()> fn) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
+    /**
+     * Whether an automatic outbound peer is in the same network group as `addr` (R-7.1).
+     * A peer at exactly `except` does not count: the coordinator named in an announcement
+     * is in its own group, and an existing connection to it must not rule it out.
+     */
+    bool HasOutboundPeerInGroup(const CNetAddr& addr, const std::optional<CService>& except = std::nullopt) const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
     // test only
     void SetCaptureMessages(bool cap) { m_capture_messages = cap; }
@@ -1168,7 +1265,7 @@ public:
 
     ~CConnman();
 
-    bool Start(CScheduler& scheduler, const Options& options) EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex, !m_added_nodes_mutex, !m_addr_fetches_mutex, !mutexMsgProc, !m_anchors_mutex);
+    bool Start(CScheduler& scheduler, const Options& options) EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex, !m_added_nodes_mutex, !m_addr_fetches_mutex, !mutexMsgProc, !m_anchors_mutex, !m_holepunch_coord_mutex);
 
     void StopThreads();
     void StopNodes() EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_reconnections_mutex, !m_anchors_mutex);
@@ -1382,6 +1479,7 @@ public:
         EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_unused_i2p_sessions_mutex);
 
     size_t GetNodeCount(ConnectionDirection) const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+    int GetMaxInbound() const { return m_max_inbound; }
     std::map<CNetAddr, LocalServiceInfo> getNetLocalAddresses() const;
     uint32_t GetMappedAS(const CNetAddr& addr) const;
     void GetNodeStats(std::vector<CNodeStats>& vstats) const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
@@ -1487,11 +1585,26 @@ private:
      * @param[in] permission_flags The peer's permissions.
      * @param[in] addr_bind The address and port at our side of the connection.
      * @param[in] addr The address and port at the peer's side of the connection.
+     * @param[in] hole_punched Whether the connection came out of a hole punch session.
+     * @param[in] holepunch_deadline For a hole-punched connection: the session's deadline.
      */
-    void CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
+    void CreateNodeFromAcceptedSocket(std::shared_ptr<Sock> sock,
                                       NetPermissionFlags permission_flags,
                                       const CService& addr_bind,
-                                      const CService& addr)
+                                      const CService& addr,
+                                      bool hole_punched = false,
+                                      NodeClock::time_point holepunch_deadline = {})
+        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+
+    /**
+     * Make an outbound hole-punched peer from the connection a session ended
+     * with as initiator. It takes the hole punch slot (R-8.1).
+     */
+    void CreateNodeFromPunchedSocket(std::shared_ptr<Sock> sock, const CService& peer, NodeClock::time_point deadline)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+
+    /** Called by the session manager, on its thread, when a session ends. */
+    void OnHolePunchResult(const CService& peer, holepunch::Role role, std::shared_ptr<Sock> sock, NodeClock::time_point deadline)
         EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
     void DisconnectNodes() EXCLUSIVE_LOCKS_REQUIRED(!m_reconnections_mutex, !m_nodes_mutex);
@@ -1782,6 +1895,7 @@ private:
     std::thread threadMessageHandler;
     std::thread threadI2PAcceptIncoming;
     std::thread threadPrivateBroadcast;
+    std::thread threadHolePunchCoordination;
 
     /** flag for deciding to connect to an extra outbound peer,
      *  in excess of m_max_outbound_full_relay
@@ -1799,6 +1913,41 @@ private:
      * an address and port that are designated for incoming Tor connections.
      */
     std::vector<CService> m_onion_binds;
+
+    holepunch::Options m_holepunch_opts;
+    holepunch::Counters m_holepunch_counters;
+    std::unique_ptr<holepunch::ExternalAddressTracker> m_holepunch_tracker;
+    std::unique_ptr<holepunch::SessionManager> m_holepunch_sessions;
+    holepunch::AnnouncementCache m_holepunch_announcements;
+    FastRandomContext m_holepunch_rng;
+    mutable Mutex m_holepunch_coord_mutex;
+    /** Coordinators to open a coordination connection to. */
+    std::deque<CService> m_holepunch_coord_queue GUARDED_BY(m_holepunch_coord_mutex);
+    /** Our coordination onion service, while Tor has it up. */
+    std::optional<CService> m_holepunch_coord_service GUARDED_BY(m_holepunch_coord_mutex);
+    /** When the service was first announced; unset until then. */
+    NodeClock::time_point m_holepunch_coord_since GUARDED_BY(m_holepunch_coord_mutex){};
+    /** How long the service is announced, drawn below ONION_MAX_LIFETIME. */
+    std::chrono::seconds m_holepunch_coord_lifetime GUARDED_BY(m_holepunch_coord_mutex){0};
+    /** The external address per family the service was first announced with (R-12.1). */
+    std::map<Network, CService> m_holepunch_coord_external GUARDED_BY(m_holepunch_coord_mutex);
+    /** A replacement was requested and has not arrived yet. */
+    bool m_holepunch_coord_rotating GUARDED_BY(m_holepunch_coord_mutex){false};
+    std::function<void()> m_holepunch_rotate GUARDED_BY(m_holepunch_coord_mutex);
+    /** Regtest stand-ins used so far (Options::coordination_services). */
+    size_t m_holepunch_coord_standins_used GUARDED_BY(m_holepunch_coord_mutex){1};
+    /** Replace the coordination service with a fresh identity: through Tor, or the next regtest stand-in. */
+    void HolePunchRotateService() EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex);
+    /** Opens the queued coordination connections. Connecting blocks, and the outbound
+     * thread waits for a free slot when the node is full, so this has its own thread. */
+    void ThreadHolePunchCoordination() EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_coord_mutex, !m_nodes_mutex, !m_unused_i2p_sessions_mutex);
+
+    /**
+     * The local address to connect from when hole punching is enabled and the
+     * target is a clearnet address: the wildcard address of the target's family
+     * on the punch port. Empty otherwise.
+     */
+    std::optional<CService> HolePunchBindAddress(const CService& target) const;
 
     /**
      * flag for adding 'forcerelay' permission to whitelisted inbound
