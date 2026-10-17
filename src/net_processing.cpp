@@ -5410,6 +5410,21 @@ bool PeerManagerImpl::MaybeDiscourageAndDisconnect(CNode& pnode, Peer& peer)
 bool PeerManagerImpl::MaybeDisconnectForTxRelayCapacity(CNode& node, const std::string& msg_type, std::optional<NodeId> protect_peer)
 {
     if (!node.IsInboundConn() || !node.m_relays_txs) return false;
+
+    // The flag describes what the peer's address had been doing when it
+    // connected, so only act on it while the connection is still that young.
+    // A version message arrives right away, but filterload/filterclear can
+    // arrive at any time, and a peer that has been connected for much longer
+    // than the window should be treated like any other.
+    if (node.m_recent_reconnect && node.m_connected + 2 * INBOUND_RECONNECT_WINDOW > NodeClock::now()) {
+        // Don't evict an existing tx-relaying peer for an address that was
+        // here a moment ago. Drop this peer instead, unless there is room.
+        if (!m_connman.InboundTxRelayFull()) return false;
+        LogDebug(BCLog::NET, "tx-relay inbound slots full and peer reconnected too soon - connection dropped after %s message, %s\n", msg_type, node.LogPeer());
+        node.fDisconnect = true;
+        return true;
+    }
+
     if (m_connman.EvictTxPeerIfFull(protect_peer)) return false;
 
     LogDebug(BCLog::NET, "failed to find a tx-relaying eviction candidate - connection dropped after %s message, peer=%d\n", msg_type, node.GetId());
