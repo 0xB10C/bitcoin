@@ -508,6 +508,10 @@ def tor_port(n):
     return p2p_port(n) + PORT_RANGE * 2
 
 
+def holepunch_port(n):
+    return p2p_port(n) + PORT_RANGE * 3
+
+
 # Node functions
 ################
 

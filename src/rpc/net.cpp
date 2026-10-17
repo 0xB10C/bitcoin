@@ -186,6 +186,7 @@ static RPCMethod getpeerinfo()
                     {RPCResult::Type::NUM, "version", "The peer version, such as 70001"},
                     {RPCResult::Type::STR, "subver", "The string version"},
                     {RPCResult::Type::BOOL, "inbound", "Inbound (true) or Outbound (false)"},
+                    {RPCResult::Type::BOOL, "hole_punched", "Whether the connection was made by TCP hole punching"},
                     {RPCResult::Type::BOOL, "bip152_hb_to", "Whether we selected peer as (compact blocks) high-bandwidth peer"},
                     {RPCResult::Type::BOOL, "bip152_hb_from", "Whether peer selected us as (compact blocks) high-bandwidth peer"},
                     {RPCResult::Type::NUM, "presynced_headers", "The current height of header pre-synchronization with this peer, or -1 if no low-work sync is in progress"},
@@ -293,6 +294,7 @@ static RPCMethod getpeerinfo()
         // their ver message.
         obj.pushKV("subver", stats.cleanSubVer);
         obj.pushKV("inbound", stats.fInbound);
+        obj.pushKV("hole_punched", stats.m_hole_punched);
         obj.pushKV("bip152_hb_to", stats.m_bip152_highbandwidth_to);
         obj.pushKV("bip152_hb_from", stats.m_bip152_highbandwidth_from);
         obj.pushKV("presynced_headers", statestats.presync_height);
@@ -412,6 +414,66 @@ static RPCMethod addnode()
     }
 
     return UniValue::VNULL;
+},
+    };
+}
+
+static RPCMethod hole_punch()
+{
+    return RPCMethod{
+        "holepunch",
+        "Connect to another node that, like this one, cannot accept incoming connections, by TCP hole punching.\n"
+        "Both nodes need -holepunch=1 and have to call this at about the same time, each with the other's address\n"
+        "as its peers see it (getpeerinfo addrlocal), one as \"outbound\" and the other as \"inbound\".\n"
+        "The call returns once the connection is made or the time is up.\n",
+        {
+            {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The other node's IP address and port as its peers see it (ip:port)"},
+            {"role", RPCArg::Type::STR, RPCArg::Optional::NO, "\"outbound\" or \"inbound\": what this node treats the connection as. The other node takes the other role"},
+            {"timeout", RPCArg::Type::NUM, RPCArg::Default{30}, "How long to try, in seconds"},
+        },
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::NUM, "id", "The peer id of the new connection"},
+                {RPCResult::Type::STR, "address", "(ip:port) The peer's address as seen on the connection"},
+                {RPCResult::Type::STR, "role", "\"outbound\" or \"inbound\""},
+                {RPCResult::Type::NUM, "attempts", "How often this node tried to connect"},
+                {RPCResult::Type::NUM, "elapsed", "How long it took, in seconds"},
+            }},
+        RPCExamples{
+            HelpExampleCli("holepunch", "\"<ip:port>\" \"outbound\"")
+            + HelpExampleRpc("holepunch", R"("<ip:port>", "inbound")")
+        },
+        [](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    CConnman& connman = EnsureConnman(node);
+
+    const std::string address{self.Arg<std::string_view>("address")};
+    const std::optional<CService> peer{Lookup(address, /*default_port=*/0, /*allow_lookup=*/false)};
+    if (!peer || peer->GetPort() == 0) {
+        throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Error: Address must be an IP address with a port");
+    }
+    const std::string role{self.Arg<std::string_view>("role")};
+    if (role != "outbound" && role != "inbound") {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Error: Role must be \"outbound\" or \"inbound\"");
+    }
+    const int timeout{self.Arg<int>("timeout")};
+    if (timeout < 1 || timeout > 600) {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "Error: Timeout must be between 1 and 600 seconds");
+    }
+
+    const auto result{connman.HolePunch(*peer, role == "outbound", std::chrono::seconds{timeout})};
+    if (!result) {
+        throw JSONRPCError(RPC_MISC_ERROR, strprintf("Error: Hole punch to %s failed: %s", peer->ToStringAddrPort(), util::ErrorString(result).original));
+    }
+    UniValue info(UniValue::VOBJ);
+    info.pushKV("id", result->id);
+    info.pushKV("address", result->peer.ToStringAddrPort());
+    info.pushKV("role", role);
+    info.pushKV("attempts", result->attempts);
+    info.pushKV("elapsed", Ticks<SecondsDouble>(result->elapsed));
+    return info;
 },
     };
 }
@@ -1327,6 +1389,7 @@ void RegisterNetRPCCommands(CRPCTable& t)
         {"network", &getnodeaddresses},
         {"network", &getaddrmaninfo},
         {"network", &exportasmap},
+        {"network", &hole_punch},
         {"hidden", &addconnection},
         {"hidden", &addpeeraddress},
         {"hidden", &sendmsgtopeer},

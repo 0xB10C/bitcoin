@@ -492,7 +492,19 @@ CNode* CConnman::ConnectNode(CAddress addrConnect,
                 // No proxy needed (none set for target network). Private broadcast connections
                 // must always use a proxy, otherwise they would leak the originator's IP address.
                 if (Assume(conn_type != ConnectionType::PRIVATE_BROADCAST)) {
-                    sock = ConnectDirectly(target_addr, conn_type == ConnectionType::MANUAL);
+                    // With hole punching on, every clearnet outbound connection is made from
+                    // the punch port, so that every peer reports our NAT-mapped address and
+                    // port and the mapping stays alive.
+                    const auto bind_addr{HolePunchBindAddress(target_addr)};
+                    sock = ConnectDirectly(target_addr, conn_type == ConnectionType::MANUAL, std::chrono::milliseconds{nConnectTimeout}, bind_addr);
+                    if (sock && bind_addr) {
+                        const uint16_t local_port{GetBindAddress(*sock).GetPort()};
+                        if (local_port == bind_addr->GetPort()) {
+                            LogDebug(BCLog::HOLEPUNCH, "connected to %s from punch port %d\n", target_addr.ToStringAddrPort(), local_port);
+                        } else {
+                            LogDebug(BCLog::HOLEPUNCH, "connected to %s from ephemeral port %d, punch port %d was not usable\n", target_addr.ToStringAddrPort(), local_port, bind_addr->GetPort());
+                        }
+                    }
                 }
             }
             if (!proxyConnectionFailed) {
@@ -637,6 +649,7 @@ void CNode::CopyStats(CNodeStats& stats)
         X(cleanSubVer);
     }
     stats.fInbound = IsInboundConn();
+    stats.m_hole_punched = m_hole_punched;
     X(m_bip152_highbandwidth_to);
     X(m_bip152_highbandwidth_from);
     {
@@ -1779,10 +1792,11 @@ void CConnman::AcceptConnection(const ListenSocket& hListenSocket) {
     CreateNodeFromAcceptedSocket(std::move(sock), permission_flags, addr_bind, addr);
 }
 
-void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
-                                            NetPermissionFlags permission_flags,
-                                            const CService& addr_bind,
-                                            const CService& addr)
+std::optional<NodeId> CConnman::CreateNodeFromAcceptedSocket(std::shared_ptr<Sock> sock,
+                                                             NetPermissionFlags permission_flags,
+                                                             const CService& addr_bind,
+                                                             const CService& addr,
+                                                             bool hole_punched)
 {
     AssertLockNotHeld(m_nodes_mutex);
 
@@ -1803,12 +1817,12 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
 
     if (!fNetworkActive) {
         LogDebug(BCLog::NET, "connection from %s dropped: not accepting new connections\n", addr.ToStringAddrPort());
-        return;
+        return std::nullopt;
     }
 
     if (!sock->IsSelectable()) {
         LogInfo("connection from %s dropped: non-selectable socket\n", addr.ToStringAddrPort());
-        return;
+        return std::nullopt;
     }
 
     // According to the internet TCP_NODELAY is not carried into accepted sockets
@@ -1824,7 +1838,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
     if (!NetPermissions::HasFlag(permission_flags, NetPermissionFlags::NoBan) && banned)
     {
         LogDebug(BCLog::NET, "connection from %s dropped (banned)\n", addr.ToStringAddrPort());
-        return;
+        return std::nullopt;
     }
 
     // Only accept connections from discouraged peers if our inbound slots aren't (almost) full.
@@ -1832,7 +1846,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
     if (!NetPermissions::HasFlag(permission_flags, NetPermissionFlags::NoBan) && nInbound + 1 >= m_max_inbound && discouraged)
     {
         LogDebug(BCLog::NET, "connection from %s dropped (discouraged)\n", addr.ToStringAddrPort());
-        return;
+        return std::nullopt;
     }
 
     if (nInbound >= m_max_inbound)
@@ -1840,7 +1854,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
         if (!AttemptToEvictConnection(/*evict_tx_relay_peer_only=*/false)) {
             // No connection to evict, disconnect the new connection
             LogDebug(BCLog::NET, "failed to find an eviction candidate - connection dropped (full)\n");
-            return;
+            return std::nullopt;
         }
     }
 
@@ -1872,6 +1886,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                                  .prefer_evict = discouraged,
                                  .recv_flood_size = nReceiveFloodSize,
                                  .use_v2transport = use_v2transport,
+                                 .hole_punched = hole_punched,
                              });
     pnode->AddRef();
     m_msgproc->InitializeNode(*pnode, local_services);
@@ -1879,7 +1894,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
         LOCK(m_nodes_mutex);
         m_nodes.push_back(pnode);
     }
-    LogDebug(BCLog::NET, "connection from %s accepted\n", addr.ToStringAddrPort());
+    LogDebug(BCLog::NET, "%sconnection from %s accepted\n", hole_punched ? "hole-punched " : "", addr.ToStringAddrPort());
     TRACEPOINT(net, inbound_connection,
         pnode->GetId(),
         pnode->m_addr_name.c_str(),
@@ -1889,6 +1904,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
 
     // We received a new connection, harvest entropy from the time (and our peer count)
     RandAddEvent((uint32_t)id);
+    return id;
 }
 
 bool CConnman::AddConnection(const std::string& address, ConnectionType conn_type, bool use_v2transport = false)
@@ -3820,6 +3836,90 @@ CConnman::~CConnman()
     Stop();
 }
 
+std::optional<CService> CConnman::HolePunchBindAddress(const CService& target) const
+{
+    if (m_holepunch_port == 0) return std::nullopt;
+    if (target.IsIPv4()) return holepunch::WildcardAddress(NET_IPV4, m_holepunch_port);
+    if (target.IsIPv6()) return holepunch::WildcardAddress(NET_IPV6, m_holepunch_port);
+    return std::nullopt;
+}
+
+NodeId CConnman::CreateNodeFromPunchedSocket(std::shared_ptr<Sock> sock, const CService& peer, const CService& addr_bind)
+{
+    AssertLockNotHeld(m_nodes_mutex);
+    const NodeId id{GetNewNodeId()};
+    const uint64_t nonce{GetDeterministicRandomizer(RANDOMIZER_ID_LOCALHOSTNONCE).Write(id).Finalize()};
+    const uint64_t network_id{GetDeterministicRandomizer(RANDOMIZER_ID_NETWORKKEY)
+                                  .Write(peer.GetNetClass())
+                                  .Write(addr_bind.GetAddrBytes())
+                                  .Write(0)
+                                  .Finalize()};
+    CNode* pnode = new CNode(id,
+                             std::move(sock),
+                             CAddress{peer, NODE_NONE},
+                             CalculateKeyedNetGroup(peer),
+                             nonce,
+                             addr_bind,
+                             /*addrNameIn=*/"",
+                             ConnectionType::MANUAL,
+                             /*inbound_onion=*/false,
+                             network_id,
+                             CNodeOptions{
+                                 .recv_flood_size = nReceiveFloodSize,
+                                 .use_v2transport = true, // -holepunch needs -v2transport on both nodes
+                                 .hole_punched = true,
+                             });
+    pnode->AddRef();
+    m_msgproc->InitializeNode(*pnode, m_local_services);
+    {
+        LOCK(m_nodes_mutex);
+        m_nodes.push_back(pnode);
+    }
+    RandAddEvent((uint32_t)id);
+    LogDebug(BCLog::NET, "hole-punched outbound connection to %s, peer=%d\n", peer.ToStringAddrPort(), id);
+    TRACEPOINT(net, outbound_connection,
+        pnode->GetId(),
+        pnode->m_addr_name.c_str(),
+        pnode->ConnectionTypeAsString().c_str(),
+        pnode->ConnectedThroughNetwork(),
+        GetNodeCount(ConnectionDirection::Out));
+    return id;
+}
+
+util::Result<CConnman::HolePunchInfo> CConnman::HolePunch(const CService& peer, bool outbound, std::chrono::milliseconds window)
+{
+    AssertLockNotHeld(m_nodes_mutex);
+    if (m_holepunch_port == 0) return util::Error{Untranslated("hole punching is off, start with -holepunch=1")};
+    if (!(peer.IsIPv4() || peer.IsIPv6()) || peer.GetPort() == 0) return util::Error{Untranslated("the address must be an IPv4 or IPv6 address with a port")};
+    if (!fNetworkActive) return util::Error{Untranslated("the network is not active")};
+    if (m_banman && (m_banman->IsBanned(peer) || m_banman->IsDiscouraged(peer))) return util::Error{Untranslated("the address is banned or discouraged")};
+    if (AlreadyConnectedToAddressPort(peer)) return util::Error{Untranslated("already connected to this address")};
+    if (m_holepunch_busy.exchange(true)) return util::Error{Untranslated("a hole punch is in progress")};
+    struct Release {
+        std::atomic<bool>& busy;
+        ~Release() { busy = false; }
+    } release{m_holepunch_busy};
+
+    const auto started{std::chrono::steady_clock::now()};
+    LogInfo("Hole punching to %s as %s", peer.ToStringAddrPort(), outbound ? "outbound" : "inbound");
+    auto outcome{holepunch::Punch(peer, m_holepunch_port, window, [this] { return m_interrupt_net->interrupted() || !fNetworkActive; })};
+    const auto elapsed{std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started)};
+    if (!outcome.sock) {
+        LogInfo("Hole punching to %s failed: %s after %d attempt(s)", peer.ToStringAddrPort(), outcome.error, outcome.attempts);
+        return util::Error{Untranslated(strprintf("%s after %d attempt(s)", outcome.error, outcome.attempts))};
+    }
+    const CService addr_bind{GetBindAddress(*outcome.sock)};
+    std::optional<NodeId> id;
+    if (outbound) {
+        id = CreateNodeFromPunchedSocket(std::move(outcome.sock), outcome.peer, addr_bind);
+    } else {
+        id = CreateNodeFromAcceptedSocket(std::move(outcome.sock), NetPermissionFlags::None, addr_bind, outcome.peer, /*hole_punched=*/true);
+        if (!id) return util::Error{Untranslated("the connection was made but dropped as inbound")};
+    }
+    LogInfo("Hole punching to %s succeeded after %d attempt(s) and %d ms, peer=%d", outcome.peer.ToStringAddrPort(), outcome.attempts, Ticks<std::chrono::milliseconds>(elapsed), *id);
+    return HolePunchInfo{.id = *id, .peer = outcome.peer, .attempts = outcome.attempts, .elapsed = elapsed};
+}
+
 std::vector<CAddress> CConnman::GetAddressesUnsafe(size_t max_addresses, size_t max_pct, std::optional<Network> network, const bool filtered) const
 {
     std::vector<CAddress> addresses = addrman.get().GetAddr(max_addresses, max_pct, network, filtered);
@@ -4130,6 +4230,7 @@ CNode::CNode(NodeId idIn,
       m_addr_name{addrNameIn.empty() ? addr.ToStringAddrPort() : addrNameIn},
       m_dest(addrNameIn),
       m_inbound_onion{inbound_onion},
+      m_hole_punched{node_opts.hole_punched},
       m_prefer_evict{node_opts.prefer_evict},
       nKeyedNetGroup{nKeyedNetGroupIn},
       m_network_key{network_key},

@@ -161,6 +161,7 @@ class NetTest(BitcoinTestFramework):
                 "connection_type": "inbound",
                 "conntime": no_version_peer_conntime,
                 "id": no_version_peer_id,
+                "hole_punched": False,
                 "inbound": True,
                 "inflight": [],
                 "last_block": 0,
