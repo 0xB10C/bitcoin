@@ -1662,6 +1662,8 @@ private:
 
     mutable Mutex m_holepunch_mutex;
     std::map<Network, HolePunchBoardState> m_holepunch_boards GUARDED_BY(m_holepunch_mutex);
+    /** Addresses that claim the board service bit but are not usable boards, and when to forget that. */
+    std::map<CService, NodeClock::time_point> m_holepunch_board_set_aside GUARDED_BY(m_holepunch_mutex);
     /** Runs the punch sessions; null unless hole punching is on. */
     std::unique_ptr<holepunch::SessionManager> m_holepunch_sessions;
 
@@ -1701,12 +1703,25 @@ public:
     holepunch::ExternalAddressTracker::Info GetHolePunchExternalInfo(Network net) const;
 
     /**
-     * Count a board connection of `family` that ended without a result: refused,
-     * closed before serving anything, or in conflict with the other board's
-     * report. After BOARD_FAIL_MAX in a row the family pauses for BOARD_BACKOFF.
+     * Count a board connection of `family` that served the node but did not
+     * acknowledge its element. That is evidence about the node's own mapping,
+     * so after BOARD_FAIL_MAX in a row the family pauses for BOARD_BACKOFF.
      */
     void HolePunchBoardFailed(Network family) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
-    /** A board of `family` yielded a result: the failures in a row are forgotten. */
+    /**
+     * Set an address aside as not a usable board: it advertises the service bit
+     * but did not act as a board, or could not be connected to. Service bits are
+     * unauthenticated, so anyone can advertise the board bit; such an address
+     * says nothing about this node and MUST NOT count towards the back-off
+     * above, or seeding a few of them would stop a node's hole punching. It is
+     * not picked again for BOARD_BACKOFF.
+     */
+    void HolePunchBoardUnusable(const CService& addr) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
+    /** How many addresses are currently set aside. */
+    size_t GetHolePunchBoardsSetAside() const EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
+    /** The addresses set aside, forgetting those whose hour is over. */
+    std::set<CService> HolePunchBoardsSetAside(NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
+    /** A board of `family` acknowledged an element: the failures in a row are forgotten. */
     void HolePunchBoardSucceeded(Network family) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
 
     HolePunchBoardState GetHolePunchBoardState(Network family) const EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);

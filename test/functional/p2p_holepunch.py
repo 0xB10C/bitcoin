@@ -288,9 +288,19 @@ class HolePunchTest(BitcoinTestFramework):
         visitor.disconnect_p2ps()
 
         self.log.info("A visitor closes a board connection whose peer does not answer BOARD")
+        # The service bit is unauthenticated, so such a peer is only a bad address:
+        # it is set aside and does not count towards the back-off.
+        before = visitor.getholepunchinfo()
         for flags in [None, 0, FLAG_VISITOR]:
             peer = visitor.add_outbound_p2p_connection(HolePunchPeer(flags=flags), p2p_idx=0, connection_type="holepunch-board", wait_for_disconnect=True)
             assert_equal(peer.holepunch_flags(), FLAG_VISITOR)
+            # The handshake completes before the connection is dropped, which is what
+            # lets the address manager record the peer's real services and move the
+            # address to its tried table, as it does for any other outbound peer.
+            assert_equal(peer.message_count["verack"], 1)
+        after = visitor.getholepunchinfo()
+        assert_equal(after["families"][0]["board_fails"], before["families"][0]["board_fails"])
+        assert after["boards_set_aside"] > before["boards_set_aside"]
 
         self.log.info("A visitor sends no feature on an ordinary outbound connection")
         peer = visitor.add_outbound_p2p_connection(HolePunchPeer(flags=FLAG_BOARD), p2p_idx=0)
@@ -443,18 +453,18 @@ class HolePunchTest(BitcoinTestFramework):
         for mock in mocks:
             mock.peer_disconnect()
 
-        self.log.info("After four board connections in a row without a result, a family pauses for an hour")
+        self.log.info("An address that advertises the board bit but cannot be reached is set aside, not counted")
         visitor2 = self.nodes[2]
-        family = lambda: visitor2.getholepunchinfo()["families"][0]
-        # A board address nothing listens on: every attempt is refused.
-        self.restart_node(2, extra_args=self.extra_args[2] + [f"-holepunchboardseed=127.0.0.1:{p2p_port(MAX_NODES)}"])
-        self.wait_until(lambda: family()["board_backoff_until"] > 0)
-        assert_equal(family()["board_fails"], 0)
-        paused_until = family()["board_backoff_until"]
-        # Once the pause is over, attempts resume.
-        visitor2.setmocktime(paused_until + 1)
-        self.wait_until(lambda: family()["board_fails"] > 0)
+        info2 = lambda: visitor2.getholepunchinfo()
+        dead = f"127.0.0.1:{p2p_port(MAX_NODES)}"
+        self.restart_node(2, extra_args=self.extra_args[2] + [f"-holepunchboardseed={dead}"])
+        self.wait_until(lambda: info2()["boards_set_aside"] == 1)
+        # It is not retried while it is set aside, and the family never pauses.
+        visitor2.setmocktime(int(time.time()) + 60)
+        assert_equal(info2()["boards_set_aside"], 1)
         visitor2.setmocktime(0)
+        assert_equal(info2()["families"][0]["board_fails"], 0)
+        assert_equal(info2()["families"][0]["board_backoff_until"], 0)
 
     def test_announcements(self):
         visitor = self.nodes[0]
@@ -531,6 +541,30 @@ class HolePunchTest(BitcoinTestFramework):
         assert_equal(family()["board_fails"], fails + 1)
         board_b.sync_with_ping()  # acknowledged, stays
         visitor.setmocktime(0)
+
+        self.log.info("Four boards in a row that never acknowledge pause the family for an hour")
+        # A board that serves the visitor but never returns its entry is one of the two
+        # signals that say something about this node's own mapping (R-5.2, R-5.3). The
+        # boards come in pairs, since two agreeing reports are needed to announce at all.
+        visitor.disconnect_p2ps()
+        self.restart_node(0)  # start from a counter of zero
+        mocked = 0
+        for pair in range(2):
+            mocks = [board(5 + pair * 2 + i, echo=False) for i in range(2)]
+            for mock in mocks:
+                mock.wait_until(lambda: len(mock.elements) == 1)
+            # Step past BOARD_ACK counted from the announcement, not from earlier,
+            # or a slow handshake leaves the gap just under the timeout.
+            mocked = max(mocked, int(time.time())) + 61
+            visitor.setmocktime(mocked)
+            for mock in mocks:
+                mock.wait_for_disconnect()
+            expected = 0 if pair == 1 else 2
+            self.wait_until(lambda: family()["board_fails"] == expected)
+        assert family()["board_backoff_until"] > 0
+        visitor.setmocktime(0)
+        visitor.disconnect_p2ps()
+        self.restart_node(0)
 
         self.log.info("A new external address is announced under a new key, with the other family's key untouched")
         visitor.disconnect_p2ps()

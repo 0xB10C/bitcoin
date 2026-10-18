@@ -1233,6 +1233,7 @@ static RPCMethod getholepunchinfo()
                                 {RPCResult::Type::STR, "announced", /*optional=*/true, "(ip:port) The external address announced under the key"},
                             }},
                     }},
+                {RPCResult::Type::NUM, "boards_set_aside", "Addresses that advertise the board service bit but are not usable boards"},
                 {RPCResult::Type::OBJ, "rounds", "Rounds held on new blocks",
                     {
                         {RPCResult::Type::NUM, "held", "Rounds since the node started"},
@@ -1341,6 +1342,7 @@ static RPCMethod getholepunchinfo()
         sources.push_back(std::move(source));
     }
     table.pushKV("sources", std::move(sources));
+    obj.pushKV("boards_set_aside", connman.GetHolePunchBoardsSetAside());
     UniValue rounds(UniValue::VOBJ);
     rounds.pushKV("held", peerman_info.rounds);
     rounds.pushKV("picks", peerman_info.picks);

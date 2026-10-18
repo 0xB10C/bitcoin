@@ -3908,19 +3908,42 @@ CConnman::BoardVisitorCounts CConnman::CountBoardVisitors(const CNode& visitor) 
 
 void CConnman::HolePunchReport(const CNode& node, const CService& reported)
 {
-    if (!m_holepunch_external.AddReport(node.GetId(), m_netgroupman.GetGroup(node.addr), reported, m_holepunch.allow_local)) return;
-    const Network family{reported.IsIPv4() ? NET_IPV4 : NET_IPV6};
-    if (m_holepunch_external.Get(family)) HolePunchBoardSucceeded(family);
+    m_holepunch_external.AddReport(node.GetId(), m_netgroupman.GetGroup(node.addr), reported, m_holepunch.allow_local);
 }
 
 void CConnman::HolePunchBoardFailed(Network family)
 {
     LOCK(m_holepunch_mutex);
+    // Only a board that served this node and did not acknowledge its element, or
+    // boards that disagree about its endpoint, get here: both say something about
+    // this node rather than about the remote address.
     auto& state{m_holepunch_boards[family]};
     if (++state.fails < holepunch::BOARD_FAIL_MAX) return;
     state.fails = 0;
     state.backoff_until = NodeClock::now() + holepunch::BOARD_BACKOFF;
     LogInfo("Hole punching: %d board connections for %s in a row gave no result, pausing for %d minutes", holepunch::BOARD_FAIL_MAX, GetNetworkName(family), Ticks<std::chrono::minutes>(holepunch::BOARD_BACKOFF));
+}
+
+void CConnman::HolePunchBoardUnusable(const CService& addr)
+{
+    LOCK(m_holepunch_mutex);
+    m_holepunch_board_set_aside[addr] = NodeClock::now() + holepunch::BOARD_BACKOFF;
+    LogDebug(BCLog::HOLEPUNCH, "%s is not a usable board, not trying it again for %d minutes\n", addr.ToStringAddrPort(), Ticks<std::chrono::minutes>(holepunch::BOARD_BACKOFF));
+}
+
+std::set<CService> CConnman::HolePunchBoardsSetAside(NodeClock::time_point now)
+{
+    LOCK(m_holepunch_mutex);
+    std::erase_if(m_holepunch_board_set_aside, [&](const auto& entry) { return now >= entry.second; });
+    std::set<CService> addrs;
+    for (const auto& [addr, until] : m_holepunch_board_set_aside) addrs.insert(addr);
+    return addrs;
+}
+
+size_t CConnman::GetHolePunchBoardsSetAside() const
+{
+    LOCK(m_holepunch_mutex);
+    return m_holepunch_board_set_aside.size();
 }
 
 void CConnman::HolePunchBoardSucceeded(Network family)
@@ -3990,9 +4013,11 @@ bool CConnman::MaybeOpenHolePunchBoardConnection(FastRandomContext& rng)
         for (const CService& seed : m_holepunch.board_seeds) {
             known.emplace_back(seed, ServiceFlags(NODE_HOLEPUNCH_BOARD | NODE_P2P_V2));
         }
+        const std::set<CService> set_aside{HolePunchBoardsSetAside(now)};
         std::vector<CAddress> candidates;
         for (const CAddress& addr : known) {
             if ((family == NET_IPV4) != addr.IsIPv4()) continue;
+            if (set_aside.contains(addr)) continue;
             if (!(addr.nServices & NODE_HOLEPUNCH_BOARD) || !(addr.nServices & NODE_P2P_V2)) continue;
             if (IsLocal(addr)) continue;
             if (m_holepunch.allow_local ? AlreadyConnectedToAddressPort(addr) : AlreadyConnectedToAddress(addr)) continue;
@@ -4008,7 +4033,8 @@ bool CConnman::MaybeOpenHolePunchBoardConnection(FastRandomContext& rng)
         LogDebug(BCLog::HOLEPUNCH, "opening a board connection to %s, %d of %d boards for %s open", board.ToStringAddrPort(), open_groups[family].size(), holepunch::BOARDS, GetNetworkName(family));
         if (!OpenNetworkConnection(board, /*fCountFailure=*/false, /*grant_outbound=*/{}, /*pszDest=*/nullptr,
                                    ConnectionType::HOLEPUNCH_BOARD, /*use_v2transport=*/true, /*proxy_override=*/std::nullopt)) {
-            HolePunchBoardFailed(family);
+            // An address that cannot be reached says nothing about this node.
+            HolePunchBoardUnusable(board);
         }
         return true;
     }

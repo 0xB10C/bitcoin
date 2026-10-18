@@ -1928,8 +1928,9 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
     if (node.m_hole_punched) m_connman.HolePunchForget(nodeid);
     if (node.IsHolePunchBoardConn()) {
         m_connman.HolePunchForget(nodeid);
-        // Closed before it served anything, by the board or by the network.
-        if (!node.fSuccessfullyConnected) m_connman.HolePunchBoardFailed(node.addr.IsIPv4() ? NET_IPV4 : NET_IPV6);
+        // Closed before it served anything, by the peer or by the network: another
+        // bad address rather than a verdict on this node.
+        if (!node.fSuccessfullyConnected) m_connman.HolePunchBoardUnusable(node.addr);
     }
     if (node.m_board_visitor) m_holepunch_board.Disconnected(nodeid, NodeClock::now());
     if (node.IsPrivateBroadcastConn()) {
@@ -4037,6 +4038,9 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             const Network family{pfrom.addr.IsIPv4() ? NET_IPV4 : NET_IPV6};
             if (m_connman.GetHolePunchExternalInfo(family).conflicting) {
                 LogDebug(BCLog::HOLEPUNCH, "boards disagree on our %s address, %s", GetNetworkName(family), pfrom.DisconnectMsg());
+                // Two agreeing sets that disagree with each other means this node's
+                // mapping is not endpoint-independent, which is about this node (R-2.3).
+                m_connman.HolePunchBoardFailed(family);
                 pfrom.fDisconnect = true;
                 return;
             }
@@ -4273,9 +4277,12 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         pfrom.fSuccessfullyConnected = true;
 
         // A board connection is of no use unless the board said it is one (R-3.5).
+        // The service bit that got us here is unauthenticated, so a peer that
+        // does not act as a board is only a bad address, not a sign that this
+        // node cannot be punched to.
         if (pfrom.IsHolePunchBoardConn() && !IsBoardConnection(pfrom, peer)) {
             LogDebug(BCLog::HOLEPUNCH, "peer did not act as a board, %s", pfrom.DisconnectMsg());
-            m_connman.HolePunchBoardFailed(pfrom.addr.IsIPv4() ? NET_IPV4 : NET_IPV6);
+            m_connman.HolePunchBoardUnusable(pfrom.addr);
             pfrom.fDisconnect = true;
         }
         return;
