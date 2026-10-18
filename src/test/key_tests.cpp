@@ -395,4 +395,25 @@ BOOST_AUTO_TEST_CASE(key_schnorr_tweak_smoke_test)
     secp256k1_context_destroy(secp256k1_context_sign);
 }
 
+BOOST_AUTO_TEST_CASE(ecdh_x_coordinate)
+{
+    // From the hole punching draft's pairing vectors: secret 3 and secret
+    // b7e1... share the x coordinate f549..., whichever side computes it.
+    CKey key_a;
+    const auto secret_a{ParseHex<unsigned char>("0000000000000000000000000000000000000000000000000000000000000003")};
+    key_a.Set(secret_a.begin(), secret_a.end(), true);
+    CKey key_b;
+    const auto secret_b{ParseHex<unsigned char>("b7e151628aed2a6abf7158809cf4f3c762e7160f38b4da56a784d9045190cfef")};
+    key_b.Set(secret_b.begin(), secret_b.end(), true);
+    BOOST_CHECK_EQUAL(HexStr(key_a.GetPubKey()), "02f9308a019258c31049344f85f89d5229b531c845836f99b08601f113bce036f9");
+    BOOST_CHECK_EQUAL(HexStr(key_b.GetPubKey()), "02dff1d77f2a671c5f36183726db2341be58feae1da2deced843240f7b502ba659");
+    const auto x_ab{key_a.ECDHX(key_b.GetPubKey())};
+    const auto x_ba{key_b.ECDHX(key_a.GetPubKey())};
+    BOOST_REQUIRE(x_ab && x_ba);
+    BOOST_CHECK_EQUAL(HexStr(*x_ab), "f549c8c8f9b44c4aab3e352998dd736d1247a3dcac80f5b0360f54f7dafd2bd5");
+    BOOST_CHECK(*x_ab == *x_ba);
+    // A key that is not a point yields nothing.
+    BOOST_CHECK(!key_a.ECDHX(CPubKey{ParseHex<unsigned char>("020000000000000000000000000000000000000000000000000000000000000005")}));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

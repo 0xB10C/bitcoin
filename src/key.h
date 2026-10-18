@@ -152,6 +152,14 @@ public:
     CPubKey GetPubKey() const;
 
     /**
+     * The x coordinate of the ECDH product of this key and `pubkey`, as 32
+     * bytes big-endian (a plain Diffie-Hellman secret, without hashing).
+     * Nullopt if `pubkey` does not parse or the product is the point at
+     * infinity.
+     */
+    std::optional<uint256> ECDHX(const CPubKey& pubkey) const;
+
+    /**
      * Create a DER-serialized signature.
      * The test_case parameter tweaks the deterministic nonce.
      */

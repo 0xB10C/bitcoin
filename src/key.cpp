@@ -194,6 +194,19 @@ CPubKey CKey::GetPubKey() const {
     return result;
 }
 
+std::optional<uint256> CKey::ECDHX(const CPubKey& pubkey) const
+{
+    assert(keydata);
+    secp256k1_pubkey point;
+    if (!secp256k1_ec_pubkey_parse(secp256k1_context_static, &point, pubkey.begin(), pubkey.size())) return std::nullopt;
+    if (!secp256k1_ec_pubkey_tweak_mul(secp256k1_context_static, &point, UCharCast(begin()))) return std::nullopt;
+    unsigned char serialized[CPubKey::COMPRESSED_SIZE];
+    size_t len{sizeof(serialized)};
+    secp256k1_ec_pubkey_serialize(secp256k1_context_static, serialized, &len, &point, SECP256K1_EC_COMPRESSED);
+    assert(len == sizeof(serialized));
+    return uint256{std::span<const unsigned char>{serialized + 1, 32}};
+}
+
 // Check that the sig has a low R value and will be less than 71 bytes
 bool SigHasLowR(const secp256k1_ecdsa_signature* sig)
 {
