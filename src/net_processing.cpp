@@ -1936,7 +1936,7 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
     if (node.IsHolePunchBoardConn()) {
         // Closed before it served anything, by the peer or by the network: another
         // bad address rather than a verdict on this node.
-        if (!node.fSuccessfullyConnected) m_connman.HolePunchBoardUnusable(node.addr);
+        if (!node.fSuccessfullyConnected) m_connman.HolePunchBoardUnusable(node.addr, "it did not finish the version handshake");
     }
     if (node.m_board_visitor) m_holepunch_board.Disconnected(nodeid, NodeClock::now());
     if (node.IsPrivateBroadcastConn()) {
@@ -4287,7 +4287,9 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         // node cannot be punched to.
         if (pfrom.IsHolePunchBoardConn() && !IsBoardConnection(pfrom, peer)) {
             LogDebug(BCLog::HOLEPUNCH, "peer did not act as a board, %s", pfrom.DisconnectMsg());
-            m_connman.HolePunchBoardUnusable(pfrom.addr);
+            m_connman.HolePunchBoardUnusable(pfrom.addr, pfrom.GetCommonVersion() < FEATURE_VERSION ?
+                                                 "it is too old for the feature message" :
+                                                 "it did not send the BOARD flag");
             pfrom.fDisconnect = true;
         }
         return;

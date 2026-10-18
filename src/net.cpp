@@ -3931,11 +3931,21 @@ void CConnman::HolePunchBoardFailed(Network family)
     LogInfo("Hole punching: %d board connections for %s in a row gave no result, pausing for %d minutes", holepunch::BOARD_FAIL_MAX, GetNetworkName(family), Ticks<std::chrono::minutes>(holepunch::BOARD_BACKOFF));
 }
 
-void CConnman::HolePunchBoardUnusable(const CService& addr)
+void CConnman::HolePunchBoardUnusable(const CService& addr, std::string_view reason)
 {
     LOCK(m_holepunch_mutex);
     m_holepunch_board_set_aside[addr] = NodeClock::now() + holepunch::BOARD_BACKOFF;
-    LogDebug(BCLog::HOLEPUNCH, "%s is not a usable board, not trying it again for %d minutes\n", addr.ToStringAddrPort(), Ticks<std::chrono::minutes>(holepunch::BOARD_BACKOFF));
+    LogDebug(BCLog::HOLEPUNCH, "%s is not a usable board (%s), not trying it again for %d minutes\n", addr.ToStringAddrPort(), reason, Ticks<std::chrono::minutes>(holepunch::BOARD_BACKOFF));
+}
+
+bool CConnman::HolePunchSayNoCandidate(Network family, NodeClock::time_point now)
+{
+    static constexpr auto INTERVAL{std::chrono::minutes{10}};
+    LOCK(m_holepunch_mutex);
+    auto& last{m_holepunch_no_candidate_logged[family]};
+    if (last != NodeClock::time_point{} && now < last + INTERVAL) return false;
+    last = now;
+    return true;
 }
 
 std::set<CService> CConnman::HolePunchBoardsSetAside(NodeClock::time_point now)
@@ -4021,27 +4031,49 @@ bool CConnman::MaybeOpenHolePunchBoardConnection(FastRandomContext& rng)
             known.emplace_back(seed, ServiceFlags(NODE_HOLEPUNCH_BOARD | NODE_P2P_V2));
         }
         const std::set<CService> set_aside{HolePunchBoardsSetAside(now)};
+        // Why the addresses of this family were passed over, for the log below.
+        struct Skipped {
+            size_t considered{0};
+            size_t no_board_bit{0};
+            size_t no_v2{0};
+            size_t set_aside{0};
+            size_t local{0};
+            size_t connected{0};
+            size_t other_board_group{0};
+        } skipped;
         std::vector<CAddress> candidates;
         for (const CAddress& addr : known) {
             if ((family == NET_IPV4) != addr.IsIPv4()) continue;
-            if (set_aside.contains(addr)) continue;
-            if (!(addr.nServices & NODE_HOLEPUNCH_BOARD) || !(addr.nServices & NODE_P2P_V2)) continue;
-            if (IsLocal(addr)) continue;
-            if (m_holepunch.allow_local ? AlreadyConnectedToAddressPort(addr) : AlreadyConnectedToAddress(addr)) continue;
+            ++skipped.considered;
+            if (!(addr.nServices & NODE_HOLEPUNCH_BOARD)) { ++skipped.no_board_bit; continue; }
+            if (!(addr.nServices & NODE_P2P_V2)) { ++skipped.no_v2; continue; }
+            if (set_aside.contains(addr)) { ++skipped.set_aside; continue; }
+            if (IsLocal(addr)) { ++skipped.local; continue; }
+            if (m_holepunch.allow_local ? AlreadyConnectedToAddressPort(addr) : AlreadyConnectedToAddress(addr)) { ++skipped.connected; continue; }
             if (!m_holepunch.allow_local) {
                 const auto group{m_netgroupman.GetGroup(addr)};
-                if (std::find(open_groups[family].begin(), open_groups[family].end(), group) != open_groups[family].end()) continue;
+                if (std::find(open_groups[family].begin(), open_groups[family].end(), group) != open_groups[family].end()) { ++skipped.other_board_group; continue; }
             }
             candidates.push_back(addr);
         }
-        if (candidates.empty()) continue;
+        if (candidates.empty()) {
+            if (HolePunchSayNoCandidate(family, now)) {
+                LogDebug(BCLog::HOLEPUNCH, "no board to connect to for %s: of %d addresses, %d do not advertise the board service bit, %d not NODE_P2P_V2, %d set aside, %d local, %d already connected, %d in the other board's network group\n",
+                         GetNetworkName(family), skipped.considered, skipped.no_board_bit, skipped.no_v2,
+                         skipped.set_aside, skipped.local, skipped.connected, skipped.other_board_group);
+            }
+            continue;
+        }
 
         const CAddress& board{candidates[rng.randrange(candidates.size())]};
-        LogDebug(BCLog::HOLEPUNCH, "opening a board connection to %s, %d of %d boards for %s open", board.ToStringAddrPort(), open_groups[family].size(), holepunch::BOARDS, GetNetworkName(family));
+        LogDebug(BCLog::HOLEPUNCH, "opening a board connection to %s (services %016x), %d of %d boards for %s open, one of %d candidates among %d addresses (%d set aside, %d already connected)\n",
+                 board.ToStringAddrPort(), static_cast<uint64_t>(board.nServices), open_groups[family].size(),
+                 holepunch::BOARDS, GetNetworkName(family), candidates.size(), skipped.considered,
+                 skipped.set_aside, skipped.connected);
         if (!OpenNetworkConnection(board, /*fCountFailure=*/false, /*grant_outbound=*/{}, /*pszDest=*/nullptr,
                                    ConnectionType::HOLEPUNCH_BOARD, /*use_v2transport=*/true, /*proxy_override=*/std::nullopt)) {
             // An address that cannot be reached says nothing about this node.
-            HolePunchBoardUnusable(board);
+            HolePunchBoardUnusable(board, "the connection could not be opened");
         }
         return true;
     }

@@ -1664,6 +1664,8 @@ private:
     std::map<Network, HolePunchBoardState> m_holepunch_boards GUARDED_BY(m_holepunch_mutex);
     /** Addresses that claim the board service bit but are not usable boards, and when to forget that. */
     std::map<CService, NodeClock::time_point> m_holepunch_board_set_aside GUARDED_BY(m_holepunch_mutex);
+    /** When the lack of a board candidate was last logged, per family. */
+    std::map<Network, NodeClock::time_point> m_holepunch_no_candidate_logged GUARDED_BY(m_holepunch_mutex);
     /** Runs the punch sessions; null unless hole punching is on. */
     std::unique_ptr<holepunch::SessionManager> m_holepunch_sessions;
 
@@ -1720,11 +1722,16 @@ public:
      * above, or seeding a few of them would stop a node's hole punching. It is
      * not picked again for BOARD_BACKOFF.
      */
-    void HolePunchBoardUnusable(const CService& addr) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
+    void HolePunchBoardUnusable(const CService& addr, std::string_view reason) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
     /** How many addresses are currently set aside. */
     size_t GetHolePunchBoardsSetAside() const EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
     /** The addresses set aside, forgetting those whose hour is over. */
     std::set<CService> HolePunchBoardsSetAside(NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
+    /**
+     * Whether to say in the log that `family` has no board to connect to. The
+     * selection runs twice a second, so this is true only now and then.
+     */
+    bool HolePunchSayNoCandidate(Network family, NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
     /** A board of `family` acknowledged an element: the failures in a row are forgotten. */
     void HolePunchBoardSucceeded(Network family) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
 
