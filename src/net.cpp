@@ -3851,6 +3851,24 @@ std::optional<CService> CConnman::HolePunchBindAddress(const CService& target) c
     return std::nullopt;
 }
 
+CConnman::BoardVisitorCounts CConnman::CountBoardVisitors(const CNode& visitor) const
+{
+    BoardVisitorCounts counts;
+    const auto group{m_holepunch.allow_local ? std::vector<unsigned char>{} : m_netgroupman.GetGroup(visitor.addr)};
+    LOCK(m_nodes_mutex);
+    for (const CNode* node : m_nodes) {
+        if (!node->m_board_visitor || node->fDisconnect || node == &visitor) continue;
+        ++counts.total;
+        if (m_holepunch.allow_local) {
+            if (static_cast<const CService&>(node->addr) == static_cast<const CService&>(visitor.addr)) ++counts.same_address;
+        } else {
+            if (m_netgroupman.GetGroup(node->addr) == group) ++counts.same_group;
+            if (static_cast<const CNetAddr&>(node->addr) == static_cast<const CNetAddr&>(visitor.addr)) ++counts.same_address;
+        }
+    }
+    return counts;
+}
+
 std::vector<CAddress> CConnman::GetAddressesUnsafe(size_t max_addresses, size_t max_pct, std::optional<Network> network, const bool filtered) const
 {
     std::vector<CAddress> addresses = addrman.get().GetAddr(max_addresses, max_pct, network, filtered);

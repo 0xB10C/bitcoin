@@ -31,6 +31,14 @@ typedef int64_t NodeId;
 inline constexpr uint16_t PUNCH_PORT_MIN{49152};
 inline constexpr uint16_t PUNCH_PORT_MAX{65535};
 
+// Limits of the board pool (section 5 of the draft, R-5.5).
+/** Visitors a board holds at most. */
+inline constexpr size_t BOARD_VISITORS_MAX{32};
+/** Visitors from one network group a board holds at most. */
+inline constexpr size_t BOARD_PER_GROUP{4};
+/** Visitors from one address a board holds at most. */
+inline constexpr size_t BOARD_IP_CAP{1};
+
 /** Settings, filled in from the command line options. */
 struct Options {
     /** Whether the node visits boards and punches. */

@@ -4,7 +4,11 @@
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test TCP hole punching through boards: options, board connections and the feature exchange."""
 
-from test_framework.messages import msg_feature
+from test_framework.messages import (
+    msg_feature,
+    msg_getaddr,
+    msg_inv,
+)
 from test_framework.p2p import P2PInterface
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
@@ -51,7 +55,13 @@ class HolePunchPeer(P2PInterface):
             self.send_without_ping(msg_feature(HOLEPUNCH_FEATURE_ID, self.data))
         elif self.flags is not None:
             self.send_without_ping(msg_feature(HOLEPUNCH_FEATURE_ID, feature_data(self.flags)))
+        # P2PInterface sends a getaddr after verack on connections it made, which
+        # a board connection does not allow.
+        connected_to_node = self.p2p_connected_to_node
+        if self.flags is not None and self.flags & FLAG_VISITOR:
+            self.p2p_connected_to_node = False
         super().on_version(message)
+        self.p2p_connected_to_node = connected_to_node
 
     def holepunch_flags(self):
         """The flags the node sent in its hole punching feature, None if it sent none."""
@@ -157,6 +167,39 @@ class HolePunchTest(BitcoinTestFramework):
         peer = board.add_p2p_connection(HolePunchPeer(data=b"\x00\x01"), wait_for_verack=False)
         peer.wait_for_disconnect()
 
+    def test_board_connection_protocol(self):
+        visitor, board = self.nodes
+        quiet = ["getaddr", "sendheaders", "getheaders", "sendcmpct", "inv", "feefilter"]
+
+        self.log.info("A visitor disables transaction relay and sends nothing but pings after verack")
+        peer = visitor.add_outbound_p2p_connection(HolePunchPeer(flags=FLAG_BOARD), p2p_idx=0, connection_type="holepunch-board")
+        assert_equal(peer.relay, 0)
+        for msg in quiet:
+            assert_equal(peer.message_count[msg], 0)
+
+        self.log.info("A visitor closes a board connection on any other message")
+        peer.send_without_ping(msg_inv([]))
+        peer.wait_for_disconnect()
+        peer = visitor.add_outbound_p2p_connection(HolePunchPeer(flags=FLAG_BOARD), p2p_idx=0, connection_type="holepunch-board")
+        peer.send_without_ping(msg_getaddr())
+        peer.wait_for_disconnect()
+
+        self.log.info("A board sends nothing but pings to a visitor and closes on any other message")
+        peer = board.add_p2p_connection(HolePunchPeer(flags=FLAG_VISITOR))
+        for msg in quiet:
+            assert_equal(peer.message_count[msg], 0)
+        peer.send_without_ping(msg_getaddr())
+        peer.wait_for_disconnect()
+        board.disconnect_p2ps()
+
+        self.log.info("A board refuses a visitor beyond its pool size")
+        for _ in range(32):
+            board.add_p2p_connection(HolePunchPeer(flags=FLAG_VISITOR))
+        extra = board.add_p2p_connection(HolePunchPeer(flags=FLAG_VISITOR), wait_for_verack=False)
+        extra.wait_for_disconnect()
+        assert_equal(len([p for p in board.getpeerinfo() if p["holepunch_flags"] == ["VISITOR"]]), 32)
+        board.disconnect_p2ps()
+
     def test_visitors_outside_inbound_limit(self):
         board = self.nodes[1]
         self.log.info("Visitors do not take inbound slots at a board")
@@ -178,6 +221,7 @@ class HolePunchTest(BitcoinTestFramework):
         self.test_options()
         self.test_board_connection_port()
         self.test_feature_exchange()
+        self.test_board_connection_protocol()
         self.test_visitors_outside_inbound_limit()
 
 

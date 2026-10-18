@@ -4032,7 +4032,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         {
             LOCK(cs_main);
             CNodeState* state = State(pfrom.GetId());
-            state->fPreferredDownload = (!pfrom.IsInboundConn() || pfrom.HasPermission(NetPermissionFlags::NoBan)) && !pfrom.IsAddrFetchConn() && CanServeBlocks(peer);
+            state->fPreferredDownload = (!pfrom.IsInboundConn() || pfrom.HasPermission(NetPermissionFlags::NoBan)) && !pfrom.IsAddrFetchConn() && !pfrom.IsHolePunchBoardConn() && CanServeBlocks(peer);
             m_num_preferred_download_peers += state->fPreferredDownload;
         }
 
@@ -4150,7 +4150,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             return;
         }
 
-        if (pfrom.GetCommonVersion() >= SHORT_IDS_BLOCKS_VERSION) {
+        if (pfrom.GetCommonVersion() >= SHORT_IDS_BLOCKS_VERSION && !IsBoardConnection(pfrom, peer)) {
             // Tell our peer we are willing to provide version 2 cmpctblocks.
             // However, we do not request new block announcements using
             // cmpctblock messages.
@@ -4185,6 +4185,15 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             LogDebug(BCLog::HOLEPUNCH, "peer did not act as a board, %s", pfrom.DisconnectMsg());
             pfrom.fDisconnect = true;
         }
+        return;
+    }
+
+    // From verack on, a board connection carries only pings and addrv2
+    // messages with PUNCHKEY elements (R-3.5).
+    if (pfrom.fSuccessfullyConnected && IsBoardConnection(pfrom, peer) &&
+        msg_type != NetMsgType::PING && msg_type != NetMsgType::PONG && msg_type != NetMsgType::ADDRV2) {
+        LogDebug(BCLog::HOLEPUNCH, "%s message on a board connection, %s", SanitizeString(msg_type), pfrom.DisconnectMsg());
+        pfrom.fDisconnect = true;
         return;
     }
 
@@ -4303,6 +4312,22 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             peer.m_holepunch_flags_received = data.flags;
             LogDebug(BCLog::HOLEPUNCH, "peer=%d supports hole punching version %d, flags %s", pfrom.GetId(), data.version, util::Join(holepunch::FeatureFlagNames(data.flags), ","));
             if (pfrom.IsInboundConn() && IsBoardConnection(pfrom, peer)) {
+                // The visitor pool has its own limits (R-5.5); a visitor beyond them is
+                // closed without being served anything.
+                const auto counts{m_connman.CountBoardVisitors(pfrom)};
+                const char* refusal{nullptr};
+                if (counts.total >= holepunch::BOARD_VISITORS_MAX) {
+                    refusal = "the visitor pool is full";
+                } else if (counts.same_group >= holepunch::BOARD_PER_GROUP) {
+                    refusal = "too many visitors from its network group";
+                } else if (counts.same_address >= holepunch::BOARD_IP_CAP) {
+                    refusal = "a visitor from its address is connected";
+                }
+                if (refusal) {
+                    LogDebug(BCLog::HOLEPUNCH, "refusing visitor, %s, %s", refusal, pfrom.DisconnectMsg());
+                    pfrom.fDisconnect = true;
+                    return;
+                }
                 // A visitor's connection leaves the inbound limit from here on.
                 pfrom.m_board_visitor = true;
             }
@@ -5950,6 +5975,8 @@ bool PeerManagerImpl::RejectIncomingTxs(const CNode& peer) const
     // block-relay-only peers may never send txs to us
     if (peer.IsBlockOnlyConn()) return true;
     if (peer.IsFeelerConn()) return true;
+    // board connections carry nothing but the hole punching protocol
+    if (peer.IsHolePunchBoardConn()) return true;
     // In -blocksonly mode, peers need the 'relay' permission to send txs to us
     if (m_opts.ignore_incoming_txs && !peer.HasPermission(NetPermissionFlags::Relay)) return true;
     return false;
@@ -6026,6 +6053,10 @@ bool PeerManagerImpl::SetupAddressRelay(const CNode& node, Peer& peer)
     // they are disconnected shortly after the handshake completes,
     // before the node will receive the addr response.
     if (node.IsFeelerConn()) return false;
+
+    // Board connections carry hole punching announcements in addrv2
+    // messages, but no address relay in either direction.
+    if (node.IsHolePunchBoardConn() || node.m_board_visitor) return false;
 
     if (!peer.m_addr_relay_enabled.exchange(true)) {
         // During version message processing (non-block-relay-only outbound peers)
@@ -6169,6 +6200,10 @@ bool PeerManagerImpl::SendMessages(CNode& node)
     }
 
     MaybeSendPing(node, peer, now);
+
+    // A board connection carries nothing of what follows: no address relay,
+    // no headers, no block or transaction announcements (R-3.5).
+    if (IsBoardConnection(node, peer)) return true;
 
     MaybeSendAddr(node, peer, current_time);
 

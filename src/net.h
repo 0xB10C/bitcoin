@@ -1615,6 +1615,24 @@ private:
      */
     std::optional<CService> HolePunchBindAddress(const CService& target) const;
 
+public:
+    struct BoardVisitorCounts {
+        size_t total{0};
+        size_t same_group{0};
+        size_t same_address{0};
+    };
+
+    /**
+     * Count the board visitors other than `visitor` that are not being
+     * disconnected: all of them, those in `visitor`'s network group, and
+     * those at its address. On test networks, where every node has the same
+     * address, each peer is its own network group and addresses are compared
+     * with their port.
+     */
+    BoardVisitorCounts CountBoardVisitors(const CNode& visitor) const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+
+private:
+
     void DeleteNode(CNode* pnode);
 
     NodeId GetNewNodeId();
