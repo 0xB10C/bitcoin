@@ -13,13 +13,20 @@
 #include <serialize.h>
 #include <sync.h>
 #include <uint256.h>
+#include <util/sock.h>
+#include <util/threadinterrupt.h>
 #include <util/time.h>
 
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 /**
@@ -66,6 +73,24 @@ inline constexpr size_t BOARD_VISITORS_MAX{32};
 inline constexpr size_t BOARD_PER_GROUP{4};
 /** Visitors from one address a board holds at most. */
 inline constexpr size_t BOARD_IP_CAP{1};
+
+// Limits of punching (section 8 of the draft) and slots (section 9).
+/** Attempts are made for this long after the session start (R-8.1). */
+inline constexpr auto WINDOW{std::chrono::seconds{120}};
+/** The wait after a failed attempt, doubled after each failure (R-8.2). */
+inline constexpr auto RETRY{std::chrono::seconds{1}};
+/** How long after the window the session may still succeed (R-8.7). */
+inline constexpr auto GRACE{std::chrono::seconds{5}};
+/** How long an accepted connection that matches no session is held (R-8.4). */
+inline constexpr auto HOLD{std::chrono::seconds{10}};
+/** At most this many such connections are held (R-8.4). */
+inline constexpr size_t HELD_MAX{8};
+/** Sessions in progress at most (R-7.4). */
+inline constexpr size_t MAX_ACTIVE_SESSIONS{6};
+/** Sessions started per network group per hour at most (R-7.3). */
+inline constexpr size_t GROUP_SESSIONS_PER_HOUR{4};
+/** Hole-punch outbound connections a node holds at most (R-9.1). */
+inline constexpr int HP_OUTBOUND_MAX{1};
 
 // Limits of the table (section 6 of the draft).
 /** Entries kept per source group at most (R-6.2). */
@@ -332,6 +357,132 @@ private:
 
     mutable Mutex m_mutex;
     std::map<NodeId, Report> m_reports GUARDED_BY(m_mutex);
+};
+
+/**
+ * Runs punch sessions (section 8 of the draft): listens on the punch port of
+ * each family and, per session, connects to the peer's endpoint from the punch
+ * port, again after each failure with a doubling wait, until a connection with
+ * exactly that remote endpoint exists, from our connect() or from the
+ * listener. A session is keyed by the peer's endpoint. It ends in success
+ * with the connection, or in failure WINDOW + GRACE after it started.
+ */
+class SessionManager
+{
+public:
+    /**
+     * Called when a session ends: with the connection on success, with nullptr
+     * on failure. `deadline` is the session's end (R-8.7): the handshake on the
+     * connection has to be complete by then too.
+     */
+    using ResultFn = std::function<void(const CService& peer, Role role, std::shared_ptr<Sock> sock, NodeClock::time_point deadline)>;
+
+    SessionManager(const Options& opts, ResultFn on_result);
+    ~SessionManager() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Open the punch listeners and start the thread. False if no listener could be opened. */
+    bool Start() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Stop the thread and close everything; pending sessions end without a callback. */
+    void Stop() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /**
+     * Start a session with `peer` in `role`; `group` is the peer's network
+     * group for GROUP_SESSIONS_PER_HOUR (R-7.3).
+     * @return the reason if the session was not started: a session with the
+     * peer exists, MAX_ACTIVE_SESSIONS are in progress, or the group's hourly
+     * budget is used up.
+     */
+    std::optional<std::string> Punch(Role role, const CService& peer, const std::vector<unsigned char>& group) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    bool HasSession(const CService& peer) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Drop the session with `peer`, closing its sockets. Nothing is reported for it. */
+    void Cancel(const CService& peer) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    struct SessionInfo {
+        CService peer;
+        Role role;
+        NodeClock::time_point started;
+        int attempts;
+    };
+    std::vector<SessionInfo> GetSessions() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Sessions in progress per role (index Role), which reserve the slot their role needs (R-7.3). */
+    std::array<size_t, 2> SessionsByRole() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Whether a session to an address in `group` may start now (R-7.3). */
+    bool GroupBudgetFree(const std::vector<unsigned char>& group) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** What happened so far, per role (index Role). Every field only ever grows. */
+    struct Stats {
+        std::atomic<uint64_t> started[2]{};
+        std::atomic<uint64_t> established[2]{};
+        std::atomic<uint64_t> failed[2]{};
+    };
+    const Stats& GetStats() const { return m_stats; }
+
+private:
+    struct Session {
+        Role role;
+        CService peer;
+        NodeClock::time_point started;
+        /** No new attempts after this (started + WINDOW). */
+        NodeClock::time_point deadline;
+        /** When to make the next attempt; none while `attempt` is pending. */
+        NodeClock::time_point next_attempt;
+        /** The wait before the next attempt, doubled after each failure (R-8.2). */
+        std::chrono::seconds retry{RETRY};
+        /** The pending connect(), if any. */
+        std::shared_ptr<Sock> attempt;
+        int attempts{0};
+        /** Set when connect() refused the 4-tuple: the listener has the connection (R-8.3). */
+        bool wait_for_accept{false};
+        /**
+         * Responder only: the session's connection, kept here until the initiator's
+         * first bytes arrive. A peer that closes it before sending anything was not
+         * expecting it yet, and the attempts resume (R-8.5).
+         */
+        std::shared_ptr<Sock> established;
+    };
+    /** An accepted connection that matched no session when it arrived (R-8.4). */
+    struct Held {
+        std::shared_ptr<Sock> sock;
+        CService peer;
+        NodeClock::time_point expires;
+    };
+    struct Result {
+        CService peer;
+        Role role;
+        std::shared_ptr<Sock> sock;
+        NodeClock::time_point deadline;
+    };
+
+    void ThreadLoop() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Timers: start attempts, stop attempts at the deadline, fail sessions after the grace period, expire held connections. */
+    void RunTimers(NodeClock::time_point now, std::vector<Result>& results) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    void StartAttempt(Session& session, NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    /** The listener accepted a connection from `peer`. */
+    void OnAccepted(std::shared_ptr<Sock> sock, const CService& peer, NodeClock::time_point now, std::vector<Result>& results) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    /** The pending connect() of a session finished, successfully or not. */
+    void OnAttemptDone(Session& session, NodeClock::time_point now, std::vector<Result>& results) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    void Finish(const CService& peer, std::shared_ptr<Sock> sock, std::vector<Result>& results) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    /** The session's connection is `sock`: hand it over (initiator) or wait for the first bytes on it (responder). */
+    void Establish(Session& session, std::shared_ptr<Sock> sock, std::vector<Result>& results) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    /** The responder's connection became readable: first bytes, or a close. */
+    void OnEstablishedReadable(Session& session, NodeClock::time_point now, std::vector<Result>& results) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    /** Forget session starts older than an hour. */
+    void PruneStarts(NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    /** An attempt failed: the next one waits, twice as long as the last wait (R-8.2). */
+    static void ScheduleRetry(Session& session, NodeClock::time_point now);
+
+    const Options m_opts;
+    const ResultFn m_on_result;
+    Stats m_stats;
+    std::vector<std::shared_ptr<Sock>> m_listeners;
+    mutable Mutex m_mutex;
+    std::map<CService, Session> m_sessions GUARDED_BY(m_mutex);
+    std::vector<Held> m_held GUARDED_BY(m_mutex);
+    /** Session starts in the last hour per network group, for GROUP_SESSIONS_PER_HOUR. */
+    std::map<std::vector<unsigned char>, std::vector<NodeClock::time_point>> m_group_starts GUARDED_BY(m_mutex);
+    CThreadInterrupt m_interrupt;
+    std::thread m_thread;
 };
 
 } // namespace holepunch

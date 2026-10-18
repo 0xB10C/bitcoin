@@ -9,6 +9,8 @@
 #include <logging.h>
 #include <netbase.h>
 #include <streams.h>
+#include <tinyformat.h>
+#include <util/thread.h>
 
 #include <algorithm>
 #include <set>
@@ -242,6 +244,344 @@ size_t Board::Size() const
 {
     LOCK(m_mutex);
     return m_entries.size();
+}
+
+SessionManager::SessionManager(const Options& opts, ResultFn on_result)
+    : m_opts{opts}, m_on_result{std::move(on_result)}
+{
+}
+
+SessionManager::~SessionManager()
+{
+    Stop();
+}
+
+bool SessionManager::Start()
+{
+    for (const Network family : {NET_IPV4, NET_IPV6}) {
+        const CService addr{WildcardAddress(family, m_opts.port)};
+        auto sock{CreateSock(addr.GetSAFamily(), SOCK_STREAM, IPPROTO_TCP)};
+        if (!sock) {
+            LogDebug(BCLog::HOLEPUNCH, "cannot create punch listener socket for %s\n", addr.ToStringAddrPort());
+            continue;
+        }
+#ifdef IPV6_V6ONLY
+        if (family == NET_IPV6) {
+            const int one{1};
+            if (sock->SetSockOpt(IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof(one)) == SOCKET_ERROR) {
+                LogDebug(BCLog::HOLEPUNCH, "cannot set IPV6_V6ONLY on punch listener: %s\n", NetworkErrorString(WSAGetLastError()));
+            }
+        }
+#endif
+        if (!BindToSharedPort(*sock, addr)) continue;
+        if (sock->Listen(SOMAXCONN) == SOCKET_ERROR) {
+            LogDebug(BCLog::HOLEPUNCH, "cannot listen on punch port %s: %s\n", addr.ToStringAddrPort(), NetworkErrorString(WSAGetLastError()));
+            continue;
+        }
+        LogInfo("Hole punching: listening on %s", addr.ToStringAddrPort());
+        m_listeners.push_back(std::move(sock));
+    }
+    if (m_listeners.empty()) {
+        LogWarning("Hole punching: could not open a punch listener on port %d", m_opts.port);
+        return false;
+    }
+    m_thread = std::thread(&util::TraceThread, "holepunch", [this] { ThreadLoop(); });
+    return true;
+}
+
+void SessionManager::Stop()
+{
+    m_interrupt();
+    if (m_thread.joinable()) m_thread.join();
+    m_listeners.clear();
+    LOCK(m_mutex);
+    m_sessions.clear();
+    m_held.clear();
+}
+
+void SessionManager::PruneStarts(NodeClock::time_point now)
+{
+    for (auto it{m_group_starts.begin()}; it != m_group_starts.end();) {
+        std::erase_if(it->second, [&](const auto& start) { return start + std::chrono::hours{1} <= now; });
+        it = it->second.empty() ? m_group_starts.erase(it) : std::next(it);
+    }
+}
+
+bool SessionManager::GroupBudgetFree(const std::vector<unsigned char>& group) const
+{
+    const auto now{NodeClock::now()};
+    LOCK(m_mutex);
+    const auto it{m_group_starts.find(group)};
+    if (it == m_group_starts.end()) return true;
+    const size_t recent{static_cast<size_t>(std::count_if(it->second.begin(), it->second.end(), [&](const auto& start) { return start + std::chrono::hours{1} > now; }))};
+    return recent < GROUP_SESSIONS_PER_HOUR;
+}
+
+std::optional<std::string> SessionManager::Punch(Role role, const CService& peer, const std::vector<unsigned char>& group)
+{
+    const auto now{NodeClock::now()};
+    LOCK(m_mutex);
+    if (m_sessions.contains(peer)) return "a session with this peer exists";
+    if (m_sessions.size() >= MAX_ACTIVE_SESSIONS) return strprintf("%d sessions are in progress", m_sessions.size());
+    PruneStarts(now);
+    if (m_group_starts[group].size() >= GROUP_SESSIONS_PER_HOUR) return "the network group's sessions for this hour are used up";
+
+    m_group_starts[group].push_back(now);
+    m_sessions.emplace(peer, Session{.role = role, .peer = peer, .started = now, .deadline = now + WINDOW, .next_attempt = now, .retry = RETRY, .attempt = nullptr, .attempts = 0, .wait_for_accept = false, .established = nullptr});
+    ++m_stats.started[static_cast<size_t>(role)];
+    LogDebug(BCLog::HOLEPUNCH, "session with %s started as %s\n", peer.ToStringAddrPort(), RoleName(role));
+    return std::nullopt;
+}
+
+bool SessionManager::HasSession(const CService& peer) const
+{
+    LOCK(m_mutex);
+    return m_sessions.contains(peer);
+}
+
+void SessionManager::Cancel(const CService& peer)
+{
+    LOCK(m_mutex);
+    const auto it{m_sessions.find(peer)};
+    if (it == m_sessions.end()) return;
+    LogDebug(BCLog::HOLEPUNCH, "session with %s cancelled as %s after %d attempt(s)\n", peer.ToStringAddrPort(), RoleName(it->second.role), it->second.attempts);
+    m_sessions.erase(it);
+}
+
+std::vector<SessionManager::SessionInfo> SessionManager::GetSessions() const
+{
+    std::vector<SessionInfo> infos;
+    LOCK(m_mutex);
+    for (const auto& [peer, session] : m_sessions) {
+        infos.push_back({.peer = peer, .role = session.role, .started = session.started, .attempts = session.attempts});
+    }
+    return infos;
+}
+
+std::array<size_t, 2> SessionManager::SessionsByRole() const
+{
+    std::array<size_t, 2> counts{};
+    LOCK(m_mutex);
+    for (const auto& [peer, session] : m_sessions) ++counts[static_cast<size_t>(session.role)];
+    return counts;
+}
+
+void SessionManager::Establish(Session& session, std::shared_ptr<Sock> sock, std::vector<Result>& results)
+{
+    session.attempt.reset();
+    session.wait_for_accept = false;
+    if (session.role == Role::INITIATOR) {
+        Finish(session.peer, std::move(sock), results);
+        return;
+    }
+    LogDebug(BCLog::HOLEPUNCH, "connected to %s as responder after %d attempt(s), waiting for the initiator's first bytes\n", session.peer.ToStringAddrPort(), session.attempts);
+    session.established = std::move(sock);
+}
+
+void SessionManager::OnEstablishedReadable(Session& session, NodeClock::time_point now, std::vector<Result>& results)
+{
+    // Peek: the bytes stay in the socket for the transport that takes it over.
+    char byte;
+    const ssize_t got{session.established->Recv(&byte, 1, MSG_PEEK)};
+    if (got > 0) {
+        Finish(session.peer, std::move(session.established), results);
+        return;
+    }
+    if (got < 0) {
+        const int err{WSAGetLastError()};
+        if (err == WSAEWOULDBLOCK || err == WSAEINTR || err == WSAEINPROGRESS) return;
+    }
+    // Closed, or broken, before a byte arrived: the peer did not expect us yet (R-8.5).
+    LogDebug(BCLog::HOLEPUNCH, "%s closed the connection before sending anything, resuming attempts\n", session.peer.ToStringAddrPort());
+    session.established.reset();
+    ScheduleRetry(session, now);
+}
+
+void SessionManager::ScheduleRetry(Session& session, NodeClock::time_point now)
+{
+    session.next_attempt = now + session.retry;
+    session.retry *= 2;
+}
+
+void SessionManager::Finish(const CService& peer, std::shared_ptr<Sock> sock, std::vector<Result>& results)
+{
+    const auto it{m_sessions.find(peer)};
+    if (it == m_sessions.end()) return;
+    Session& session{it->second};
+    if (sock) {
+        ++m_stats.established[static_cast<size_t>(session.role)];
+        LogDebug(BCLog::HOLEPUNCH, "session with %s established as %s after %d attempt(s)\n", peer.ToStringAddrPort(), RoleName(session.role), session.attempts);
+    } else {
+        ++m_stats.failed[static_cast<size_t>(session.role)];
+        LogDebug(BCLog::HOLEPUNCH, "session with %s failed as %s after %d attempt(s)\n", peer.ToStringAddrPort(), RoleName(session.role), session.attempts);
+    }
+    results.push_back({.peer = peer, .role = session.role, .sock = std::move(sock), .deadline = session.deadline + GRACE});
+    m_sessions.erase(it);
+}
+
+void SessionManager::StartAttempt(Session& session, NodeClock::time_point now)
+{
+    const CService& peer{session.peer};
+    ++session.attempts;
+    auto sock{CreateSock(peer.GetSAFamily(), SOCK_STREAM, IPPROTO_TCP)};
+    if (!sock) {
+        LogDebug(BCLog::HOLEPUNCH, "cannot create socket for attempt %d to %s\n", session.attempts, peer.ToStringAddrPort());
+        ScheduleRetry(session, now);
+        return;
+    }
+    const CService local{WildcardAddress(peer.IsIPv4() ? NET_IPV4 : NET_IPV6, m_opts.port)};
+    if (!BindToSharedPort(*sock, local)) {
+        ScheduleRetry(session, now);
+        return;
+    }
+    sockaddr_storage storage;
+    socklen_t len{sizeof(storage)};
+    if (!peer.GetSockAddr(reinterpret_cast<sockaddr*>(&storage), &len)) {
+        ScheduleRetry(session, now);
+        return;
+    }
+    if (sock->Connect(reinterpret_cast<sockaddr*>(&storage), len) == SOCKET_ERROR) {
+        const int err{WSAGetLastError()};
+        if (err != WSAEINPROGRESS && err != WSAEWOULDBLOCK && err != WSAEINVAL) {
+            if (err == WSAEADDRINUSE || err == WSAEADDRNOTAVAIL) {
+                // The 4-tuple exists already: the listener has the peer's connection (R-8.3).
+                LogDebug(BCLog::HOLEPUNCH, "attempt %d to %s: connection exists, waiting for the listener\n", session.attempts, peer.ToStringAddrPort());
+                session.wait_for_accept = true;
+            } else {
+                LogDebug(BCLog::HOLEPUNCH, "attempt %d to %s failed: %s\n", session.attempts, peer.ToStringAddrPort(), NetworkErrorString(err));
+                ScheduleRetry(session, now);
+            }
+            return;
+        }
+    }
+    LogDebug(BCLog::HOLEPUNCH, "attempt %d to %s from port %d pending\n", session.attempts, peer.ToStringAddrPort(), m_opts.port);
+    session.attempt = std::move(sock);
+}
+
+void SessionManager::OnAttemptDone(Session& session, NodeClock::time_point now, std::vector<Result>& results)
+{
+    int err{0};
+    socklen_t err_len{sizeof(err)};
+    if (session.attempt->GetSockOpt(SOL_SOCKET, SO_ERROR, &err, &err_len) == SOCKET_ERROR) {
+        err = WSAGetLastError();
+    }
+    auto sock{std::move(session.attempt)};
+    session.attempt.reset();
+    if (err == 0) {
+        Establish(session, std::move(sock), results);
+        return;
+    }
+    LogDebug(BCLog::HOLEPUNCH, "attempt %d to %s failed: %s\n", session.attempts, session.peer.ToStringAddrPort(), NetworkErrorString(err));
+    ScheduleRetry(session, now);
+}
+
+void SessionManager::OnAccepted(std::shared_ptr<Sock> sock, const CService& peer, NodeClock::time_point now, std::vector<Result>& results)
+{
+    if (const auto it{m_sessions.find(peer)}; it != m_sessions.end()) {
+        LogDebug(BCLog::HOLEPUNCH, "listener accepted the connection from %s\n", peer.ToStringAddrPort());
+        it->second.attempt.reset(); // a pending attempt for the same 4-tuple cannot succeed anymore
+        Establish(it->second, std::move(sock), results);
+        return;
+    }
+    // Not expected (yet): keep it, untouched, in case a session for it starts soon,
+    // as it does when the peer's tip reached the block before ours (R-8.4).
+    if (m_held.size() >= HELD_MAX) {
+        LogDebug(BCLog::HOLEPUNCH, "closing the oldest held connection, from %s, to make room\n", m_held.front().peer.ToStringAddrPort());
+        m_held.erase(m_held.begin());
+    }
+    LogDebug(BCLog::HOLEPUNCH, "listener accepted a connection from %s that matches no session, holding it for %ds\n", peer.ToStringAddrPort(), Ticks<std::chrono::seconds>(HOLD));
+    m_held.push_back({.sock = std::move(sock), .peer = peer, .expires = now + HOLD});
+}
+
+void SessionManager::RunTimers(NodeClock::time_point now, std::vector<Result>& results)
+{
+    // A session may match a connection the listener accepted before the session existed.
+    for (auto held{m_held.begin()}; held != m_held.end();) {
+        if (const auto it{m_sessions.find(held->peer)}; it != m_sessions.end()) {
+            LogDebug(BCLog::HOLEPUNCH, "using the held connection from %s\n", held->peer.ToStringAddrPort());
+            it->second.attempt.reset();
+            Establish(it->second, std::move(held->sock), results);
+            held = m_held.erase(held);
+        } else if (held->expires <= now) {
+            LogDebug(BCLog::HOLEPUNCH, "closing the unmatched connection from %s\n", held->peer.ToStringAddrPort());
+            held = m_held.erase(held);
+        } else {
+            ++held;
+        }
+    }
+    for (auto it{m_sessions.begin()}; it != m_sessions.end();) {
+        Session& session{it->second};
+        const CService peer{it->first};
+        if (now >= session.deadline + GRACE) {
+            ++it;
+            Finish(peer, nullptr, results);
+            continue;
+        }
+        if (now >= session.deadline) {
+            if (session.attempt) {
+                LogDebug(BCLog::HOLEPUNCH, "window for %s is over, stopping attempts\n", peer.ToStringAddrPort());
+                session.attempt.reset();
+            }
+        } else if (!session.attempt && !session.established && !session.wait_for_accept && now >= session.next_attempt) {
+            StartAttempt(session, now);
+        }
+        ++it;
+    }
+}
+
+void SessionManager::ThreadLoop()
+{
+    while (!m_interrupt) {
+        std::vector<Result> results;
+        Sock::EventsPerSock events;
+        {
+            LOCK(m_mutex);
+            RunTimers(NodeClock::now(), results);
+            for (const auto& listener : m_listeners) events.emplace(listener, Sock::Events{Sock::RecvEvent});
+            for (const auto& [peer, session] : m_sessions) {
+                if (session.attempt) events.emplace(session.attempt, Sock::Events{Sock::SendEvent});
+                if (session.established) events.emplace(session.established, Sock::Events{Sock::RecvEvent});
+            }
+        }
+        for (auto& result : results) m_on_result(result.peer, result.role, std::move(result.sock), result.deadline);
+        results.clear();
+
+        if (events.empty() || !events.begin()->first->WaitMany(std::chrono::milliseconds{100}, events)) {
+            m_interrupt.sleep_for(std::chrono::milliseconds{100});
+            continue;
+        }
+
+        {
+            LOCK(m_mutex);
+            const auto now{NodeClock::now()};
+            for (const auto& listener : m_listeners) {
+                if (!(events.at(listener).occurred & Sock::RecvEvent)) continue;
+                sockaddr_storage storage;
+                socklen_t len{sizeof(storage)};
+                auto sock{listener->Accept(reinterpret_cast<sockaddr*>(&storage), &len)};
+                if (!sock) continue;
+                CService peer;
+                if (!peer.SetSockAddr(reinterpret_cast<sockaddr*>(&storage), len)) continue;
+                OnAccepted(std::move(sock), peer, now, results);
+            }
+            // Collect first: finishing a session removes it from m_sessions.
+            std::vector<CService> done;
+            std::vector<CService> readable;
+            for (const auto& [peer, session] : m_sessions) {
+                if (session.attempt) {
+                    const auto it{events.find(session.attempt)};
+                    if (it != events.end() && it->second.occurred != 0) done.push_back(peer);
+                }
+                if (session.established) {
+                    const auto it{events.find(session.established)};
+                    if (it != events.end() && it->second.occurred != 0) readable.push_back(peer);
+                }
+            }
+            for (const CService& peer : done) OnAttemptDone(m_sessions.at(peer), now, results);
+            for (const CService& peer : readable) OnEstablishedReadable(m_sessions.at(peer), now, results);
+        }
+        for (auto& result : results) m_on_result(result.peer, result.role, std::move(result.sock), result.deadline);
+    }
 }
 
 std::vector<std::string> FeatureFlagNames(uint32_t flags)

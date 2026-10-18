@@ -12,6 +12,9 @@
 #include <test/util/setup_common.h>
 #include <util/strencodings.h>
 #include <util/string.h>
+#include <util/time.h>
+
+#include <thread>
 
 #include <boost/test/unit_test.hpp>
 
@@ -575,6 +578,309 @@ BOOST_AUTO_TEST_CASE(board_entries)
     BOOST_CHECK(local.Store(2, MakeKey("127.0.0.1:18445"), t0, true));
     BOOST_CHECK(!local.Store(3, MakeKey("127.0.0.1:18445"), t0, true));
     BOOST_CHECK_EQUAL(local.LiveEntries().size(), 2);
+}
+
+namespace {
+//! A free TCP port on loopback: bind to port 0 and read back what the kernel chose.
+uint16_t FreePort()
+{
+    auto sock{CreateSock(AF_INET, SOCK_STREAM, IPPROTO_TCP)};
+    BOOST_REQUIRE(sock);
+    BOOST_REQUIRE(BindToSharedPort(*sock, LookupNumeric("127.0.0.1", 0)));
+    return GetBindAddress(*sock).GetPort();
+}
+
+//! Accept a connection on `listener` within `timeout`, or return nullptr.
+std::unique_ptr<Sock> AcceptWithin(Sock& listener, std::chrono::milliseconds timeout)
+{
+    Sock::Event occurred{0};
+    if (!listener.Wait(timeout, Sock::RecvEvent, &occurred) || !(occurred & Sock::RecvEvent)) return nullptr;
+    return listener.Accept(nullptr, nullptr);
+}
+
+//! Collects the results of a SessionManager.
+struct Results {
+    struct Entry {
+        CService peer;
+        Role role;
+        std::shared_ptr<Sock> sock;
+        NodeClock::time_point deadline;
+    };
+    Mutex mutex;
+    std::vector<Entry> entries GUARDED_BY(mutex);
+
+    SessionManager::ResultFn Fn()
+    {
+        return [this](const CService& peer, Role role, std::shared_ptr<Sock> sock, NodeClock::time_point deadline) {
+            LOCK(mutex);
+            entries.push_back({peer, role, std::move(sock), deadline});
+        };
+    }
+    size_t Count() EXCLUSIVE_LOCKS_REQUIRED(!mutex) { return WITH_LOCK(mutex, return entries.size()); }
+    Entry Get(size_t i) EXCLUSIVE_LOCKS_REQUIRED(!mutex) { return WITH_LOCK(mutex, return entries.at(i)); }
+};
+
+//! Poll `pred` for up to `timeout`.
+template <typename Pred>
+bool WaitFor(Pred pred, std::chrono::milliseconds timeout = std::chrono::seconds{10})
+{
+    const auto end{std::chrono::steady_clock::now() + timeout};
+    while (std::chrono::steady_clock::now() < end) {
+        if (pred()) return true;
+        UninterruptibleSleep(std::chrono::milliseconds{10});
+    }
+    return pred();
+}
+
+//! Mock the clock to now, or move the mocked clock forward by `step`.
+void MockClock(std::chrono::seconds step = std::chrono::seconds{0})
+{
+    SetMockTime(std::chrono::duration_cast<std::chrono::seconds>(NodeClock::now().time_since_epoch()) + step);
+}
+
+Options LocalOptions(uint16_t port)
+{
+    return Options{.enabled = true, .port = port, .board = false, .board_seeds = {}, .allow_local = true};
+}
+
+//! Send a few bytes one way and read them on the other side.
+void CheckDataFlows(Sock& from, Sock& to)
+{
+    const std::string msg{"punched"};
+    BOOST_REQUIRE_EQUAL(from.Send(msg.data(), msg.size(), 0), static_cast<ssize_t>(msg.size()));
+    BOOST_REQUIRE(to.Wait(std::chrono::seconds{5}, Sock::RecvEvent));
+    char buf[16];
+    BOOST_REQUIRE_EQUAL(to.Recv(buf, sizeof(buf), 0), static_cast<ssize_t>(msg.size()));
+    BOOST_CHECK_EQUAL(std::string(buf, msg.size()), msg);
+}
+
+const std::vector<unsigned char> GROUP_X{0x55};
+} // namespace
+
+BOOST_AUTO_TEST_CASE(session_punch_on_loopback)
+{
+    const uint16_t port_a{FreePort()};
+    const uint16_t port_b{FreePort()};
+    const CService endpoint_a{LookupNumeric("127.0.0.1", port_a)};
+    const CService endpoint_b{LookupNumeric("127.0.0.1", port_b)};
+    Results results_a, results_b;
+    SessionManager a{LocalOptions(port_a), results_a.Fn()};
+    SessionManager b{LocalOptions(port_b), results_b.Fn()};
+    BOOST_REQUIRE(a.Start());
+    BOOST_REQUIRE(b.Start());
+
+    // The responder's tip reached the block first: its connection reaches the
+    // initiator's listener before the initiator has a session and is held there.
+    BOOST_CHECK(!a.Punch(Role::RESPONDER, endpoint_b, GROUP_X));
+    BOOST_CHECK(a.HasSession(endpoint_b));
+    BOOST_CHECK(!b.Punch(Role::INITIATOR, endpoint_a, GROUP_X));
+
+    // The initiator gets its connection at once; the responder only once the
+    // initiator's first bytes are on it (R-8.5).
+    BOOST_REQUIRE(WaitFor([&] { return results_b.Count() == 1; }));
+    const auto result_b{results_b.Get(0)};
+    BOOST_REQUIRE(result_b.sock);
+    BOOST_CHECK_EQUAL(results_a.Count(), 0);
+    const char first{0x01};
+    BOOST_REQUIRE_EQUAL(result_b.sock->Send(&first, 1, 0), 1);
+    BOOST_REQUIRE(WaitFor([&] { return results_a.Count() == 1; }));
+    const auto result_a{results_a.Get(0)};
+    BOOST_REQUIRE(result_a.sock);
+    char got{0};
+    BOOST_REQUIRE_EQUAL(result_a.sock->Recv(&got, 1, 0), 1);
+    BOOST_CHECK_EQUAL(got, first);
+    BOOST_CHECK(result_a.role == Role::RESPONDER);
+    BOOST_CHECK(result_b.role == Role::INITIATOR);
+    BOOST_CHECK_EQUAL(result_a.peer.ToStringAddrPort(), endpoint_b.ToStringAddrPort());
+    BOOST_CHECK_EQUAL(result_b.peer.ToStringAddrPort(), endpoint_a.ToStringAddrPort());
+    // Both ends of one connection, each bound to its own punch port (I-2, I-3).
+    BOOST_CHECK_EQUAL(GetBindAddress(*result_a.sock).GetPort(), port_a);
+    BOOST_CHECK_EQUAL(GetBindAddress(*result_b.sock).GetPort(), port_b);
+    CheckDataFlows(*result_b.sock, *result_a.sock);
+    CheckDataFlows(*result_a.sock, *result_b.sock);
+    BOOST_CHECK(!a.HasSession(endpoint_b));
+    BOOST_CHECK(!b.HasSession(endpoint_a));
+    BOOST_CHECK(a.GetSessions().empty());
+    BOOST_CHECK_EQUAL(a.GetStats().established[static_cast<size_t>(Role::RESPONDER)], 1);
+    BOOST_CHECK_EQUAL(b.GetStats().established[static_cast<size_t>(Role::INITIATOR)], 1);
+}
+
+BOOST_AUTO_TEST_CASE(session_early_connection_is_held_for_the_session)
+{
+    // The responder's attempt arrives seconds before the initiator's session
+    // starts. The initiator holds it and uses it once the session is in (R-8.4).
+    const uint16_t port_a{FreePort()};
+    const uint16_t port_b{FreePort()};
+    const CService endpoint_a{LookupNumeric("127.0.0.1", port_a)};
+    const CService endpoint_b{LookupNumeric("127.0.0.1", port_b)};
+    Results results_a, results_b;
+    SessionManager a{LocalOptions(port_a), results_a.Fn()};
+    SessionManager b{LocalOptions(port_b), results_b.Fn()};
+    BOOST_REQUIRE(a.Start());
+    BOOST_REQUIRE(b.Start());
+
+    BOOST_REQUIRE(!a.Punch(Role::RESPONDER, endpoint_b, GROUP_X));
+    std::this_thread::sleep_for(std::chrono::milliseconds{1500});
+    BOOST_CHECK(a.HasSession(endpoint_b));
+    BOOST_CHECK_EQUAL(results_a.Count(), 0);
+    BOOST_CHECK_EQUAL(results_b.Count(), 0);
+
+    BOOST_REQUIRE(!b.Punch(Role::INITIATOR, endpoint_a, GROUP_X));
+    BOOST_REQUIRE(WaitFor([&] { return results_b.Count() == 1; }));
+    const auto result_b{results_b.Get(0)};
+    BOOST_REQUIRE(result_b.sock);
+    // It is the held connection: a's attempt, from a's punch port.
+    BOOST_CHECK_EQUAL(GetBindAddress(*result_b.sock).GetPort(), port_b);
+    const char first{0x07};
+    BOOST_REQUIRE_EQUAL(result_b.sock->Send(&first, 1, 0), 1);
+    BOOST_REQUIRE(WaitFor([&] { return results_a.Count() == 1; }));
+    const auto result_a{results_a.Get(0)};
+    BOOST_REQUIRE(result_a.sock);
+    char got{0};
+    BOOST_CHECK_EQUAL(result_a.sock->Recv(&got, 1, 0), 1);
+    BOOST_CHECK_EQUAL(got, first);
+}
+
+BOOST_AUTO_TEST_CASE(session_unmatched_connection_is_closed)
+{
+    const uint16_t port_a{FreePort()};
+    Results results_a;
+    SessionManager a{LocalOptions(port_a), results_a.Fn()};
+    BOOST_REQUIRE(a.Start());
+
+    // A connection from an endpoint no session expects is accepted, held, and closed (R-8.4, I-2).
+    auto sock{ConnectDirectly(LookupNumeric("127.0.0.1", port_a), /*manual_connection=*/false, std::chrono::seconds{5})};
+    BOOST_REQUIRE(sock);
+    BOOST_REQUIRE(WaitFor([&] {
+        Sock::Event occurred{0};
+        return sock->Wait(std::chrono::milliseconds{0}, Sock::RecvEvent, &occurred) && occurred != 0;
+    }, HOLD + std::chrono::seconds{5}));
+    char buf[1];
+    BOOST_CHECK_EQUAL(sock->Recv(buf, sizeof(buf), 0), 0); // EOF
+    BOOST_CHECK_EQUAL(results_a.Count(), 0);
+}
+
+BOOST_AUTO_TEST_CASE(session_responder_resumes_after_zero_byte_close)
+{
+    // A plain listener plays the initiator's punch port: it accepts the responder's
+    // first attempt and closes it without a byte, as an initiator does whose
+    // session has not started yet (R-8.5).
+    auto listener{CreateSock(AF_INET, SOCK_STREAM, IPPROTO_TCP)};
+    BOOST_REQUIRE(listener);
+    BOOST_REQUIRE(BindToSharedPort(*listener, LookupNumeric("127.0.0.1", 0)));
+    BOOST_REQUIRE_EQUAL(listener->Listen(1), 0);
+    const CService peer{GetBindAddress(*listener)};
+
+    const uint16_t port_a{FreePort()};
+    Results results_a;
+    SessionManager a{LocalOptions(port_a), results_a.Fn()};
+    BOOST_REQUIRE(a.Start());
+    BOOST_REQUIRE(!a.Punch(Role::RESPONDER, peer, GROUP_X));
+
+    auto first{AcceptWithin(*listener, std::chrono::seconds{5})};
+    BOOST_REQUIRE(first);
+    first.reset(); // zero-byte close
+    // The session goes on and tries again.
+    auto second{AcceptWithin(*listener, std::chrono::seconds{10})};
+    BOOST_REQUIRE(second);
+    BOOST_CHECK(a.HasSession(peer));
+    BOOST_CHECK_EQUAL(results_a.Count(), 0);
+    // Once the initiator speaks, the connection is handed over, with its bytes.
+    const char byte{0x42};
+    BOOST_REQUIRE_EQUAL(second->Send(&byte, 1, 0), 1);
+    BOOST_REQUIRE(WaitFor([&] { return results_a.Count() == 1; }));
+    const auto entry{results_a.Get(0)};
+    BOOST_REQUIRE(entry.sock);
+    BOOST_CHECK(entry.role == Role::RESPONDER);
+    char got{0};
+    BOOST_CHECK_EQUAL(entry.sock->Recv(&got, 1, 0), 1);
+    BOOST_CHECK_EQUAL(got, byte);
+    BOOST_CHECK(!a.HasSession(peer));
+}
+
+BOOST_AUTO_TEST_CASE(session_cancel)
+{
+    const uint16_t port_a{FreePort()};
+    const uint16_t port_dead{FreePort()}; // nothing listens here
+    Results results_a;
+    SessionManager a{LocalOptions(port_a), results_a.Fn()};
+    BOOST_REQUIRE(a.Start());
+
+    const CService dead{LookupNumeric("127.0.0.1", port_dead)};
+    BOOST_REQUIRE(!a.Punch(Role::RESPONDER, dead, GROUP_X));
+    BOOST_CHECK(a.HasSession(dead));
+    a.Cancel(dead);
+    BOOST_CHECK(!a.HasSession(dead));
+    BOOST_CHECK(a.GetSessions().empty());
+    a.Cancel(dead); // cancelling again, or an unknown session, does nothing
+    // A cancelled session is not reported as failed.
+    BOOST_CHECK(!WaitFor([&] { return results_a.Count() > 0; }, std::chrono::milliseconds{500}));
+}
+
+BOOST_AUTO_TEST_CASE(session_retries_double_and_fail_after_window_and_grace)
+{
+    const uint16_t port_a{FreePort()};
+    const uint16_t port_dead{FreePort()}; // nothing listens here
+    Results results_a;
+    SessionManager a{LocalOptions(port_a), results_a.Fn()};
+    BOOST_REQUIRE(a.Start());
+
+    MockClock();
+    const CService dead{LookupNumeric("127.0.0.1", port_dead)};
+    BOOST_CHECK(!a.Punch(Role::RESPONDER, dead, GROUP_X));
+    const auto attempts{[&] { return a.GetSessions().empty() ? -1 : a.GetSessions().front().attempts; }};
+    // Attempts are refused at once and retried after 1 s, 2 s, 4 s, ... (R-8.2).
+    BOOST_REQUIRE(WaitFor([&] { return attempts() >= 1; }));
+    MockClock(RETRY);
+    BOOST_REQUIRE(WaitFor([&] { return attempts() >= 2; }));
+    MockClock(RETRY); // 1 s after the second failure: too early
+    BOOST_CHECK(!WaitFor([&] { return attempts() >= 3; }, std::chrono::milliseconds{300}));
+    MockClock(RETRY); // 2 s after it
+    BOOST_REQUIRE(WaitFor([&] { return attempts() >= 3; }));
+    BOOST_CHECK_EQUAL(a.SessionsByRole()[static_cast<size_t>(Role::RESPONDER)], 1);
+    // After the window plus the grace period the session fails (R-8.7, I-6).
+    MockClock(WINDOW + GRACE);
+    BOOST_REQUIRE(WaitFor([&] { return results_a.Count() == 1; }));
+    BOOST_CHECK(!results_a.Get(0).sock);
+    BOOST_CHECK(results_a.Get(0).role == Role::RESPONDER);
+    BOOST_CHECK(!a.HasSession(dead));
+    BOOST_CHECK(attempts() == -1);
+    BOOST_CHECK_EQUAL(a.GetStats().failed[static_cast<size_t>(Role::RESPONDER)], 1);
+    SetMockTime(std::chrono::seconds{0});
+}
+
+BOOST_AUTO_TEST_CASE(session_limits)
+{
+    const uint16_t port_a{FreePort()};
+    Results results_a;
+    SessionManager a{LocalOptions(port_a), results_a.Fn()};
+    BOOST_REQUIRE(a.Start());
+    MockClock();
+    std::vector<CService> dead;
+    for (int i = 0; i < 8; ++i) dead.push_back(LookupNumeric("127.0.0.1", FreePort()));
+    const std::vector<unsigned char> group_y{0x66};
+
+    // One session per endpoint, GROUP_SESSIONS_PER_HOUR per network group (I-5).
+    for (int i = 0; i < 4; ++i) BOOST_CHECK(!a.Punch(Role::INITIATOR, dead[i], GROUP_X));
+    BOOST_CHECK(a.Punch(Role::INITIATOR, dead[0], GROUP_X).has_value()); // duplicate
+    BOOST_CHECK(a.Punch(Role::INITIATOR, dead[4], GROUP_X).has_value()); // the group's hour is used up
+    BOOST_CHECK(!a.GroupBudgetFree(GROUP_X));
+    BOOST_CHECK(a.GroupBudgetFree(group_y));
+    BOOST_CHECK(!a.Punch(Role::RESPONDER, dead[4], group_y));
+    BOOST_CHECK(!a.Punch(Role::RESPONDER, dead[5], group_y));
+    BOOST_CHECK(a.Punch(Role::RESPONDER, dead[6], group_y).has_value()); // MAX_ACTIVE_SESSIONS
+    BOOST_CHECK_EQUAL(a.SessionsByRole()[static_cast<size_t>(Role::INITIATOR)], 4);
+    BOOST_CHECK_EQUAL(a.SessionsByRole()[static_cast<size_t>(Role::RESPONDER)], 2);
+
+    // Once they fail, the group's budget is still used up for the hour.
+    MockClock(WINDOW + GRACE);
+    BOOST_REQUIRE(WaitFor([&] { return results_a.Count() == 6; }));
+    BOOST_CHECK(a.Punch(Role::INITIATOR, dead[6], GROUP_X).has_value());
+    BOOST_CHECK(!a.Punch(Role::INITIATOR, dead[6], group_y));
+    MockClock(std::chrono::hours{1});
+    BOOST_CHECK(a.GroupBudgetFree(GROUP_X));
+    BOOST_CHECK(!a.Punch(Role::INITIATOR, dead[7], GROUP_X));
+    SetMockTime(std::chrono::seconds{0});
 }
 
 BOOST_AUTO_TEST_SUITE_END()
