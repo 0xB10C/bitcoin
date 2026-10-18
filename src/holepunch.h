@@ -85,6 +85,15 @@ inline constexpr auto GRACE{std::chrono::seconds{5}};
 inline constexpr auto HOLD{std::chrono::seconds{10}};
 /** At most this many such connections are held (R-8.4). */
 inline constexpr size_t HELD_MAX{8};
+/**
+ * How far the node's blocks may trail the headers it knows and still punch.
+ * A node that is catching up reaches each block long after its peers did, so
+ * its rounds for those blocks cannot overlap theirs and its attempts are
+ * wasted; it also must not be in anyone's table, since a peer that picks it
+ * would wait out a session alone.
+ */
+inline constexpr int TIP_LAG{2};
+
 /** Sessions started per round at most (R-7.4). */
 inline constexpr size_t PICKS_PER_ROUND{3};
 /** Of them, from entries of one source group at most (R-7.4). */

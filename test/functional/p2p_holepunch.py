@@ -10,10 +10,12 @@ import socket
 import time
 
 from test_framework.address import ADDRESS_BCRT1_UNSPENDABLE
+from test_framework.blocktools import create_block, create_coinbase
 from test_framework.crypto.secp256k1 import GE
 from test_framework.key import ECKey
 from test_framework.messages import (
     CAddress,
+    CBlockHeader,
     NODE_HOLEPUNCH_BOARD,
     NODE_NETWORK,
     NODE_P2P_V2,
@@ -800,6 +802,39 @@ class HolePunchTest(BitcoinTestFramework):
         assert_equal(len(sessions()), model.active)
         assert_equal(info()["rounds"]["picks"], model.active)
         assert model.active >= 3
+
+        self.log.info("No round while the node's blocks trail the headers it knows")
+        # A chain of headers with no blocks behind them, as a node has while it is
+        # catching up: the rounds it would hold are for blocks its peers reached
+        # long ago, so its attempts could never meet theirs.
+        tip_hash = int(visitor.getbestblockhash(), 16)
+        tip_height = visitor.getblockcount()
+        tip_time = visitor.getblock(visitor.getbestblockhash())["time"]
+        ahead = []
+        for i in range(1, 6):
+            block = create_block(hashprev=tip_hash, coinbase=create_coinbase(tip_height + i), ntime=tip_time + i)
+            block.solve()
+            ahead.append(block)
+            tip_hash = block.hash_int
+        for block in ahead:
+            visitor.submitheader(CBlockHeader(block).serialize().hex())
+        chaininfo = visitor.getblockchaininfo()
+        assert_equal(chaininfo["headers"] - chaininfo["blocks"], 5)
+        assert_equal(info()["near_tip"], False)
+        held = info()["rounds"]["held"]
+        mine()
+        assert_equal(info()["rounds"]["held"], held)
+
+        self.log.info("Once the blocks catch up with the headers, rounds resume")
+        for block in ahead:
+            visitor.submitblock(block.serialize().hex())
+        visitor.syncwithvalidationinterfacequeue()
+        chaininfo = visitor.getblockchaininfo()
+        assert_equal(chaininfo["headers"], chaininfo["blocks"])
+        assert_equal(info()["near_tip"], True)
+        held = info()["rounds"]["held"]
+        mine()
+        assert_equal(info()["rounds"]["held"], held + 1)
 
         self.log.info("A reorganisation to a chain of equal height holds no round")
         held = info()["rounds"]["held"]

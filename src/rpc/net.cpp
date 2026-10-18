@@ -1233,6 +1233,7 @@ static RPCMethod getholepunchinfo()
                                 {RPCResult::Type::STR, "announced", /*optional=*/true, "(ip:port) The external address announced under the key"},
                             }},
                     }},
+                {RPCResult::Type::BOOL, "near_tip", "Whether the node is close enough to the tip to announce and to punch"},
                 {RPCResult::Type::NUM, "boards_set_aside", "Addresses that advertise the board service bit but are not usable boards"},
                 {RPCResult::Type::OBJ, "rounds", "Rounds held on new blocks",
                     {
@@ -1342,6 +1343,7 @@ static RPCMethod getholepunchinfo()
         sources.push_back(std::move(source));
     }
     table.pushKV("sources", std::move(sources));
+    obj.pushKV("near_tip", peerman_info.near_tip);
     obj.pushKV("boards_set_aside", connman.GetHolePunchBoardsSetAside());
     UniValue rounds(UniValue::VOBJ);
     rounds.pushKV("held", peerman_info.rounds);

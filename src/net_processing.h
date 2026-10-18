@@ -92,6 +92,8 @@ struct HolePunchInfo {
     /** As a board: entries with an open connection, and all entries including those in their grace period. */
     size_t board_live_entries{0};
     size_t board_entries{0};
+    /** Whether the node is close enough to the tip to announce and to punch. */
+    bool near_tip{false};
     /** Rounds held and sessions started by them since the node started, and the height of the last round. */
     uint64_t rounds{0};
     uint64_t picks{0};

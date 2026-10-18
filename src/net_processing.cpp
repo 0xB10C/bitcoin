@@ -942,6 +942,13 @@ private:
     /** On a tip change: note the time, and hold a round for a new block (section 7 of the draft). */
     void HolePunchRound(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
 
+    /**
+     * Whether the node is close enough to the tip to take part: out of initial
+     * block download and with its blocks no more than TIP_LAG behind the best
+     * header it knows (R-7.1).
+     */
+    bool HolePunchNearTip() const;
+
     /** The key for `family` if one was made. */
     std::optional<CKey> HolePunchKeyIfAny(Network family) const EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
     /** The key for `family`, made or rotated as needed. */
@@ -6117,6 +6124,8 @@ bool PeerManagerImpl::IsOwnHolePunchEntry(const holepunch::PunchKey& key)
 void PeerManagerImpl::MaybeAnnounceToBoard(CNode& node, Peer& peer, NodeClock::time_point now)
 {
     AssertLockHeld(g_msgproc_mutex);
+    // A node that is catching up must not be picked by anyone (R-7.1).
+    if (!HolePunchNearTip()) return;
     const Network family{node.addr.IsIPv4() ? NET_IPV4 : NET_IPV6};
     const auto announcement{HolePunchAnnouncement(family, now)};
     if (!announcement) return;
@@ -6210,6 +6219,15 @@ void PeerManagerImpl::BoardRefresh()
     SendToVisitors(elements, std::nullopt);
 }
 
+bool PeerManagerImpl::HolePunchNearTip() const
+{
+    if (m_chainman.IsInitialBlockDownload()) return false;
+    LOCK(cs_main);
+    const CBlockIndex* best_header{m_chainman.m_best_header};
+    if (best_header == nullptr) return true;
+    return m_chainman.ActiveHeight() + holepunch::TIP_LAG >= best_header->nHeight;
+}
+
 std::optional<CKey> PeerManagerImpl::HolePunchKeyIfAny(Network family) const
 {
     LOCK(m_holepunch_mutex);
@@ -6222,6 +6240,9 @@ void PeerManagerImpl::HolePunchRound(const CBlockIndex* pindexNew, const CBlockI
 {
     const auto now{NodeClock::now()};
     const bool allow_local{m_connman.GetHolePunchOptions().allow_local};
+    // Note the time the tip reached the block either way, so that an entry
+    // received while catching up still has to wait for its parent (R-7.2).
+    const bool near_tip{HolePunchNearTip()};
     NodeClock::time_point parent_time;
     {
         LOCK(m_holepunch_mutex);
@@ -6239,6 +6260,10 @@ void PeerManagerImpl::HolePunchRound(const CBlockIndex* pindexNew, const CBlockI
         // A round only for a greater height, once per block (R-7.1).
         if (pindexNew->nHeight <= m_holepunch_round_height) return;
         m_holepunch_round_height = pindexNew->nHeight;
+        if (!near_tip) {
+            LogDebug(BCLog::HOLEPUNCH, "no round for the block at height %d: the blocks trail the headers\n", pindexNew->nHeight);
+            return;
+        }
         ++m_holepunch_rounds;
         // Entries take part only if received before the tip reached the parent (R-7.2); if
         // that was before this run, none do.
@@ -6334,6 +6359,7 @@ HolePunchInfo PeerManagerImpl::GetHolePunchInfo() const
             info.families.push_back(family);
         }
     }
+    info.near_tip = HolePunchNearTip();
     info.table_entries = m_holepunch_table.Size();
     info.table_by_source = m_holepunch_table.SizeBySource();
     info.board_live_entries = m_holepunch_board.LiveEntries().size();
