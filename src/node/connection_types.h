@@ -82,6 +82,15 @@ enum class ConnectionType {
      * our own transactions) and closed afterwards.
      */
     PRIVATE_BROADCAST,
+
+    /**
+     * Board connections are standing connections from a node behind a NAT
+     * to a reachable node acting as a hole punching board. They are made
+     * from the punch port and carry nothing but the hole punching protocol:
+     * the board reports our external address and port, and announcements
+     * of other nodes to punch to travel over them.
+     */
+    HOLEPUNCH_BOARD,
 };
 
 /** Convert ConnectionType enum to a string value */

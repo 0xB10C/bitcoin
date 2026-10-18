@@ -75,7 +75,8 @@ const std::vector<std::string> CONNECTION_TYPE_DOC{
         "manual (added via addnode RPC or -addnode/-connect configuration options)",
         "addr-fetch (short-lived automatic connection for soliciting addresses)",
         "feeler (short-lived automatic connection for testing addresses)",
-        "private-broadcast (short-lived automatic connection for broadcasting privacy-sensitive transactions)"
+        "private-broadcast (short-lived automatic connection for broadcasting privacy-sensitive transactions)",
+        "holepunch-board (automatic connection from the punch port to a hole punching board)"
 };
 
 const std::vector<std::string> TRANSPORT_TYPE_DOC{
@@ -423,7 +424,7 @@ static RPCMethod addconnection()
         "Open an outbound connection to a specified node. This RPC is for testing only.\n",
         {
             {"address", RPCArg::Type::STR, RPCArg::Optional::NO, "The IP address and port to attempt connecting to."},
-            {"connection_type", RPCArg::Type::STR, RPCArg::Optional::NO, "Type of connection to open (\"outbound-full-relay\", \"block-relay-only\", \"addr-fetch\", \"feeler\" or \"manual\")."},
+            {"connection_type", RPCArg::Type::STR, RPCArg::Optional::NO, "Type of connection to open (\"outbound-full-relay\", \"block-relay-only\", \"addr-fetch\", \"feeler\", \"manual\" or \"holepunch-board\")."},
             {"v2transport", RPCArg::Type::BOOL, RPCArg::Optional::NO, "Attempt to connect using BIP324 v2 transport protocol"},
         },
         RPCResult{
@@ -455,6 +456,8 @@ static RPCMethod addconnection()
         conn_type = ConnectionType::FEELER;
     } else if (conn_type_in == "manual") {
         conn_type = ConnectionType::MANUAL;
+    } else if (conn_type_in == "holepunch-board") {
+        conn_type = ConnectionType::HOLEPUNCH_BOARD;
     } else {
         throw JSONRPCError(RPC_INVALID_PARAMETER, self.ToString());
     }

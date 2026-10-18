@@ -485,6 +485,17 @@ CNode* CConnman::ConnectNode(CAddress addrConnect,
                     sock = std::move(conn.sock);
                     addr_bind = conn.me;
                 }
+            } else if (conn_type == ConnectionType::HOLEPUNCH_BOARD) {
+                // A board has to see us from the punch port, so a board connection is
+                // made directly from it or not at all: not through a proxy, and not from
+                // another port.
+                const auto bind_addr{HolePunchBindAddress(target_addr)};
+                if (use_proxy || !bind_addr) {
+                    LogDebug(BCLog::HOLEPUNCH, "not opening a board connection to %s: %s\n", target_addr.ToStringAddrPort(),
+                             use_proxy ? "a proxy is in use for its network" : "no punch port for its network");
+                } else {
+                    sock = ConnectDirectly(target_addr, /*manual_connection=*/false, std::chrono::milliseconds{nConnectTimeout}, bind_addr);
+                }
             } else if (use_proxy) {
                 LogDebug(BCLog::PROXY, "Using proxy: %s to connect to %s\n", use_proxy->ToString(), target_addr.ToStringAddrPort());
                 sock = ConnectThroughProxy(*use_proxy, target_addr.ToStringAddr(), target_addr.GetPort(), proxyConnectionFailed);
@@ -1915,6 +1926,9 @@ bool CConnman::AddConnection(const std::string& address, ConnectionType conn_typ
     // no limit for FEELER connections since they're short-lived
     case ConnectionType::FEELER:
         break;
+    // board connections take no outbound slot, their number is bounded by the hole punching logic
+    case ConnectionType::HOLEPUNCH_BOARD:
+        break;
     } // no default case, so the compiler can warn about missing cases
 
     // Count existing connections
@@ -1925,8 +1939,11 @@ bool CConnman::AddConnection(const std::string& address, ConnectionType conn_typ
     if (max_connections != std::nullopt && existing_connections >= max_connections) return false;
 
     // Max total automatic outbound or manual connections already exist
-    CountingSemaphoreGrant<> grant(conn_type == ConnectionType::MANUAL ? *semAddnode : *semOutbound, true);
-    if (!grant) return false;
+    CountingSemaphoreGrant<> grant;
+    if (conn_type != ConnectionType::HOLEPUNCH_BOARD) {
+        grant = CountingSemaphoreGrant<>(conn_type == ConnectionType::MANUAL ? *semAddnode : *semOutbound, true);
+        if (!grant) return false;
+    }
 
     OpenNetworkConnection(/*addrConnect=*/CAddress{},
                           /*fCountFailure=*/false,
@@ -2744,6 +2761,9 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
                     case ConnectionType::ADDR_FETCH:
                     case ConnectionType::FEELER:
                     case ConnectionType::PRIVATE_BROADCAST:
+                    // Board connections are chosen for being boards, not for diversity,
+                    // and they carry no blocks or transactions.
+                    case ConnectionType::HOLEPUNCH_BOARD:
                         break;
                     case ConnectionType::MANUAL:
                     case ConnectionType::OUTBOUND_FULL_RELAY:
@@ -3818,6 +3838,14 @@ CConnman::~CConnman()
 {
     Interrupt();
     Stop();
+}
+
+std::optional<CService> CConnman::HolePunchBindAddress(const CService& target) const
+{
+    if (m_holepunch.port == 0) return std::nullopt;
+    if (target.IsIPv4()) return holepunch::WildcardAddress(NET_IPV4, m_holepunch.port);
+    if (target.IsIPv6()) return holepunch::WildcardAddress(NET_IPV6, m_holepunch.port);
+    return std::nullopt;
 }
 
 std::vector<CAddress> CConnman::GetAddressesUnsafe(size_t max_addresses, size_t max_pct, std::optional<Network> network, const bool filtered) const

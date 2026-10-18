@@ -13,6 +13,7 @@
 #include <consensus/amount.h>
 #include <crypto/siphash.h>
 #include <hash.h>
+#include <holepunch.h>
 #include <i2p.h>
 #include <kernel/messagestartchars.h>
 #include <net_permissions.h>
@@ -786,6 +787,7 @@ public:
             case ConnectionType::ADDR_FETCH:
             case ConnectionType::FEELER:
             case ConnectionType::PRIVATE_BROADCAST:
+            case ConnectionType::HOLEPUNCH_BOARD:
                 return false;
         } // no default case, so the compiler can warn about missing cases
 
@@ -808,6 +810,7 @@ public:
         case ConnectionType::BLOCK_RELAY:
         case ConnectionType::ADDR_FETCH:
         case ConnectionType::PRIVATE_BROADCAST:
+        case ConnectionType::HOLEPUNCH_BOARD:
                 return false;
         case ConnectionType::OUTBOUND_FULL_RELAY:
         case ConnectionType::MANUAL:
@@ -834,6 +837,11 @@ public:
         return m_conn_type == ConnectionType::PRIVATE_BROADCAST;
     }
 
+    bool IsHolePunchBoardConn() const
+    {
+        return m_conn_type == ConnectionType::HOLEPUNCH_BOARD;
+    }
+
     /** Protocol version advertised in our VERSION message.
      *  Private broadcast connections use a fixed version to maximise anonymity. */
     int AdvertisedVersion() const
@@ -850,6 +858,7 @@ public:
             case ConnectionType::INBOUND:
             case ConnectionType::MANUAL:
             case ConnectionType::FEELER:
+            case ConnectionType::HOLEPUNCH_BOARD:
                 return false;
             case ConnectionType::OUTBOUND_FULL_RELAY:
             case ConnectionType::BLOCK_RELAY:
@@ -1114,6 +1123,7 @@ public:
         bool whitelist_forcerelay = DEFAULT_WHITELISTFORCERELAY;
         bool whitelist_relay = DEFAULT_WHITELISTRELAY;
         bool m_capture_messages = false;
+        holepunch::Options m_holepunch;
     };
 
     void Init(const Options& connOptions) EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex, !m_total_bytes_sent_mutex)
@@ -1128,6 +1138,7 @@ public:
         m_max_inbound = std::max(0, m_max_automatic_connections - m_max_automatic_outbound);
         m_max_inbound_full_relay = std::max(0, static_cast<int>(connOptions.m_full_relay_inbound_percent / 100.0 * m_max_inbound));
         m_use_addrman_outgoing = connOptions.m_use_addrman_outgoing;
+        m_holepunch = connOptions.m_holepunch;
         m_client_interface = connOptions.uiInterface;
         m_banman = connOptions.m_banman;
         m_msgproc = connOptions.m_msgproc;
@@ -1183,6 +1194,7 @@ public:
     void Interrupt() EXCLUSIVE_LOCKS_REQUIRED(!mutexMsgProc);
     bool GetNetworkActive() const { return fNetworkActive; };
     bool GetUseAddrmanOutgoing() const { return m_use_addrman_outgoing; };
+    const holepunch::Options& GetHolePunchOptions() const { return m_holepunch; }
     void SetNetworkActive(bool active) EXCLUSIVE_LOCKS_REQUIRED(!m_anchors_mutex, !m_nodes_mutex);
 
     /**
@@ -1585,6 +1597,14 @@ private:
 
     void AddWhitelistPermissionFlags(NetPermissionFlags& flags, std::optional<CNetAddr> addr, const std::vector<NetWhitelistPermissions>& ranges) const;
 
+    /**
+     * The local address a board connection or punch attempt to `target` is
+     * made from: the wildcard address of the target's family with the punch
+     * port. Nullopt if there is no punch port or the target is not IPv4 or
+     * IPv6.
+     */
+    std::optional<CService> HolePunchBindAddress(const CService& target) const;
+
     void DeleteNode(CNode* pnode);
 
     NodeId GetNewNodeId();
@@ -1739,6 +1759,7 @@ private:
     int m_max_inbound_full_relay;
 
     bool m_use_addrman_outgoing;
+    holepunch::Options m_holepunch;
     CClientUIInterface* m_client_interface;
     NetEventsInterface* m_msgproc;
     /** Pointer to this node's banman. May be nullptr - check existence before dereferencing. */
