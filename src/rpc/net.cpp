@@ -1233,6 +1233,12 @@ static RPCMethod getholepunchinfo()
                                 {RPCResult::Type::STR, "announced", /*optional=*/true, "(ip:port) The external address announced under the key"},
                             }},
                     }},
+                {RPCResult::Type::OBJ, "rounds", "Rounds held on new blocks",
+                    {
+                        {RPCResult::Type::NUM, "held", "Rounds since the node started"},
+                        {RPCResult::Type::NUM, "picks", "Sessions those rounds started"},
+                        {RPCResult::Type::NUM, "last_height", "The height of the last round, -1 if none"},
+                    }},
                 {RPCResult::Type::ARR, "sessions", "Punch sessions in progress",
                     {
                         {RPCResult::Type::OBJ, "", "",
@@ -1335,6 +1341,11 @@ static RPCMethod getholepunchinfo()
         sources.push_back(std::move(source));
     }
     table.pushKV("sources", std::move(sources));
+    UniValue rounds(UniValue::VOBJ);
+    rounds.pushKV("held", peerman_info.rounds);
+    rounds.pushKV("picks", peerman_info.picks);
+    rounds.pushKV("last_height", peerman_info.last_round_height);
+    obj.pushKV("rounds", std::move(rounds));
     UniValue sessions(UniValue::VARR);
     for (const auto& session : connman.GetHolePunchSessions()) {
         UniValue entry(UniValue::VOBJ);

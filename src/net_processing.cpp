@@ -597,7 +597,7 @@ public:
     void BlockDisconnected(const std::shared_ptr<const CBlock> &block, const CBlockIndex* pindex) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
     void UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlockIndex *pindexFork, bool fInitialDownload) override
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_holepunch_mutex);
     void BlockChecked(const std::shared_ptr<const CBlock>& block, const BlockValidationState& state) override
         EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void NewPoWValidBlock(const CBlockIndex *pindex, const std::shared_ptr<const CBlock>& pblock) override
@@ -930,6 +930,20 @@ private:
     /** The entries we hold as a board (R-5.6 to R-5.8). */
     holepunch::Board m_holepunch_board;
 
+    /** When the tip reached each recent block, by hash; blocks connected in one batch share the time (R-7.1). */
+    std::map<uint256, NodeClock::time_point> m_holepunch_tip_times GUARDED_BY(m_holepunch_mutex);
+    /** The same hashes in order of arrival, to drop the oldest. */
+    std::deque<uint256> m_holepunch_tip_order GUARDED_BY(m_holepunch_mutex);
+    /** The height of the last round; a tip change to no greater height holds no round (R-7.1). */
+    int m_holepunch_round_height GUARDED_BY(m_holepunch_mutex){-1};
+    uint64_t m_holepunch_rounds GUARDED_BY(m_holepunch_mutex){0};
+    uint64_t m_holepunch_picks GUARDED_BY(m_holepunch_mutex){0};
+
+    /** On a tip change: note the time, and hold a round for a new block (section 7 of the draft). */
+    void HolePunchRound(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
+
+    /** The key for `family` if one was made. */
+    std::optional<CKey> HolePunchKeyIfAny(Network family) const EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
     /** The key for `family`, made or rotated as needed. */
     CKey HolePunchKey(Network family, NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(m_holepunch_mutex);
     /**
@@ -2372,6 +2386,8 @@ void PeerManagerImpl::UpdatedBlockTip(const CBlockIndex *pindexNew, const CBlock
 
     // Don't relay inventory during initial block download.
     if (fInitialDownload) return;
+
+    if (m_connman.GetHolePunchOptions().enabled) HolePunchRound(pindexNew, pindexFork);
 
     // Find the hashes of all blocks that weren't previously in the best chain.
     std::vector<uint256> vHashes;
@@ -6186,11 +6202,119 @@ void PeerManagerImpl::BoardRefresh()
     SendToVisitors(elements, std::nullopt);
 }
 
+std::optional<CKey> PeerManagerImpl::HolePunchKeyIfAny(Network family) const
+{
+    LOCK(m_holepunch_mutex);
+    const auto it{m_holepunch_families.find(family)};
+    if (it == m_holepunch_families.end() || !it->second.key.IsValid()) return std::nullopt;
+    return it->second.key;
+}
+
+void PeerManagerImpl::HolePunchRound(const CBlockIndex* pindexNew, const CBlockIndex* pindexFork)
+{
+    const auto now{NodeClock::now()};
+    const bool allow_local{m_connman.GetHolePunchOptions().allow_local};
+    NodeClock::time_point parent_time;
+    {
+        LOCK(m_holepunch_mutex);
+        // Every block from the fork to the new tip gets the batch's time (R-7.1).
+        constexpr size_t TIP_TIMES_MAX{64};
+        for (const CBlockIndex* pindex{pindexNew}; pindex && pindex != pindexFork; pindex = pindex->pprev) {
+            if (m_holepunch_tip_times.emplace(pindex->GetBlockHash(), now).second) {
+                m_holepunch_tip_order.push_back(pindex->GetBlockHash());
+            }
+        }
+        while (m_holepunch_tip_order.size() > TIP_TIMES_MAX) {
+            m_holepunch_tip_times.erase(m_holepunch_tip_order.front());
+            m_holepunch_tip_order.pop_front();
+        }
+        // A round only for a greater height, once per block (R-7.1).
+        if (pindexNew->nHeight <= m_holepunch_round_height) return;
+        m_holepunch_round_height = pindexNew->nHeight;
+        ++m_holepunch_rounds;
+        // Entries take part only if received before the tip reached the parent (R-7.2); if
+        // that was before this run, none do.
+        if (!pindexNew->pprev) return;
+        const auto it{m_holepunch_tip_times.find(pindexNew->pprev->GetBlockHash())};
+        if (it == m_holepunch_tip_times.end()) return;
+        parent_time = it->second;
+    }
+    const uint256 block_hash{pindexNew->GetBlockHash()};
+
+    struct Candidate {
+        uint256 pair;
+        holepunch::Entry entry;
+        holepunch::Role role;
+        std::vector<unsigned char> group;
+    };
+    std::vector<Candidate> candidates;
+    for (const holepunch::Entry& entry : m_holepunch_table.Eligible(now, parent_time)) {
+        const CService& endpoint{entry.key.endpoint};
+        const Network family{endpoint.IsIPv4() ? NET_IPV4 : NET_IPV6};
+        // Our punch port, external address and key for the family (R-7.3).
+        const auto external{m_connman.GetHolePunchExternalInfo(family).address};
+        const auto key{HolePunchKeyIfAny(family)};
+        if (!external || !key) continue;
+        // Not one of our own addresses, routable, no bad port.
+        if (!allow_local && !endpoint.IsRoutable()) continue;
+        if (IsLocal(endpoint) || IsBadPort(endpoint.GetPort())) continue;
+        bool own{false};
+        for (const Network net : {NET_IPV4, NET_IPV6}) {
+            const auto ours{m_connman.GetHolePunchExternalInfo(net).address};
+            if (!ours) continue;
+            own |= allow_local ? *ours == endpoint : static_cast<const CNetAddr&>(*ours) == static_cast<const CNetAddr&>(endpoint);
+        }
+        if (own) continue;
+        // No connection and no session to the endpoint, and budget in its group.
+        if (m_connman.HasConnectionTo(endpoint) || m_connman.HasHolePunchSession(endpoint)) continue;
+        const auto group{m_connman.GetHolePunchGroup(endpoint)};
+        if (!m_connman.HolePunchGroupBudgetFree(group)) continue;
+        // The role for this round, and what it needs (R-4.7, R-7.3).
+        const uint256 pair{holepunch::PairValue(entry.secret, block_hash, *external, endpoint)};
+        const holepunch::Role role{holepunch::RoleFor(pair, key->GetPubKey(), entry.key.pubkey)};
+        if (role == holepunch::Role::INITIATOR) {
+            if (!HasAllDesirableServiceFlags(entry.key.services)) continue;
+            if (!m_connman.HolePunchInitiatorSlotFree() || m_connman.HasOutboundPeerInGroup(group)) continue;
+        } else if (!m_connman.HolePunchResponderSlotFree()) {
+            continue;
+        }
+        candidates.push_back({.pair = pair, .entry = entry, .role = role, .group = group});
+    }
+    // Lowest pair values first (R-4.6, R-7.4).
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) { return a.pair < b.pair; });
+    LogDebug(BCLog::HOLEPUNCH, "round for block %s at height %d: %d candidates", block_hash.ToString(), pindexNew->nHeight, candidates.size());
+
+    size_t picks{0};
+    std::set<std::vector<unsigned char>> groups_taken;
+    std::map<std::vector<unsigned char>, size_t> source_picks;
+    for (const Candidate& c : candidates) {
+        if (picks >= holepunch::PICKS_PER_ROUND) break;
+        if (groups_taken.contains(c.group) || source_picks[c.entry.source] >= holepunch::PICKS_PER_SOURCE) continue;
+        // The role's slot may have been reserved by an earlier pick.
+        if (c.role == holepunch::Role::INITIATOR ? !m_connman.HolePunchInitiatorSlotFree() : !m_connman.HolePunchResponderSlotFree()) continue;
+        // A picked entry is gone whatever the outcome (R-7.6).
+        m_holepunch_table.Remove(c.entry.key.endpoint, c.entry.key.pubkey);
+        if (const auto reason{m_connman.HolePunchSession(c.role, c.entry.key.endpoint, c.group)}) {
+            LogDebug(BCLog::HOLEPUNCH, "no session with %s: %s", c.entry.key.endpoint.ToStringAddrPort(), *reason);
+            if (reason->find("sessions are in progress") != std::string::npos) break; // MAX_ACTIVE_SESSIONS
+            continue;
+        }
+        LogDebug(BCLog::HOLEPUNCH, "picked %s with pair value %s as %s", c.entry.key.endpoint.ToStringAddrPort(), HexStr(c.pair), holepunch::RoleName(c.role));
+        ++picks;
+        groups_taken.insert(c.group);
+        ++source_picks[c.entry.source];
+    }
+    WITH_LOCK(m_holepunch_mutex, m_holepunch_picks += picks);
+}
+
 HolePunchInfo PeerManagerImpl::GetHolePunchInfo() const
 {
     HolePunchInfo info;
     {
         LOCK(m_holepunch_mutex);
+        info.rounds = m_holepunch_rounds;
+        info.picks = m_holepunch_picks;
+        info.last_round_height = m_holepunch_round_height;
         for (const Network net : {NET_IPV4, NET_IPV6}) {
             HolePunchInfo::Family family{.net = net, .pubkey = std::nullopt, .key_rotates_at = {}, .announced = std::nullopt};
             const auto it{m_holepunch_families.find(net)};

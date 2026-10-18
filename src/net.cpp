@@ -4076,6 +4076,18 @@ bool CConnman::HasHolePunchSession(const CService& endpoint) const
     return m_holepunch_sessions && m_holepunch_sessions->HasSession(endpoint);
 }
 
+bool CConnman::HasOutboundPeerInGroup(const std::vector<unsigned char>& group) const
+{
+    LOCK(m_nodes_mutex);
+    for (const CNode* node : m_nodes) {
+        if (node->m_hole_punched || node->fDisconnect) continue;
+        if (!node->IsManualOrFullOutboundConn() && !node->IsBlockOnlyConn()) continue;
+        if (node->addr.IsTor() || node->addr.IsI2P() || node->addr.IsCJDNS()) continue;
+        if (GetHolePunchGroup(node->addr) == group) return true;
+    }
+    return false;
+}
+
 bool CConnman::HolePunchGroupBudgetFree(const std::vector<unsigned char>& group) const
 {
     return m_holepunch_sessions && m_holepunch_sessions->GroupBudgetFree(group);

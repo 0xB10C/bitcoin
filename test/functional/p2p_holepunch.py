@@ -5,9 +5,12 @@
 """Test TCP hole punching through boards: options, board connections, the feature exchange,
 the external address, announcing to boards, acting as a board, and punched connections."""
 
+import hashlib
 import socket
 import time
 
+from test_framework.address import ADDRESS_BCRT1_UNSPENDABLE
+from test_framework.crypto.secp256k1 import GE
 from test_framework.key import ECKey
 from test_framework.messages import (
     CAddress,
@@ -49,6 +52,71 @@ def punchkey_element(ip, port, pubkey, services=ENTRY_SERVICES, net=CAddress.NET
     addr.nServices = services
     addr.time = int(time.time())
     return addr
+
+
+def free_port():
+    """A loopback port nothing listens on."""
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+class PickModel:
+    """What a node picks in its rounds, computed from the entries' keys as the draft
+    specifies: pair values rank the candidates, the pair value's last bit and the key
+    order give the role, at most three picks per round and two per source, one
+    initiator slot, and entries take part only once the tip reached the parent after
+    they arrived."""
+
+    def __init__(self, node_pubkey, own_endpoint):
+        self.node_pubkey = node_pubkey
+        self.own = own_endpoint
+        self.entries = []  # (ip, port, key, source, height when served)
+        self.active = 0
+        self.initiator_free = True
+
+    def serve(self, entries, source, height):
+        self.entries.extend((ip, port, key, source, height) for ip, port, key in entries)
+
+    @staticmethod
+    def _endpoint(ip, port):
+        return b"\x01\x04" + socket.inet_aton(ip) + port.to_bytes(2, "big")
+
+    def pair(self, ip, port, key, block_hash):
+        secret = int.from_bytes(key.get_bytes(), "big")
+        x = (secret * GE.from_bytes(self.node_pubkey)).x.to_bytes()
+        endpoints = sorted([self._endpoint(*self.own), self._endpoint(ip, port)])
+        tag = hashlib.sha256(b"tcp-holepunch/pair").digest()
+        return hashlib.sha256(tag + tag + x + bytes.fromhex(block_hash)[::-1] + endpoints[0] + endpoints[1]).digest()
+
+    def round(self, height, block_hash):
+        """The (endpoint, role) picks of the round for the block at `height`."""
+        candidates = []
+        for ip, port, key, source, served in self.entries:
+            if served > height - 2:
+                continue  # the tip reached the parent before the entry arrived (R-7.2)
+            pair = self.pair(ip, port, key, block_hash)
+            smaller_key_initiates = (pair[31] & 1) == 0
+            node_is_smaller = self.node_pubkey < key.get_pubkey().get_bytes()
+            role = "initiator" if node_is_smaller == smaller_key_initiates else "responder"
+            candidates.append((pair, f"{ip}:{port}", role, source, (ip, port, key, source, served)))
+        candidates.sort()
+        picks = []
+        per_source = {}
+        for pair, endpoint, role, source, entry in candidates:
+            if len(picks) >= 3 or self.active >= 6:
+                break
+            if per_source.get(source, 0) >= 2:
+                continue
+            if role == "initiator":
+                if not self.initiator_free:
+                    continue
+                self.initiator_free = False
+            picks.append((endpoint, role))
+            per_source[source] = per_source.get(source, 0) + 1
+            self.entries.remove(entry)
+            self.active += 1
+        return sorted(picks)
 
 
 def decode_element(addr):
@@ -593,6 +661,87 @@ class HolePunchTest(BitcoinTestFramework):
         responder.setmocktime(0)
         self.disconnect_nodes(0, 2)
 
+    def test_rounds(self):
+        visitor = self.nodes[0]
+        self.restart_node(0)
+
+        def info():
+            return visitor.getholepunchinfo()
+
+        def board(idx):
+            return visitor.add_outbound_p2p_connection(HolePunchPeer(flags=FLAG_BOARD, report=("1.2.3.4", 5555), echo=True), p2p_idx=idx, connection_type="holepunch-board")
+
+        def serve(mock, entries):
+            msg = msg_addrv2()
+            msg.addrs = [punchkey_element(ip, port, key.get_pubkey().get_bytes()) for ip, port, key in entries]
+            mock.send_and_ping(msg)
+
+        def new_entries(n):
+            entries = []
+            for _ in range(n):
+                key = ECKey()
+                key.generate()
+                entries.append(("127.0.0.1", free_port(), key))
+            return entries
+
+        def sessions():
+            return sorted((s["endpoint"], s["role"]) for s in info()["sessions"])
+
+        self.log.info("A round is held for every new block")
+        held = info()["rounds"]["held"]
+        self.generate(visitor, 1, sync_fun=self.no_op)
+        assert_equal(info()["rounds"]["held"], held + 1)
+        assert_equal(info()["rounds"]["last_height"], visitor.getblockcount())
+
+        board_a, board_b = board(0), board(1)
+        for mock in (board_a, board_b):
+            mock.wait_until(lambda: len(mock.elements) == 1)
+        model = PickModel(bytes.fromhex(info()["families"][0]["key"]), ("1.2.3.4", 5555))
+
+        self.log.info("Entries take part in a round only once the tip reached the parent after they arrived")
+        entries_a = new_entries(6)
+        serve(board_a, entries_a)
+        model.serve(entries_a, "a", visitor.getblockcount())
+        assert_equal(info()["table"]["entries"], 6)
+        # The block right after the entries arrived: its parent came before them, no pick.
+        height = visitor.getblockcount() + 1
+        block = self.generate(visitor, 1, sync_fun=self.no_op)[0]
+        assert_equal(model.round(height, block), [])
+        assert_equal(sessions(), [])
+        assert_equal(info()["rounds"]["picks"], 0)
+
+        self.log.info("The lowest pair values are picked, at most two from one board, one as initiator")
+        height = visitor.getblockcount() + 1
+        block = self.generate(visitor, 1, sync_fun=self.no_op)[0]
+        expected = model.round(height, block)
+        assert 1 <= len(expected) <= 2
+        self.wait_until(lambda: sessions() == expected)
+        assert_equal(info()["rounds"]["picks"], len(expected))
+        assert_equal(info()["table"]["entries"], 6 - len(expected))
+
+        self.log.info("With entries from two boards, up to three sessions start per round")
+        entries_b = new_entries(6)
+        serve(board_b, entries_b)
+        model.serve(entries_b, "b", visitor.getblockcount())
+        for _ in range(2):
+            height = visitor.getblockcount() + 1
+            block = self.generate(visitor, 1, sync_fun=self.no_op)[0]
+            model.round(height, block)
+            self.wait_until(lambda: len(sessions()) == model.active)
+        assert_equal(len(sessions()), model.active)
+        assert_equal(info()["rounds"]["picks"], model.active)
+        assert model.active >= 3
+
+        self.log.info("A reorganisation to a chain of equal height holds no round")
+        held = info()["rounds"]["held"]
+        visitor.invalidateblock(visitor.getbestblockhash())
+        # Another coinbase, so that the replacement is not the block just invalidated.
+        self.generatetoaddress(visitor, 1, ADDRESS_BCRT1_UNSPENDABLE, sync_fun=self.no_op)
+        assert_equal(info()["rounds"]["held"], held)
+        self.generate(visitor, 1, sync_fun=self.no_op)
+        assert_equal(info()["rounds"]["held"], held + 1)
+        visitor.disconnect_p2ps()
+
     def test_visitors_outside_inbound_limit(self):
         board = self.nodes[1]
         self.log.info("Visitors do not take inbound slots at a board")
@@ -619,6 +768,7 @@ class HolePunchTest(BitcoinTestFramework):
         self.test_board_connections()
         self.test_announcements()
         self.test_board_serving()
+        self.test_rounds()
         self.test_punched_connection()
         self.test_visitors_outside_inbound_limit()
 

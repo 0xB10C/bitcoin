@@ -1739,6 +1739,14 @@ public:
      */
     std::optional<std::string> HolePunchSession(holepunch::Role role, const CService& endpoint, const std::vector<unsigned char>& group) EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
     bool HasHolePunchSession(const CService& endpoint) const;
+    /** Whether a connection with exactly this remote endpoint exists. */
+    bool HasConnectionTo(const CService& endpoint) const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex) { return AlreadyConnectedToAddressPort(endpoint); }
+    /**
+     * Whether an automatic or manual outbound peer is in `group` (as returned
+     * by GetHolePunchGroup): the outbound diversity an initiator pick has to
+     * pass (R-7.3). Hole-punched outbounds do not count.
+     */
+    bool HasOutboundPeerInGroup(const std::vector<unsigned char>& group) const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
     bool HolePunchGroupBudgetFree(const std::vector<unsigned char>& group) const;
     std::vector<holepunch::SessionManager::SessionInfo> GetHolePunchSessions() const;
     /** Null if hole punching is off. */

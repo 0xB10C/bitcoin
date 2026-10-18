@@ -85,6 +85,10 @@ inline constexpr auto GRACE{std::chrono::seconds{5}};
 inline constexpr auto HOLD{std::chrono::seconds{10}};
 /** At most this many such connections are held (R-8.4). */
 inline constexpr size_t HELD_MAX{8};
+/** Sessions started per round at most (R-7.4). */
+inline constexpr size_t PICKS_PER_ROUND{3};
+/** Of them, from entries of one source group at most (R-7.4). */
+inline constexpr size_t PICKS_PER_SOURCE{2};
 /** Sessions in progress at most (R-7.4). */
 inline constexpr size_t MAX_ACTIVE_SESSIONS{6};
 /** Sessions started per network group per hour at most (R-7.3). */
