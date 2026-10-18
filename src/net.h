@@ -209,6 +209,7 @@ public:
     int nVersion;
     std::string cleanSubVer;
     bool fInbound;
+    bool m_hole_punched;
     // We requested high bandwidth connection to peer
     bool m_bip152_highbandwidth_to;
     // Peer requested high bandwidth connection
@@ -682,6 +683,10 @@ struct CNodeOptions
     bool prefer_evict = false;
     size_t recv_flood_size{DEFAULT_MAXRECEIVEBUFFER * 1000};
     bool use_v2transport = false;
+    /** The connection came out of a hole punch session. */
+    bool hole_punched = false;
+    /** Only for hole_punched: the session's deadline, by which the handshake has to be complete (R-8.7). */
+    NodeClock::time_point holepunch_deadline{};
 };
 
 /** Information about a peer */
@@ -720,6 +725,13 @@ public:
     std::atomic<NodeClock::time_point> m_last_recv{NodeClock::epoch};
     //! Unix epoch time at peer connection
     const NodeClock::time_point m_connected;
+
+    //! Whether this connection came out of a hole punch session. An outbound
+    //! one takes the hole-punch slot, not one of the automatic outbound slots
+    //! (R-9.1 of the hole punching draft).
+    const bool m_hole_punched;
+    //! For hole-punched connections: when the handshake has to be complete (R-8.7).
+    const NodeClock::time_point m_holepunch_deadline;
 
     /** When a board connection is closed to be replaced by one to another board (R-5.2 of the hole punching draft). */
     std::atomic<NodeClock::time_point> m_holepunch_board_until{NodeClock::epoch};
@@ -1514,10 +1526,23 @@ private:
      * @param[in] addr_bind The address and port at our side of the connection.
      * @param[in] addr The address and port at the peer's side of the connection.
      */
-    void CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
+    void CreateNodeFromAcceptedSocket(std::shared_ptr<Sock> sock,
                                       NetPermissionFlags permission_flags,
                                       const CService& addr_bind,
-                                      const CService& addr)
+                                      const CService& addr,
+                                      bool hole_punched = false,
+                                      NodeClock::time_point holepunch_deadline = {})
+        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+
+    /**
+     * Make an outbound peer from the connection a session ended with as the
+     * initiator. It takes the hole-punch slot (R-9.1).
+     */
+    void CreateNodeFromPunchedSocket(std::shared_ptr<Sock> sock, const CService& peer, NodeClock::time_point deadline)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+
+    /** Called by the session manager, on its thread, when a session ends. */
+    void OnHolePunchResult(const CService& peer, holepunch::Role role, std::shared_ptr<Sock> sock, NodeClock::time_point deadline)
         EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
     void DisconnectNodes() EXCLUSIVE_LOCKS_REQUIRED(!m_reconnections_mutex, !m_nodes_mutex);
@@ -1637,6 +1662,8 @@ private:
 
     mutable Mutex m_holepunch_mutex;
     std::map<Network, HolePunchBoardState> m_holepunch_boards GUARDED_BY(m_holepunch_mutex);
+    /** Runs the punch sessions; null unless hole punching is on. */
+    std::unique_ptr<holepunch::SessionManager> m_holepunch_sessions;
 
 public:
     struct BoardVisitorCounts {
@@ -1664,10 +1691,12 @@ public:
     /** Forget the report of a peer that disconnected. */
     void HolePunchForget(NodeId id);
     /**
-     * The network group of `node` as a source of hole punching entries (R-5.4).
-     * On test networks every peer is its own group (R-2.5).
+     * The network group of an endpoint for hole punching: as a source of
+     * entries (R-5.4) and for the per-group session budget (R-7.3). On test
+     * networks every endpoint is its own group (R-2.5).
      */
-    std::vector<unsigned char> GetHolePunchGroup(const CNode& node) const;
+    std::vector<unsigned char> GetHolePunchGroup(const CService& endpoint) const;
+    std::vector<unsigned char> GetHolePunchGroup(const CNode& node) const { return GetHolePunchGroup(node.addr); }
     /** Our external address for `net` (NET_IPV4 or NET_IPV6) and how it was arrived at (R-2.2, R-2.3). */
     holepunch::ExternalAddressTracker::Info GetHolePunchExternalInfo(Network net) const;
 
@@ -1691,11 +1720,29 @@ public:
     /** The open board connections. */
     std::vector<HolePunchBoardInfo> GetHolePunchBoards() const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
+    /** Hole-punched outbound connections (R-9.1). */
+    int GetHolePunchOutboundCount() const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
     /**
-     * Whether the node can take the connection a session would produce: a
-     * free inbound slot for the responder side (R-5.3, section 9).
+     * Whether the hole-punch outbound slot is free for a session as initiator, or
+     * an inbound slot for one as responder; sessions in progress reserve the slot
+     * their role needs (R-7.3, R-7.4, section 9).
      */
+    bool HolePunchInitiatorSlotFree() const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+    bool HolePunchResponderSlotFree() const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+    /** Whether a slot of either kind is free (R-5.3). */
     bool HolePunchSlotFree() const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+
+    /**
+     * Start a punch session with `endpoint` in `role`, after the slot check
+     * above (R-7.4). `group` is the endpoint's network group.
+     * @return the reason if no session was started.
+     */
+    std::optional<std::string> HolePunchSession(holepunch::Role role, const CService& endpoint, const std::vector<unsigned char>& group) EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+    bool HasHolePunchSession(const CService& endpoint) const;
+    bool HolePunchGroupBudgetFree(const std::vector<unsigned char>& group) const;
+    std::vector<holepunch::SessionManager::SessionInfo> GetHolePunchSessions() const;
+    /** Null if hole punching is off. */
+    const holepunch::SessionManager::Stats* GetHolePunchStats() const;
 
 private:
 

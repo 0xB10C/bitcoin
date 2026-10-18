@@ -3,7 +3,7 @@
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
 """Test TCP hole punching through boards: options, board connections, the feature exchange,
-the external address, and announcing to boards."""
+the external address, announcing to boards, acting as a board, and punched connections."""
 
 import socket
 import time
@@ -25,6 +25,7 @@ from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     MAX_NODES,
     assert_equal,
+    assert_raises_rpc_error,
     holepunch_port,
     p2p_port,
 )
@@ -540,6 +541,58 @@ class HolePunchTest(BitcoinTestFramework):
         assert all(a.net != CAddress.NET_PUNCHKEY for m in peer.addrv2_messages for a in m.addrs)
         board.disconnect_p2ps()
 
+    def test_punched_connection(self):
+        initiator, responder = self.nodes[0], self.nodes[2]
+        self.restart_node(0)
+        self.restart_node(2)
+        initiator_endpoint = f"127.0.0.1:{holepunch_port(0)}"
+        responder_endpoint = f"127.0.0.1:{holepunch_port(2)}"
+
+        self.log.info("Two nodes punching to each other at the same time get one connection")
+        initiator.holepunchsession("initiator", responder_endpoint)
+        responder.holepunchsession("responder", initiator_endpoint)
+        self.wait_until(lambda: len(initiator.getpeerinfo()) == 1 and initiator.getpeerinfo()[0]["version"] != 0)
+        self.wait_until(lambda: len(responder.getpeerinfo()) == 1 and responder.getpeerinfo()[0]["version"] != 0)
+        outbound = initiator.getpeerinfo()[0]
+        inbound = responder.getpeerinfo()[0]
+        for peer in (outbound, inbound):
+            assert_equal(peer["hole_punched"], True)
+            assert_equal(peer["transport_protocol_type"], "v2")
+        # The initiator holds an outbound from its punch port to the responder's punch port.
+        assert_equal(outbound["inbound"], False)
+        assert_equal(outbound["connection_type"], "outbound-full-relay")
+        assert_equal(outbound["addrbind"], initiator_endpoint)
+        assert_equal(outbound["addr"], responder_endpoint)
+        # The responder holds the same connection as an inbound.
+        assert_equal(inbound["inbound"], True)
+        assert_equal(inbound["connection_type"], "inbound")
+        assert_equal(inbound["addrbind"], responder_endpoint)
+        assert_equal(inbound["addr"], initiator_endpoint)
+        assert_equal(initiator.getholepunchinfo()["sessions"], [])
+        assert_equal(initiator.getholepunchinfo()["session_stats"]["initiator"], {"started": 1, "established": 1, "failed": 0})
+        assert_equal(responder.getholepunchinfo()["session_stats"]["responder"], {"started": 1, "established": 1, "failed": 0})
+
+        self.log.info("A punched peer reports our address, like a board does")
+        self.wait_until(lambda: initiator.getholepunchinfo()["families"][0]["reports"] == 1)
+        self.wait_until(lambda: responder.getholepunchinfo()["families"][0]["reports"] == 1)
+
+        self.log.info("The hole-punch outbound takes its own slot, not one of the automatic ones")
+        assert_equal(initiator.getnetworkinfo()["connections_out"], 1)
+        # A second session as initiator is refused while the slot is taken.
+        assert_raises_rpc_error(-1, "no free slot for the role", initiator.holepunchsession, "initiator", "127.0.0.1:1")
+        # As responder, a session with a peer already connected to is refused too.
+        assert_raises_rpc_error(-1, "already connected to the endpoint", initiator.holepunchsession, "responder", responder_endpoint)
+
+        self.log.info("A session that produces no connection fails after the window and the grace period")
+        responder.holepunchsession("responder", "127.0.0.1:1")
+        assert_equal(len(responder.getholepunchinfo()["sessions"]), 1)
+        assert_equal(responder.getholepunchinfo()["sessions"][0]["role"], "responder")
+        responder.setmocktime(int(time.time()) + 126)
+        self.wait_until(lambda: responder.getholepunchinfo()["sessions"] == [])
+        assert_equal(responder.getholepunchinfo()["session_stats"]["responder"]["failed"], 1)
+        responder.setmocktime(0)
+        self.disconnect_nodes(0, 2)
+
     def test_visitors_outside_inbound_limit(self):
         board = self.nodes[1]
         self.log.info("Visitors do not take inbound slots at a board")
@@ -566,6 +619,7 @@ class HolePunchTest(BitcoinTestFramework):
         self.test_board_connections()
         self.test_announcements()
         self.test_board_serving()
+        self.test_punched_connection()
         self.test_visitors_outside_inbound_limit()
 
 

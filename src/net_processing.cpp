@@ -1911,6 +1911,7 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
         LOCK(m_headers_presync_mutex);
         m_headers_presync_stats.erase(nodeid);
     }
+    if (node.m_hole_punched) m_connman.HolePunchForget(nodeid);
     if (node.IsHolePunchBoardConn()) {
         m_connman.HolePunchForget(nodeid);
         // Closed before it served anything, by the board or by the network.
@@ -3913,6 +3914,12 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
 
     if (msg_type == NetMsgType::VERSION) {
+        // A punched connection uses the v2 transport only; no v1 fallback (R-8.6).
+        if (pfrom.m_hole_punched && pfrom.m_transport->GetInfo().transport_type != TransportProtocolType::V2) {
+            LogDebug(BCLog::HOLEPUNCH, "punched connection uses the v1 transport, %s", pfrom.DisconnectMsg());
+            pfrom.fDisconnect = true;
+            return;
+        }
         if (pfrom.nVersion != 0) {
             LogDebug(BCLog::NET, "redundant version message from peer=%d\n", pfrom.GetId());
             return;
@@ -4004,7 +4011,10 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         pfrom.SetAddrLocal(addrMe);
         // A board saw this connection come from the punch port, so what it reports
         // is the endpoint that punch attempts will be seen from (R-2.1).
-        if (pfrom.IsHolePunchBoardConn()) {
+        if (pfrom.m_hole_punched) {
+            // A punched peer saw us from the punch port too (R-2.1).
+            m_connman.HolePunchReport(pfrom, addrMe);
+        } else if (pfrom.IsHolePunchBoardConn()) {
             m_connman.HolePunchReport(pfrom, addrMe);
             // Two sets of boards disagreeing means there is no external address; the
             // board that completed the disagreeing set is replaced (R-2.3, R-5.2).
@@ -5772,8 +5782,8 @@ void PeerManagerImpl::EvictExtraOutboundPeers(NodeClock::time_point now)
             AssertLockHeld(::cs_main);
 
             // Only consider outbound-full-relay peers that are not already
-            // marked for disconnection
-            if (!pnode->IsFullOutboundConn() || pnode->fDisconnect) return;
+            // marked for disconnection; a hole-punched one has its own slot (R-9.1).
+            if (!pnode->IsFullOutboundConn() || pnode->fDisconnect || pnode->m_hole_punched) return;
             CNodeState *state = State(pnode->GetId());
             if (state == nullptr) return; // shouldn't be possible, but just in case
             // Don't evict our protected peers
@@ -6403,6 +6413,13 @@ bool PeerManagerImpl::SendMessages(CNode& node)
     // We must call MaybeDiscourageAndDisconnect first, to ensure that we'll
     // disconnect misbehaving peers even before the version handshake is complete.
     if (MaybeDiscourageAndDisconnect(node, peer)) return true;
+
+    // A punched connection has the rest of its session's window for the handshake (R-8.7).
+    if (node.m_hole_punched && !node.fSuccessfullyConnected && node.m_holepunch_deadline < NodeClock::now()) {
+        LogDebug(BCLog::HOLEPUNCH, "punched connection did not complete the handshake in time, %s", node.DisconnectMsg());
+        node.fDisconnect = true;
+        return true;
+    }
 
     // Initiate version handshake for outbound connections
     if (!node.IsInboundConn() && !peer.m_outbound_version_message_sent) {

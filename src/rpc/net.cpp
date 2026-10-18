@@ -188,6 +188,7 @@ static RPCMethod getpeerinfo()
                     {RPCResult::Type::NUM, "version", "The peer version, such as 70001"},
                     {RPCResult::Type::STR, "subver", "The string version"},
                     {RPCResult::Type::BOOL, "inbound", "Inbound (true) or Outbound (false)"},
+                    {RPCResult::Type::BOOL, "hole_punched", "Whether the connection was made by TCP hole punching"},
                     {RPCResult::Type::BOOL, "bip152_hb_to", "Whether we selected peer as (compact blocks) high-bandwidth peer"},
                     {RPCResult::Type::BOOL, "bip152_hb_from", "Whether peer selected us as (compact blocks) high-bandwidth peer"},
                     {RPCResult::Type::NUM, "presynced_headers", "The current height of header pre-synchronization with this peer, or -1 if no low-work sync is in progress"},
@@ -299,6 +300,7 @@ static RPCMethod getpeerinfo()
         // their ver message.
         obj.pushKV("subver", stats.cleanSubVer);
         obj.pushKV("inbound", stats.fInbound);
+        obj.pushKV("hole_punched", stats.m_hole_punched);
         obj.pushKV("bip152_hb_to", stats.m_bip152_highbandwidth_to);
         obj.pushKV("bip152_hb_from", stats.m_bip152_highbandwidth_from);
         obj.pushKV("presynced_headers", statestats.presync_height);
@@ -1231,6 +1233,31 @@ static RPCMethod getholepunchinfo()
                                 {RPCResult::Type::STR, "announced", /*optional=*/true, "(ip:port) The external address announced under the key"},
                             }},
                     }},
+                {RPCResult::Type::ARR, "sessions", "Punch sessions in progress",
+                    {
+                        {RPCResult::Type::OBJ, "", "",
+                            {
+                                {RPCResult::Type::STR, "endpoint", "(ip:port) The endpoint being punched to"},
+                                {RPCResult::Type::STR, "role", "initiator or responder"},
+                                {RPCResult::Type::NUM_TIME, "started", "When the session started"},
+                                {RPCResult::Type::NUM, "attempts", "Connection attempts made so far"},
+                            }},
+                    }},
+                {RPCResult::Type::OBJ, "session_stats", /*optional=*/true, "Sessions since the node started, by this node's role",
+                    {
+                        {RPCResult::Type::OBJ, "initiator", "",
+                            {
+                                {RPCResult::Type::NUM, "started", ""},
+                                {RPCResult::Type::NUM, "established", "Sessions that produced a connection"},
+                                {RPCResult::Type::NUM, "failed", "Sessions that ran out of time"},
+                            }},
+                        {RPCResult::Type::OBJ, "responder", "",
+                            {
+                                {RPCResult::Type::NUM, "started", ""},
+                                {RPCResult::Type::NUM, "established", ""},
+                                {RPCResult::Type::NUM, "failed", ""},
+                            }},
+                    }},
                 {RPCResult::Type::OBJ, "board_entries", /*optional=*/true, "As a board: the entries held for visitors",
                     {
                         {RPCResult::Type::NUM, "live", "Entries whose visitor is connected"},
@@ -1308,6 +1335,28 @@ static RPCMethod getholepunchinfo()
         sources.push_back(std::move(source));
     }
     table.pushKV("sources", std::move(sources));
+    UniValue sessions(UniValue::VARR);
+    for (const auto& session : connman.GetHolePunchSessions()) {
+        UniValue entry(UniValue::VOBJ);
+        entry.pushKV("endpoint", session.peer.ToStringAddrPort());
+        entry.pushKV("role", holepunch::RoleName(session.role));
+        entry.pushKV("started", TicksSinceEpoch<std::chrono::seconds>(session.started));
+        entry.pushKV("attempts", session.attempts);
+        sessions.push_back(std::move(entry));
+    }
+    obj.pushKV("sessions", std::move(sessions));
+    if (const auto* stats{connman.GetHolePunchStats()}) {
+        UniValue session_stats(UniValue::VOBJ);
+        for (const auto role : {holepunch::Role::INITIATOR, holepunch::Role::RESPONDER}) {
+            const auto i{static_cast<size_t>(role)};
+            UniValue by_role(UniValue::VOBJ);
+            by_role.pushKV("started", stats->started[i].load());
+            by_role.pushKV("established", stats->established[i].load());
+            by_role.pushKV("failed", stats->failed[i].load());
+            session_stats.pushKV(holepunch::RoleName(role), std::move(by_role));
+        }
+        obj.pushKV("session_stats", std::move(session_stats));
+    }
     if (options.board) {
         UniValue board_entries(UniValue::VOBJ);
         board_entries.pushKV("live", peerman_info.board_live_entries);
@@ -1316,6 +1365,47 @@ static RPCMethod getholepunchinfo()
     }
     obj.pushKV("table", std::move(table));
     return obj;
+},
+    };
+}
+
+static RPCMethod holepunchsession()
+{
+    return RPCMethod{
+        "holepunchsession",
+        "Start a hole punch session with a node that is doing the same towards this one at the same time. This RPC is for testing only.\n",
+        {
+            {"role", RPCArg::Type::STR, RPCArg::Optional::NO, "\"initiator\" or \"responder\""},
+            {"endpoint", RPCArg::Type::STR, RPCArg::Optional::NO, "(ip:port) The other node's punch endpoint"},
+        },
+        RPCResult{RPCResult::Type::NONE, "", ""},
+        RPCExamples{
+            HelpExampleCli("holepunchsession", "\"initiator\" \"127.0.0.1:49152\"")
+            + HelpExampleRpc("holepunchsession", "\"initiator\", \"127.0.0.1:49152\"")
+        },
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    if (Params().GetChainType() != ChainType::REGTEST) {
+        throw std::runtime_error("holepunchsession is for regression testing (-regtest mode) only.");
+    }
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    CConnman& connman = EnsureConnman(node);
+
+    const std::string_view role_str{self.Arg<std::string_view>("role")};
+    holepunch::Role role;
+    if (role_str == "initiator") {
+        role = holepunch::Role::INITIATOR;
+    } else if (role_str == "responder") {
+        role = holepunch::Role::RESPONDER;
+    } else {
+        throw JSONRPCError(RPC_INVALID_PARAMETER, "role must be \"initiator\" or \"responder\"");
+    }
+    const std::optional<CService> endpoint{Lookup(std::string{self.Arg<std::string_view>("endpoint")}, /*portDefault=*/0, /*fAllowLookup=*/false)};
+    if (!endpoint) throw JSONRPCError(RPC_INVALID_ADDRESS_OR_KEY, "Invalid endpoint");
+    if (const auto reason{connman.HolePunchSession(role, *endpoint, connman.GetHolePunchGroup(*endpoint))}) {
+        throw JSONRPCError(RPC_MISC_ERROR, *reason);
+    }
+    return UniValue::VNULL;
 },
     };
 }
@@ -1467,6 +1557,7 @@ void RegisterNetRPCCommands(CRPCTable& t)
         {"network", &getholepunchinfo},
         {"network", &exportasmap},
         {"hidden", &addconnection},
+        {"hidden", &holepunchsession},
         {"hidden", &addpeeraddress},
         {"hidden", &sendmsgtopeer},
         {"hidden", &getrawaddrman},
