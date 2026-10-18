@@ -306,10 +306,30 @@ extern std::function<std::unique_ptr<Sock>(int, int, int)> CreateSock;
  */
 std::unique_ptr<Sock> ConnectDirectly(const CService& dest, bool manual_connection);
 
-/** Create a socket and try to connect to the specified service, using the provided timeout. */
+/**
+ * Create a socket and try to connect to the specified service, using the provided timeout.
+ *
+ * @param[in] bind_addr If set, bind the socket to this local address and port before
+ * connecting, with `SO_REUSEADDR` and `SO_REUSEPORT` so that the port can be shared with
+ * a listening socket and with other outbound connections. The connection fails if the
+ * local port cannot be used for this destination, for example while the 4-tuple of a
+ * previous connection to the same peer is still in `TIME_WAIT`.
+ */
 std::unique_ptr<Sock> ConnectDirectly(const CService& dest,
                                       bool manual_connection,
-                                      std::chrono::milliseconds timeout);
+                                      std::chrono::milliseconds timeout,
+                                      const std::optional<CService>& bind_addr = std::nullopt);
+
+/**
+ * Bind a socket to a local address and port that may be shared with other sockets:
+ * sets `SO_REUSEADDR` and, where available, `SO_REUSEPORT` before binding. Several
+ * sockets bound this way can share one port as long as their connections differ, which
+ * is what a TCP simultaneous open needs (a listener plus outbound connections on the
+ * same port).
+ *
+ * @returns true on success, false (with a debug log line) otherwise.
+ */
+bool BindToSharedPort(const Sock& sock, const CService& local);
 
 /**
  * Connect to a specified destination service through a SOCKS5 proxy by first

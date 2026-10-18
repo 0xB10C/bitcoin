@@ -652,13 +652,44 @@ std::unique_ptr<Sock> ConnectDirectly(const CService& dest, bool manual_connecti
     return ConnectDirectly(dest, manual_connection, std::chrono::milliseconds{nConnectTimeout});
 }
 
+bool BindToSharedPort(const Sock& sock, const CService& local)
+{
+    const int one{1};
+    if (sock.SetSockOpt(SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one)) == SOCKET_ERROR) {
+        LogDebug(BCLog::NET, "Cannot set SO_REUSEADDR for binding to %s: %s", local.ToStringAddrPort(), NetworkErrorString(WSAGetLastError()));
+        return false;
+    }
+#ifdef SO_REUSEPORT
+    if (sock.SetSockOpt(SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) == SOCKET_ERROR) {
+        LogDebug(BCLog::NET, "Cannot set SO_REUSEPORT for binding to %s: %s", local.ToStringAddrPort(), NetworkErrorString(WSAGetLastError()));
+        return false;
+    }
+#endif
+    struct sockaddr_storage sockaddr;
+    socklen_t len = sizeof(sockaddr);
+    if (!local.GetSockAddr((struct sockaddr*)&sockaddr, &len)) {
+        LogDebug(BCLog::NET, "Cannot get sockaddr for %s: unsupported network", local.ToStringAddrPort());
+        return false;
+    }
+    if (sock.Bind((struct sockaddr*)&sockaddr, len) == SOCKET_ERROR) {
+        LogDebug(BCLog::NET, "Cannot bind to %s: %s", local.ToStringAddrPort(), NetworkErrorString(WSAGetLastError()));
+        return false;
+    }
+    return true;
+}
+
 std::unique_ptr<Sock> ConnectDirectly(const CService& dest,
                                       bool manual_connection,
-                                      std::chrono::milliseconds timeout)
+                                      std::chrono::milliseconds timeout,
+                                      const std::optional<CService>& bind_addr)
 {
     auto sock = CreateSock(dest.GetSAFamily(), SOCK_STREAM, IPPROTO_TCP);
     if (!sock) {
         LogDebug(BCLog::NET, "Cannot create a socket for connecting to %s", dest.ToStringAddrPort());
+        return {};
+    }
+
+    if (bind_addr && !BindToSharedPort(*sock, *bind_addr)) {
         return {};
     }
 

@@ -661,4 +661,70 @@ BOOST_AUTO_TEST_CASE(asmap_test_vectors)
     BOOST_CHECK_EQUAL(netgroup.GetMappedAS(*LookupHost("ffff:d499:8c4b:4941:bc81:d5b9:b51e:85a8", false)), 824019);
 }
 
+//! Open a listening socket on an ephemeral loopback port, returning it and its address.
+static std::pair<std::unique_ptr<Sock>, CService> ListenOnLoopback(bool shared_port)
+{
+    auto sock = CreateSock(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    BOOST_REQUIRE(sock);
+    const CService loopback{LookupNumeric("127.0.0.1", 0)};
+    if (shared_port) {
+        BOOST_REQUIRE(BindToSharedPort(*sock, loopback));
+    } else {
+        sockaddr_storage storage;
+        socklen_t len{sizeof(storage)};
+        BOOST_REQUIRE(loopback.GetSockAddr(reinterpret_cast<sockaddr*>(&storage), &len));
+        BOOST_REQUIRE_EQUAL(sock->Bind(reinterpret_cast<sockaddr*>(&storage), len), 0);
+    }
+    BOOST_REQUIRE_EQUAL(sock->Listen(2), 0);
+    const CService addr{GetBindAddress(*sock)};
+    BOOST_REQUIRE(addr.GetPort() != 0);
+    return {std::move(sock), addr};
+}
+
+//! Accept the pending connection on `listener` and return the address of the peer.
+static CService AcceptPeer(const Sock& listener)
+{
+    BOOST_REQUIRE(listener.Wait(std::chrono::seconds{5}, Sock::RecvEvent));
+    sockaddr_storage storage;
+    socklen_t len{sizeof(storage)};
+    auto accepted = listener.Accept(reinterpret_cast<sockaddr*>(&storage), &len);
+    BOOST_REQUIRE(accepted);
+    CService peer;
+    BOOST_REQUIRE(peer.SetSockAddr(reinterpret_cast<sockaddr*>(&storage), len));
+    return peer;
+}
+
+BOOST_AUTO_TEST_CASE(connect_from_shared_port)
+{
+    const auto timeout{std::chrono::seconds{5}};
+
+    // A listener that shares its port, like the hole punch listener does.
+    auto [listener, shared] = ListenOnLoopback(/*shared_port=*/true);
+    // Two destinations to connect to.
+    auto [dest1, dest1_addr] = ListenOnLoopback(/*shared_port=*/false);
+    auto [dest2, dest2_addr] = ListenOnLoopback(/*shared_port=*/false);
+
+    // An outbound connection from the shared port while the listener holds that port.
+    auto sock1 = ConnectDirectly(dest1_addr, /*manual_connection=*/false, timeout, shared);
+    BOOST_REQUIRE(sock1);
+    BOOST_CHECK_EQUAL(GetBindAddress(*sock1).GetPort(), shared.GetPort());
+    BOOST_CHECK_EQUAL(AcceptPeer(*dest1).GetPort(), shared.GetPort());
+
+    // The same port works for a different destination, since the 4-tuple differs.
+    auto sock2 = ConnectDirectly(dest2_addr, /*manual_connection=*/false, timeout, shared);
+    BOOST_REQUIRE(sock2);
+    BOOST_CHECK_EQUAL(GetBindAddress(*sock2).GetPort(), shared.GetPort());
+    BOOST_CHECK_EQUAL(AcceptPeer(*dest2).GetPort(), shared.GetPort());
+
+    // A second connection to dest1 from the shared port would reuse the 4-tuple of sock1,
+    // which the kernel refuses, so the connection fails.
+    BOOST_CHECK(!ConnectDirectly(dest1_addr, /*manual_connection=*/false, timeout, shared));
+
+    // Without a bind address nothing changes: an ephemeral port is used.
+    auto sock4 = ConnectDirectly(dest2_addr, /*manual_connection=*/false, timeout);
+    BOOST_REQUIRE(sock4);
+    BOOST_CHECK(GetBindAddress(*sock4).GetPort() != shared.GetPort());
+    BOOST_CHECK(AcceptPeer(*dest2).GetPort() != shared.GetPort());
+}
+
 BOOST_AUTO_TEST_SUITE_END()
