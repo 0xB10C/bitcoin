@@ -721,9 +721,18 @@ class HolePunchTest(BitcoinTestFramework):
         def sessions():
             return sorted((s["endpoint"], s["role"]) for s in info()["sessions"])
 
+        def mine():
+            """Mine one block and wait for the round it triggers to have run.
+
+            The round runs on the validation interface queue, which generate does
+            not wait for."""
+            block = self.generate(visitor, 1, sync_fun=self.no_op)[0]
+            visitor.syncwithvalidationinterfacequeue()
+            return block
+
         self.log.info("A round is held for every new block")
         held = info()["rounds"]["held"]
-        self.generate(visitor, 1, sync_fun=self.no_op)
+        mine()
         assert_equal(info()["rounds"]["held"], held + 1)
         assert_equal(info()["rounds"]["last_height"], visitor.getblockcount())
 
@@ -739,14 +748,14 @@ class HolePunchTest(BitcoinTestFramework):
         assert_equal(info()["table"]["entries"], 6)
         # The block right after the entries arrived: its parent came before them, no pick.
         height = visitor.getblockcount() + 1
-        block = self.generate(visitor, 1, sync_fun=self.no_op)[0]
+        block = mine()
         assert_equal(model.round(height, block), [])
         assert_equal(sessions(), [])
         assert_equal(info()["rounds"]["picks"], 0)
 
         self.log.info("The lowest pair values are picked, at most two from one board, one as initiator")
         height = visitor.getblockcount() + 1
-        block = self.generate(visitor, 1, sync_fun=self.no_op)[0]
+        block = mine()
         expected = model.round(height, block)
         assert 1 <= len(expected) <= 2
         self.wait_until(lambda: sessions() == expected)
@@ -759,7 +768,7 @@ class HolePunchTest(BitcoinTestFramework):
         model.serve(entries_b, "b", visitor.getblockcount())
         for _ in range(2):
             height = visitor.getblockcount() + 1
-            block = self.generate(visitor, 1, sync_fun=self.no_op)[0]
+            block = mine()
             model.round(height, block)
             self.wait_until(lambda: len(sessions()) == model.active)
         assert_equal(len(sessions()), model.active)
@@ -771,8 +780,9 @@ class HolePunchTest(BitcoinTestFramework):
         visitor.invalidateblock(visitor.getbestblockhash())
         # Another coinbase, so that the replacement is not the block just invalidated.
         self.generatetoaddress(visitor, 1, ADDRESS_BCRT1_UNSPENDABLE, sync_fun=self.no_op)
+        visitor.syncwithvalidationinterfacequeue()
         assert_equal(info()["rounds"]["held"], held)
-        self.generate(visitor, 1, sync_fun=self.no_op)
+        mine()
         assert_equal(info()["rounds"]["held"], held + 1)
         visitor.disconnect_p2ps()
 

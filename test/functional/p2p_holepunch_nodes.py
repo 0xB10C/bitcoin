@@ -64,6 +64,7 @@ class HolePunchNodesTest(BitcoinTestFramework):
         self.log.info("The block after the announcements holds no pick, the next one pairs the visitors")
         self.generate(visitors[0], 1, sync_fun=lambda: self.sync_blocks(chain))
         for visitor in visitors:
+            visitor.syncwithvalidationinterfacequeue()
             assert_equal(visitor.getholepunchinfo()["rounds"]["picks"], 0)
         self.generate(visitors[0], 1, sync_fun=lambda: self.sync_blocks(chain))
         for visitor in visitors:
@@ -90,6 +91,7 @@ class HolePunchNodesTest(BitcoinTestFramework):
             self.wait_until(lambda: self.punched(visitor) == [])
         self.generate(visitors[0], 2, sync_fun=lambda: self.sync_blocks(chain))
         for visitor in visitors:
+            visitor.syncwithvalidationinterfacequeue()
             assert_equal(visitor.getholepunchinfo()["rounds"]["picks"], 1)
             assert_equal(self.punched(visitor), [])
 
