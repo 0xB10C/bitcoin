@@ -1231,6 +1231,11 @@ static RPCMethod getholepunchinfo()
                                 {RPCResult::Type::STR, "announced", /*optional=*/true, "(ip:port) The external address announced under the key"},
                             }},
                     }},
+                {RPCResult::Type::OBJ, "board_entries", /*optional=*/true, "As a board: the entries held for visitors",
+                    {
+                        {RPCResult::Type::NUM, "live", "Entries whose visitor is connected"},
+                        {RPCResult::Type::NUM, "total", "Entries including those in their grace period after the visitor left"},
+                    }},
                 {RPCResult::Type::OBJ, "table", "The entries learned from boards",
                     {
                         {RPCResult::Type::NUM, "entries", "The number of entries"},
@@ -1303,6 +1308,12 @@ static RPCMethod getholepunchinfo()
         sources.push_back(std::move(source));
     }
     table.pushKV("sources", std::move(sources));
+    if (options.board) {
+        UniValue board_entries(UniValue::VOBJ);
+        board_entries.pushKV("live", peerman_info.board_live_entries);
+        board_entries.pushKV("total", peerman_info.board_entries);
+        obj.pushKV("board_entries", std::move(board_entries));
+    }
     obj.pushKV("table", std::move(table));
     return obj;
 },

@@ -534,4 +534,47 @@ BOOST_AUTO_TEST_CASE(table_caps)
     }
 }
 
+BOOST_AUTO_TEST_CASE(board_entries)
+{
+    using namespace std::chrono_literals;
+    Board board;
+    const NodeClock::time_point t0{NodeClock::now()};
+    const PunchKey v1{MakeKey("203.0.113.1:50001")};
+    const PunchKey v2{MakeKey("203.0.113.2:50002")};
+
+    // One entry per connection; a later element replaces it (R-5.6).
+    BOOST_CHECK(board.Store(/*visitor=*/1, v1, t0, false));
+    PunchKey v1_new{MakeKey("203.0.113.1:50001")};
+    BOOST_CHECK(board.Store(1, v1_new, t0 + 1min, false));
+    BOOST_REQUIRE_EQUAL(board.LiveEntries().size(), 1);
+    BOOST_CHECK(board.LiveEntries()[0].key.pubkey == v1_new.pubkey);
+    BOOST_CHECK(board.LiveEntries()[0].time == std::chrono::time_point_cast<std::chrono::seconds>(t0 + 1min));
+
+    // An entry with an open connection is never displaced by another connection (R-5.7).
+    BOOST_CHECK(!board.Store(/*visitor=*/3, MakeKey("203.0.113.1:50009"), t0, false));
+    BOOST_CHECK(board.Store(2, v2, t0, false));
+    BOOST_CHECK_EQUAL(board.LiveEntries().size(), 2);
+
+    // A closed connection's entry is kept for BOARD_GRACE but not served; an element
+    // from the same address replaces it meanwhile.
+    board.Disconnected(1, t0 + 2min);
+    BOOST_CHECK_EQUAL(board.LiveEntries().size(), 1);
+    BOOST_CHECK_EQUAL(board.Size(), 2);
+    board.Expire(t0 + 2min + BOARD_GRACE - 1s);
+    BOOST_CHECK_EQUAL(board.Size(), 2);
+    BOOST_CHECK(board.Store(4, MakeKey("203.0.113.1:50010"), t0 + 3min, false));
+    BOOST_CHECK_EQUAL(board.Size(), 2);
+    BOOST_CHECK_EQUAL(board.LiveEntries().size(), 2);
+    board.Disconnected(4, t0 + 4min);
+    board.Expire(t0 + 4min + BOARD_GRACE);
+    BOOST_CHECK_EQUAL(board.Size(), 1);
+
+    // On test networks addresses are compared with their port (R-2.5).
+    Board local;
+    BOOST_CHECK(local.Store(1, MakeKey("127.0.0.1:18444"), t0, true));
+    BOOST_CHECK(local.Store(2, MakeKey("127.0.0.1:18445"), t0, true));
+    BOOST_CHECK(!local.Store(3, MakeKey("127.0.0.1:18445"), t0, true));
+    BOOST_CHECK_EQUAL(local.LiveEntries().size(), 2);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

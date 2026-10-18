@@ -54,6 +54,11 @@ inline constexpr auto BOARD_ACK{std::chrono::seconds{60}};
 /** Elements processed from one peer per hour at most (R-5.10). */
 inline constexpr uint32_t PUNCHKEY_PER_HOUR{240};
 
+/** An entry at a board lives this long after its connection closed (R-5.7). */
+inline constexpr auto BOARD_GRACE{std::chrono::minutes{10}};
+/** A board sends every live entry to every visitor again this often (R-5.8). */
+inline constexpr auto BOARD_REFRESH{std::chrono::minutes{30}};
+
 // Limits of the board pool (section 5 of the draft, R-5.5).
 /** Visitors a board holds at most. */
 inline constexpr size_t BOARD_VISITORS_MAX{32};
@@ -169,6 +174,53 @@ private:
     /** Evict an expired entry among those with `pred`, else a random one. */
     template <typename Pred>
     void EvictOne(NodeClock::time_point now, Pred pred) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+};
+
+/**
+ * The entries a board holds for its visitors (R-5.6 to R-5.8): one per
+ * board connection, verified by the caller against the connection's remote
+ * endpoint, kept for BOARD_GRACE after the connection closes.
+ */
+class Board
+{
+public:
+    struct Entry {
+        PunchKey key;
+        /** When the board received the element; sent as the element's time. */
+        NodeSeconds time;
+        /** The visitor's connection. */
+        NodeId visitor;
+        /** When that connection closed, if it did: the entry is in its grace period. */
+        std::optional<NodeClock::time_point> closed_at;
+
+        bool Live() const { return !closed_at; }
+    };
+
+    /**
+     * Store a verified element from `visitor`, replacing that visitor's
+     * earlier entry (R-5.6) or an entry for the same address in its grace
+     * period (R-5.7). Nothing is stored while another open connection holds
+     * an entry for the address. With `allow_local`, addresses are compared
+     * with their port.
+     * @return the stored entry, to be sent to the other visitors (R-5.8).
+     */
+    std::optional<Entry> Store(NodeId visitor, const PunchKey& key, NodeClock::time_point now, bool allow_local) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** The entries whose connection is open (R-5.8). */
+    std::vector<Entry> LiveEntries() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** The visitor's connection closed: its entry enters the grace period (R-5.7). */
+    void Disconnected(NodeId visitor, NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Drop entries whose grace period is over. */
+    void Expire(NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Entries in total, live and in their grace period. */
+    size_t Size() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+private:
+    mutable Mutex m_mutex;
+    std::vector<Entry> m_entries GUARDED_BY(m_mutex);
 };
 
 /** Settings, filled in from the command line options. */

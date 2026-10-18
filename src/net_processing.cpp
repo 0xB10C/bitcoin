@@ -927,6 +927,8 @@ private:
     std::map<Network, HolePunchFamily> m_holepunch_families GUARDED_BY(m_holepunch_mutex);
     /** The entries learned from boards (section 6). */
     holepunch::Table m_holepunch_table;
+    /** The entries we hold as a board (R-5.6 to R-5.8). */
+    holepunch::Board m_holepunch_board;
 
     /** The key for `family`, made or rotated as needed. */
     CKey HolePunchKey(Network family, NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(m_holepunch_mutex);
@@ -939,8 +941,12 @@ private:
     bool IsOwnHolePunchEntry(const holepunch::PunchKey& key) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
     /** Send our element on a board connection when it changed, and replace the board when it does not acknowledge it (R-5.3). */
     void MaybeAnnounceToBoard(CNode& node, Peer& peer, NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_holepunch_mutex);
-    /** Elements a board sent us (R-5.4, R-5.10). */
+    /** Elements received on a board connection, from a board or from a visitor (R-5.4, R-5.6 to R-5.8, R-5.10). */
     void ProcessBoardElements(CNode& pfrom, Peer& peer, const std::vector<CAddress>& elements) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_holepunch_mutex);
+    /** Send elements to every visitor but `except` (R-5.8). */
+    void SendToVisitors(const std::vector<CAddress>& elements, std::optional<NodeId> except);
+    /** As a board: send every live entry to every visitor again, and drop entries past their grace period (R-5.7, R-5.8). */
+    void BoardRefresh();
 
     /** Whether we've completed initial sync yet, for determining when to turn
       * on extra block-relay-only peers. */
@@ -1910,6 +1916,7 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
         // Closed before it served anything, by the board or by the network.
         if (!node.fSuccessfullyConnected) m_connman.HolePunchBoardFailed(node.addr.IsIPv4() ? NET_IPV4 : NET_IPV6);
     }
+    if (node.m_board_visitor) m_holepunch_board.Disconnected(nodeid, NodeClock::now());
     if (node.IsPrivateBroadcastConn()) {
         m_tx_for_private_broadcast.NodeDisconnected(nodeid);
         // We consider a transaction sent to a peer if we sent them an INV.
@@ -2232,6 +2239,7 @@ void PeerManagerImpl::StartScheduledTasks(CScheduler& scheduler)
     // timer.
     static_assert(EXTRA_PEER_CHECK_INTERVAL < STALE_CHECK_INTERVAL, "peer eviction timer should be less than stale tip check timer");
     scheduler.scheduleEvery([this] { this->CheckForStaleTipAndEvictPeers(); }, std::chrono::seconds{EXTRA_PEER_CHECK_INTERVAL});
+    scheduler.scheduleEvery([this] { this->BoardRefresh(); }, holepunch::BOARD_REFRESH);
 
     // schedule next run for 10-15 minutes in the future
     const auto delta = 10min + FastRandomContext().randrange<std::chrono::milliseconds>(5min);
@@ -6121,7 +6129,19 @@ void PeerManagerImpl::ProcessBoardElements(CNode& pfrom, Peer& peer, const std::
             continue;
         }
         if (IsOwnHolePunchEntry(*key)) continue;
-        if (!pfrom.IsHolePunchBoardConn()) continue; // a board stores nothing in its table
+        if (!pfrom.IsHolePunchBoardConn()) {
+            // We are the board: store the element only if it names the endpoint we
+            // see the visitor at (R-5.6), and push it to the other visitors (R-5.8).
+            if (key->endpoint != static_cast<const CService&>(pfrom.addr)) {
+                LogDebug(BCLog::HOLEPUNCH, "visitor peer=%d announced %s, but connected from %s, ignoring", pfrom.GetId(), key->endpoint.ToStringAddrPort(), pfrom.addr.ToStringAddrPort());
+                continue;
+            }
+            if (const auto entry{m_holepunch_board.Store(pfrom.GetId(), *key, now, allow_local)}) {
+                LogDebug(BCLog::HOLEPUNCH, "stored visitor peer=%d's entry %s", pfrom.GetId(), key->endpoint.ToStringAddrPort());
+                SendToVisitors({entry->key.ToAddress(entry->time)}, pfrom.GetId());
+            }
+            continue;
+        }
         const Network family{key->endpoint.IsIPv4() ? NET_IPV4 : NET_IPV6};
         const auto secret{WITH_LOCK(m_holepunch_mutex, return HolePunchKey(family, now)).ECDHX(key->pubkey)};
         if (!secret) continue; // the point at infinity (R-4.4)
@@ -6129,6 +6149,31 @@ void PeerManagerImpl::ProcessBoardElements(CNode& pfrom, Peer& peer, const std::
             LogDebug(BCLog::HOLEPUNCH, "stored entry %s with key %s from board peer=%d", key->endpoint.ToStringAddrPort(), HexStr(key->pubkey), pfrom.GetId());
         }
     }
+    if (!pfrom.IsHolePunchBoardConn() && !pfrom.fDisconnect) {
+        // As a board, answer with every live entry, the visitor's own included if
+        // it was stored: that is the acknowledgement (R-5.8).
+        std::vector<CAddress> answer;
+        for (const auto& entry : m_holepunch_board.LiveEntries()) answer.push_back(entry.key.ToAddress(entry.time));
+        MakeAndPushMessage(pfrom, NetMsgType::ADDRV2, CAddress::V2_NETWORK(answer));
+    }
+}
+
+void PeerManagerImpl::SendToVisitors(const std::vector<CAddress>& elements, std::optional<NodeId> except)
+{
+    m_connman.ForEachNode([&](CNode* node) {
+        if (!node->m_board_visitor || node->GetId() == except) return;
+        MakeAndPushMessage(*node, NetMsgType::ADDRV2, CAddress::V2_NETWORK(elements));
+    });
+}
+
+void PeerManagerImpl::BoardRefresh()
+{
+    m_holepunch_board.Expire(NodeClock::now());
+    std::vector<CAddress> elements;
+    for (const auto& entry : m_holepunch_board.LiveEntries()) elements.push_back(entry.key.ToAddress(entry.time));
+    if (elements.empty()) return;
+    LogDebug(BCLog::HOLEPUNCH, "sending %d entries to every visitor again", elements.size());
+    SendToVisitors(elements, std::nullopt);
 }
 
 HolePunchInfo PeerManagerImpl::GetHolePunchInfo() const
@@ -6149,6 +6194,8 @@ HolePunchInfo PeerManagerImpl::GetHolePunchInfo() const
     }
     info.table_entries = m_holepunch_table.Size();
     info.table_by_source = m_holepunch_table.SizeBySource();
+    info.board_live_entries = m_holepunch_board.LiveEntries().size();
+    info.board_entries = m_holepunch_board.Size();
     return info;
 }
 

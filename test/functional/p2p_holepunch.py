@@ -79,11 +79,26 @@ class HolePunchPeer(P2PInterface):
         self.echo = echo
         self.features = []
         self.elements = []
+        self.addrv2_messages = []
 
     def on_addrv2(self, message):
         self.elements.extend(message.addrs)
+        self.addrv2_messages.append(message)
         if self.echo:
             self.send_without_ping(message)
+
+    def local_port(self):
+        """The port the node sees this connection come from."""
+        return self._transport.get_extra_info("sockname")[1]
+
+    def announce(self, ip, port, pubkey):
+        """Send one element and return the elements of the answer."""
+        msg = msg_addrv2()
+        msg.addrs = [punchkey_element(ip, port, pubkey)]
+        before = len(self.addrv2_messages)
+        self.send_and_ping(msg)
+        assert_equal(len(self.addrv2_messages), before + 1)
+        return [decode_element(a) for a in self.addrv2_messages[-1].addrs]
 
     def announced(self):
         """(ip, port, pubkey) of the last element the node announced."""
@@ -472,6 +487,59 @@ class HolePunchTest(BitcoinTestFramework):
         visitor.setmocktime(0)
         visitor.disconnect_p2ps()
 
+    def test_board_serving(self):
+        board = self.nodes[1]
+        self.restart_node(1)
+
+        def entries():
+            return board.getholepunchinfo()["board_entries"]
+
+        self.log.info("A board stores a visitor's element if it names the connection's endpoint, and answers with it")
+        visitor1 = board.add_p2p_connection(HolePunchPeer(flags=FLAG_VISITOR))
+        key1 = new_pubkey()
+        before = int(time.time())
+        assert_equal(visitor1.announce("127.0.0.1", visitor1.local_port(), key1), [("127.0.0.1", visitor1.local_port(), key1)])
+        answer = visitor1.addrv2_messages[-1].addrs[0]
+        assert before <= answer.time <= int(time.time())
+        assert_equal(answer.nServices, ENTRY_SERVICES)
+        assert_equal(entries(), {"live": 1, "total": 1})
+
+        self.log.info("An element for another endpoint is ignored, and the answer shows it")
+        other_key = new_pubkey()
+        assert_equal(visitor1.announce("127.0.0.1", visitor1.local_port() + 1, other_key), [("127.0.0.1", visitor1.local_port(), key1)])
+        assert_equal(visitor1.announce("1.2.3.4", visitor1.local_port(), other_key), [("127.0.0.1", visitor1.local_port(), key1)])
+        assert_equal(entries(), {"live": 1, "total": 1})
+
+        self.log.info("A stored element is pushed to the other visitors, and every visitor gets all live entries")
+        visitor2 = board.add_p2p_connection(HolePunchPeer(flags=FLAG_VISITOR))
+        key2 = new_pubkey()
+        answer = visitor2.announce("127.0.0.1", visitor2.local_port(), key2)
+        assert_equal(sorted(answer), sorted([("127.0.0.1", visitor1.local_port(), key1), ("127.0.0.1", visitor2.local_port(), key2)]))
+        visitor1.wait_until(lambda: len(visitor1.addrv2_messages) == 4)
+        assert_equal([decode_element(a) for a in visitor1.addrv2_messages[-1].addrs], [("127.0.0.1", visitor2.local_port(), key2)])
+        assert_equal(entries(), {"live": 2, "total": 2})
+
+        self.log.info("A later element on the same connection replaces the entry")
+        key1b = new_pubkey()
+        visitor1.announce("127.0.0.1", visitor1.local_port(), key1b)
+        visitor2.wait_until(lambda: len(visitor2.addrv2_messages) == 2)
+        assert_equal([decode_element(a) for a in visitor2.addrv2_messages[-1].addrs], [("127.0.0.1", visitor1.local_port(), key1b)])
+        assert_equal(entries(), {"live": 2, "total": 2})
+
+        self.log.info("After a visitor leaves, its entry is kept for the grace period but no longer served")
+        port1 = visitor1.local_port()
+        visitor1.peer_disconnect()
+        visitor1.wait_for_disconnect()
+        self.wait_until(lambda: entries() == {"live": 1, "total": 2})
+        assert_equal(visitor2.announce("127.0.0.1", visitor2.local_port(), key2), [("127.0.0.1", visitor2.local_port(), key2)])
+        assert port1 not in [p for _, p, _ in visitor2.announce("127.0.0.1", visitor2.local_port(), key2)]
+
+        self.log.info("Entries never reach ordinary peers")
+        peer = board.add_p2p_connection(HolePunchPeer(flags=None))
+        peer.send_and_ping(msg_getaddr())
+        assert all(a.net != CAddress.NET_PUNCHKEY for m in peer.addrv2_messages for a in m.addrs)
+        board.disconnect_p2ps()
+
     def test_visitors_outside_inbound_limit(self):
         board = self.nodes[1]
         self.log.info("Visitors do not take inbound slots at a board")
@@ -497,6 +565,7 @@ class HolePunchTest(BitcoinTestFramework):
         self.test_external_address()
         self.test_board_connections()
         self.test_announcements()
+        self.test_board_serving()
         self.test_visitors_outside_inbound_limit()
 
 

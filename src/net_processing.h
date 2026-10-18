@@ -89,6 +89,9 @@ struct HolePunchInfo {
     size_t table_entries{0};
     /** Table entries per source group. */
     std::map<std::vector<unsigned char>, size_t> table_by_source;
+    /** As a board: entries with an open connection, and all entries including those in their grace period. */
+    size_t board_live_entries{0};
+    size_t board_entries{0};
 };
 
 struct PeerManagerInfo {

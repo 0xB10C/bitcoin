@@ -199,6 +199,51 @@ std::map<std::vector<unsigned char>, size_t> Table::SizeBySource() const
     return sizes;
 }
 
+std::optional<Board::Entry> Board::Store(NodeId visitor, const PunchKey& key, NodeClock::time_point now, bool allow_local)
+{
+    LOCK(m_mutex);
+    // One entry per connection: a later element replaces it (R-5.6).
+    std::erase_if(m_entries, [&](const Entry& e) { return e.visitor == visitor; });
+    // One entry per address: a live one is never displaced, one in its grace period is (R-5.7).
+    for (const Entry& e : m_entries) {
+        if (SameAddress(e.key.endpoint, key.endpoint, allow_local) && e.Live()) return std::nullopt;
+    }
+    std::erase_if(m_entries, [&](const Entry& e) { return SameAddress(e.key.endpoint, key.endpoint, allow_local); });
+    const Entry entry{.key = key, .time = std::chrono::time_point_cast<std::chrono::seconds>(now), .visitor = visitor, .closed_at = std::nullopt};
+    m_entries.push_back(entry);
+    return entry;
+}
+
+std::vector<Board::Entry> Board::LiveEntries() const
+{
+    LOCK(m_mutex);
+    std::vector<Entry> live;
+    for (const Entry& e : m_entries) {
+        if (e.Live()) live.push_back(e);
+    }
+    return live;
+}
+
+void Board::Disconnected(NodeId visitor, NodeClock::time_point now)
+{
+    LOCK(m_mutex);
+    for (Entry& e : m_entries) {
+        if (e.visitor == visitor && e.Live()) e.closed_at = now;
+    }
+}
+
+void Board::Expire(NodeClock::time_point now)
+{
+    LOCK(m_mutex);
+    std::erase_if(m_entries, [&](const Entry& e) { return e.closed_at && now >= *e.closed_at + BOARD_GRACE; });
+}
+
+size_t Board::Size() const
+{
+    LOCK(m_mutex);
+    return m_entries.size();
+}
+
 std::vector<std::string> FeatureFlagNames(uint32_t flags)
 {
     std::vector<std::string> names;
