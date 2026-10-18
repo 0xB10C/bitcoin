@@ -1685,9 +1685,13 @@ public:
     BoardVisitorCounts CountBoardVisitors(const CNode& visitor) const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
     /**
-     * Record what a board reports as our address and port in its
-     * version.addr_recv (R-2.1). `node` is the board connection the report
-     * came on.
+     * Record what a peer reports as our address and port in its
+     * version.addr_recv (R-2.1). Any connection this node opened from the
+     * punch port tells it the endpoint its punch attempts will be seen from,
+     * so board connections and the two sides of a punched connection all
+     * report; anything else, including an inbound connection that happens to
+     * land on the punch port, is ignored. Call it once the handshake is
+     * complete, so that only peers that held up their end are believed.
      */
     void HolePunchReport(const CNode& node, const CService& reported) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
     /** Forget the report of a peer that disconnected. */

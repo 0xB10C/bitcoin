@@ -22,6 +22,7 @@ from test_framework.messages import (
     msg_feature,
     msg_getaddr,
     msg_inv,
+    msg_verack,
 )
 from test_framework.p2p import P2PInterface
 from test_framework.test_framework import BitcoinTestFramework
@@ -139,11 +140,14 @@ class HolePunchPeer(P2PInterface):
     `data` replaces the feature payload, to send a malformed one. `report` is the (ip, port) it
     reports as the node's address in version.addr_recv."""
 
-    def __init__(self, flags=None, data=None, report=None, echo=False):
+    def __init__(self, flags=None, data=None, report=None, echo=False, withhold_verack=False):
         super().__init__()
         self.flags = flags
         self.data = data
         self.report = report
+        # Answer the node's version but never acknowledge it, so the handshake
+        # stays open.
+        self.withhold_verack = withhold_verack
         # Answer every addrv2 with its elements, as a board acknowledges with its live entries.
         self.echo = echo
         self.features = []
@@ -195,6 +199,10 @@ class HolePunchPeer(P2PInterface):
             self.send_without_ping(msg_feature(HOLEPUNCH_FEATURE_ID, self.data))
         elif self.flags is not None:
             self.send_without_ping(msg_feature(HOLEPUNCH_FEATURE_ID, feature_data(self.flags)))
+        if self.withhold_verack:
+            self.nServices = message.nServices
+            self.relay = message.relay
+            return
         # P2PInterface sends a getaddr after verack on connections it made, which
         # a board connection does not allow.
         connected_to_node = self.p2p_connected_to_node
@@ -395,6 +403,24 @@ class HolePunchTest(BitcoinTestFramework):
         self.log.info("Ordinary outbound connections do not report")
         visitor.add_outbound_p2p_connection(HolePunchPeer(flags=FLAG_BOARD, report=("9.9.9.9", 1)), p2p_idx=4)
         assert_equal(external()["reports"], 3)
+        visitor.disconnect_p2ps()
+        self.wait_until(lambda: external()["reports"] == 0)
+
+        self.log.info("A peer that never completes the handshake does not report")
+        silent = visitor.add_outbound_p2p_connection(
+            HolePunchPeer(flags=FLAG_BOARD, report=("1.2.3.4", 5555), withhold_verack=True),
+            p2p_idx=5, connection_type="holepunch-board", wait_for_verack=False)
+        silent.wait_until(lambda: silent.message_count["version"] == 1)
+        # A board opened afterwards completes its handshake and reports, which shows
+        # the silent one had its chance and did not.
+        talker = visitor.add_outbound_p2p_connection(
+            HolePunchPeer(flags=FLAG_BOARD, report=("1.2.3.4", 5555)), p2p_idx=6, connection_type="holepunch-board")
+        self.wait_until(lambda: external()["reports"] == 1)
+        assert_equal(external()["reports"], 1)
+        # Once it acknowledges, its report counts too and the two agree.
+        silent.send_without_ping(msg_verack())
+        self.wait_until(lambda: external()["reports"] == 2)
+        assert_equal(external()["address"], "1.2.3.4:5555")
         visitor.disconnect_p2ps()
         self.wait_until(lambda: external()["reports"] == 0)
 

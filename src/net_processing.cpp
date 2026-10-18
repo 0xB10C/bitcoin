@@ -1925,9 +1925,8 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
         LOCK(m_headers_presync_mutex);
         m_headers_presync_stats.erase(nodeid);
     }
-    if (node.m_hole_punched) m_connman.HolePunchForget(nodeid);
+    m_connman.HolePunchForget(nodeid);
     if (node.IsHolePunchBoardConn()) {
-        m_connman.HolePunchForget(nodeid);
         // Closed before it served anything, by the peer or by the network: another
         // bad address rather than a verdict on this node.
         if (!node.fSuccessfullyConnected) m_connman.HolePunchBoardUnusable(node.addr);
@@ -4026,25 +4025,6 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         pfrom.m_has_all_wanted_services = HasAllDesirableServiceFlags(nServices);
         peer.m_their_services = nServices;
         pfrom.SetAddrLocal(addrMe);
-        // A board saw this connection come from the punch port, so what it reports
-        // is the endpoint that punch attempts will be seen from (R-2.1).
-        if (pfrom.m_hole_punched) {
-            // A punched peer saw us from the punch port too (R-2.1).
-            m_connman.HolePunchReport(pfrom, addrMe);
-        } else if (pfrom.IsHolePunchBoardConn()) {
-            m_connman.HolePunchReport(pfrom, addrMe);
-            // Two sets of boards disagreeing means there is no external address; the
-            // board that completed the disagreeing set is replaced (R-2.3, R-5.2).
-            const Network family{pfrom.addr.IsIPv4() ? NET_IPV4 : NET_IPV6};
-            if (m_connman.GetHolePunchExternalInfo(family).conflicting) {
-                LogDebug(BCLog::HOLEPUNCH, "boards disagree on our %s address, %s", GetNetworkName(family), pfrom.DisconnectMsg());
-                // Two agreeing sets that disagree with each other means this node's
-                // mapping is not endpoint-independent, which is about this node (R-2.3).
-                m_connman.HolePunchBoardFailed(family);
-                pfrom.fDisconnect = true;
-                return;
-            }
-        }
         {
             LOCK(pfrom.m_subver_mutex);
             pfrom.cleanSubVer = cleanSubVer;
@@ -4275,6 +4255,24 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         }
 
         pfrom.fSuccessfullyConnected = true;
+
+        // Every connection this node made from the punch port tells it the endpoint
+        // its punch attempts will be seen from, whether the peer is a board or the
+        // other side of a punch (R-2.1).
+        m_connman.HolePunchReport(pfrom, pfrom.GetAddrLocal());
+        if (pfrom.IsHolePunchBoardConn()) {
+            // Two agreeing sets of boards that disagree with each other mean this
+            // node's mapping is not endpoint-independent, which is about this node
+            // rather than about the board; the board that completed the disagreeing
+            // set is replaced (R-2.3, R-5.2).
+            const Network family{pfrom.addr.IsIPv4() ? NET_IPV4 : NET_IPV6};
+            if (m_connman.GetHolePunchExternalInfo(family).conflicting) {
+                LogDebug(BCLog::HOLEPUNCH, "boards disagree on our %s address, %s", GetNetworkName(family), pfrom.DisconnectMsg());
+                m_connman.HolePunchBoardFailed(family);
+                pfrom.fDisconnect = true;
+                return;
+            }
+        }
 
         // A board connection is of no use unless the board said it is one (R-3.5).
         // The service bit that got us here is unauthenticated, so a peer that

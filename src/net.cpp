@@ -3908,6 +3908,9 @@ CConnman::BoardVisitorCounts CConnman::CountBoardVisitors(const CNode& visitor) 
 
 void CConnman::HolePunchReport(const CNode& node, const CService& reported)
 {
+    if (m_holepunch.port == 0 || node.addrBind.GetPort() != m_holepunch.port) return;
+    // Only connections this node opened, and the punched connection it asked for.
+    if (node.IsInboundConn() && !node.m_hole_punched) return;
     m_holepunch_external.AddReport(node.GetId(), m_netgroupman.GetGroup(node.addr), reported, m_holepunch.allow_local);
 }
 
