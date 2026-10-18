@@ -1270,6 +1270,22 @@ static RPCMethod getholepunchinfo()
                     {
                         {RPCResult::Type::NUM, "live", "Entries whose visitor is connected"},
                         {RPCResult::Type::NUM, "total", "Entries including those in their grace period after the visitor left"},
+                        {RPCResult::Type::ARR, "registered", "The visitors that registered",
+                            {
+                                {RPCResult::Type::OBJ, "", "",
+                                    {
+                                        {RPCResult::Type::NUM, "peer", "The id of the board connection the element arrived on"},
+                                        {RPCResult::Type::STR, "endpoint", "(ip:port) The endpoint the visitor announced, which is the one it connected from"},
+                                        {RPCResult::Type::STR_HEX, "key", "The visitor's public key for that address family"},
+                                        {RPCResult::Type::STR_HEX, "services", "The services the visitor announced"},
+                                        {RPCResult::Type::ARR, "servicesnames", "The services as named flags",
+                                        {
+                                            {RPCResult::Type::STR, "SERVICE_NAME", ""},
+                                        }},
+                                        {RPCResult::Type::NUM_TIME, "time", "When the element was received, which is the time served with it"},
+                                        {RPCResult::Type::NUM_TIME, "grace_until", /*optional=*/true, "For a visitor that has left: until when its entry is kept"},
+                                    }},
+                            }},
                     }},
                 {RPCResult::Type::OBJ, "table", "The entries learned from boards",
                     {
@@ -1376,6 +1392,19 @@ static RPCMethod getholepunchinfo()
         UniValue board_entries(UniValue::VOBJ);
         board_entries.pushKV("live", peerman_info.board_live_entries);
         board_entries.pushKV("total", peerman_info.board_entries);
+        UniValue registered(UniValue::VARR);
+        for (const auto& entry : peerman_info.board_registered) {
+            UniValue visitor(UniValue::VOBJ);
+            visitor.pushKV("peer", entry.visitor);
+            visitor.pushKV("endpoint", entry.key.endpoint.ToStringAddrPort());
+            visitor.pushKV("key", HexStr(entry.key.pubkey));
+            visitor.pushKV("services", strprintf("%016x", static_cast<uint64_t>(entry.key.services)));
+            visitor.pushKV("servicesnames", GetServicesNames(entry.key.services));
+            visitor.pushKV("time", TicksSinceEpoch<std::chrono::seconds>(entry.time));
+            if (entry.closed_at) visitor.pushKV("grace_until", TicksSinceEpoch<std::chrono::seconds>(*entry.closed_at + holepunch::BOARD_GRACE));
+            registered.push_back(std::move(visitor));
+        }
+        board_entries.pushKV("registered", std::move(registered));
         obj.pushKV("board_entries", std::move(board_entries));
     }
     obj.pushKV("table", std::move(table));

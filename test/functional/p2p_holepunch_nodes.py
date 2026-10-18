@@ -59,7 +59,13 @@ class HolePunchNodesTest(BitcoinTestFramework):
             self.wait_until(lambda: "announced" in self.family(visitor))
             self.wait_until(lambda: visitor.getholepunchinfo()["table"]["entries"] == 1)
         for board in boards:
-            assert_equal(board.getholepunchinfo()["board_entries"], {"live": 2, "total": 2})
+            held = board.getholepunchinfo()["board_entries"]
+            assert_equal((held["live"], held["total"]), (2, 2))
+            # Each board can say who registered, and it is the two visitors.
+            assert_equal(sorted(e["endpoint"] for e in held["registered"]), sorted(endpoints))
+            for entry in held["registered"]:
+                assert_equal(len(entry["key"]), 66)
+                assert "P2P_V2" in entry["servicesnames"]
 
         self.log.info("The block after the announcements holds no pick, the next one pairs the visitors")
         self.generate(visitors[0], 1, sync_fun=lambda: self.sync_blocks(chain))

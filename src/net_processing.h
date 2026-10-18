@@ -92,6 +92,8 @@ struct HolePunchInfo {
     /** As a board: entries with an open connection, and all entries including those in their grace period. */
     size_t board_live_entries{0};
     size_t board_entries{0};
+    /** As a board: the visitors that registered, in the order they were stored. */
+    std::vector<holepunch::Board::Entry> board_registered;
     /** Whether the node is close enough to the tip to announce and to punch. */
     bool near_tip{false};
     /** Rounds held and sessions started by them since the node started, and the height of the last round. */

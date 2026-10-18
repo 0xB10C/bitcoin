@@ -6364,8 +6364,9 @@ HolePunchInfo PeerManagerImpl::GetHolePunchInfo() const
     info.near_tip = HolePunchNearTip();
     info.table_entries = m_holepunch_table.Size();
     info.table_by_source = m_holepunch_table.SizeBySource();
-    info.board_live_entries = m_holepunch_board.LiveEntries().size();
-    info.board_entries = m_holepunch_board.Size();
+    info.board_registered = m_holepunch_board.Entries();
+    info.board_live_entries = std::count_if(info.board_registered.begin(), info.board_registered.end(), [](const auto& entry) { return entry.Live(); });
+    info.board_entries = info.board_registered.size();
     return info;
 }
 

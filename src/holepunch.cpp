@@ -241,6 +241,12 @@ std::vector<Board::Entry> Board::LiveEntries() const
     return live;
 }
 
+std::vector<Board::Entry> Board::Entries() const
+{
+    LOCK(m_mutex);
+    return m_entries;
+}
+
 void Board::Disconnected(NodeId visitor, NodeClock::time_point now)
 {
     LOCK(m_mutex);

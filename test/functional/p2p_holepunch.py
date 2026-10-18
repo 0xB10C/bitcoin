@@ -623,7 +623,11 @@ class HolePunchTest(BitcoinTestFramework):
         self.restart_node(1)
 
         def entries():
-            return board.getholepunchinfo()["board_entries"]
+            e = board.getholepunchinfo()["board_entries"]
+            return {"live": e["live"], "total": e["total"]}
+
+        def registered():
+            return board.getholepunchinfo()["board_entries"]["registered"]
 
         self.log.info("A board stores a visitor's element if it names the connection's endpoint, and answers with it")
         visitor1 = board.add_p2p_connection(HolePunchPeer(flags=FLAG_VISITOR))
@@ -634,6 +638,15 @@ class HolePunchTest(BitcoinTestFramework):
         assert before <= answer.time <= int(time.time())
         assert_equal(answer.nServices, ENTRY_SERVICES)
         assert_equal(entries(), {"live": 1, "total": 1})
+        # The board can be asked who registered with it.
+        assert_equal(len(registered()), 1)
+        entry = registered()[0]
+        assert_equal(entry["endpoint"], f"127.0.0.1:{visitor1.local_port()}")
+        assert_equal(entry["key"], key1.hex())
+        assert_equal(entry["peer"], board.getpeerinfo()[0]["id"])
+        assert "P2P_V2" in entry["servicesnames"]
+        assert before <= entry["time"] <= int(time.time())
+        assert "grace_until" not in entry
 
         self.log.info("An element for another endpoint is ignored, and the answer shows it")
         other_key = new_pubkey()
@@ -662,6 +675,10 @@ class HolePunchTest(BitcoinTestFramework):
         visitor1.peer_disconnect()
         visitor1.wait_for_disconnect()
         self.wait_until(lambda: entries() == {"live": 1, "total": 2})
+        # The entry of the visitor that left shows when its grace period ends.
+        gone = [e for e in registered() if e["endpoint"] == f"127.0.0.1:{port1}"]
+        assert_equal(len(gone), 1)
+        assert gone[0]["grace_until"] > int(time.time())
         assert_equal(visitor2.announce("127.0.0.1", visitor2.local_port(), key2), [("127.0.0.1", visitor2.local_port(), key2)])
         assert port1 not in [p for _, p, _ in visitor2.announce("127.0.0.1", visitor2.local_port(), key2)]
 

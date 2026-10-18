@@ -257,6 +257,9 @@ public:
     /** The entries whose connection is open (R-5.8). */
     std::vector<Entry> LiveEntries() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
+    /** Every entry, including those in their grace period, for RPC. */
+    std::vector<Entry> Entries() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
     /** The visitor's connection closed: its entry enters the grace period (R-5.7). */
     void Disconnected(NodeId visitor, NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
