@@ -26,18 +26,18 @@ CService Addr(const std::string& s)
 
 BOOST_AUTO_TEST_CASE(external_address_needs_two_groups)
 {
-    ExternalAddressTracker tracker{/*allow_local=*/false};
+    ExternalAddressTracker tracker;
     const CService ext{Addr("1.2.3.4:8335")};
 
     BOOST_CHECK(!tracker.Get(NET_IPV4));
-    BOOST_CHECK(tracker.AddReport(1, GROUP_A, ext));
+    BOOST_CHECK(tracker.AddReport(1, GROUP_A, ext, /*allow_local=*/false));
     // One report is never enough (R-2.2).
     BOOST_CHECK(!tracker.Get(NET_IPV4));
     // Two reports from the same group are not enough either.
-    BOOST_CHECK(tracker.AddReport(2, GROUP_A, ext));
+    BOOST_CHECK(tracker.AddReport(2, GROUP_A, ext, /*allow_local=*/false));
     BOOST_CHECK(!tracker.Get(NET_IPV4));
     // A second group agreeing yields the external address.
-    BOOST_CHECK(tracker.AddReport(3, GROUP_B, ext));
+    BOOST_CHECK(tracker.AddReport(3, GROUP_B, ext, /*allow_local=*/false));
     BOOST_REQUIRE(tracker.Get(NET_IPV4));
     BOOST_CHECK_EQUAL(tracker.Get(NET_IPV4)->ToStringAddrPort(), "1.2.3.4:8335");
     const auto info{tracker.GetInfo(NET_IPV4)};
@@ -50,21 +50,21 @@ BOOST_AUTO_TEST_CASE(external_address_needs_two_groups)
 
 BOOST_AUTO_TEST_CASE(external_address_single_dissenter_is_ignored)
 {
-    ExternalAddressTracker tracker{/*allow_local=*/false};
+    ExternalAddressTracker tracker;
     const CService ext{Addr("1.2.3.4:8335")};
-    BOOST_CHECK(tracker.AddReport(1, GROUP_A, ext));
-    BOOST_CHECK(tracker.AddReport(2, GROUP_B, ext));
+    BOOST_CHECK(tracker.AddReport(1, GROUP_A, ext, /*allow_local=*/false));
+    BOOST_CHECK(tracker.AddReport(2, GROUP_B, ext, /*allow_local=*/false));
     BOOST_REQUIRE(tracker.Get(NET_IPV4));
 
     // One peer reporting a different port changes nothing (R-2.2).
-    BOOST_CHECK(tracker.AddReport(3, GROUP_C, Addr("1.2.3.4:40001")));
+    BOOST_CHECK(tracker.AddReport(3, GROUP_C, Addr("1.2.3.4:40001"), /*allow_local=*/false));
     BOOST_REQUIRE(tracker.Get(NET_IPV4));
     BOOST_CHECK_EQUAL(tracker.Get(NET_IPV4)->GetPort(), 8335);
     BOOST_CHECK(!tracker.GetInfo(NET_IPV4).conflicting);
 
     // A second peer in another group agreeing with the dissenter makes two
     // agreeing sets that disagree: no external address (R-2.3).
-    BOOST_CHECK(tracker.AddReport(4, GROUP_A, Addr("1.2.3.4:40001")));
+    BOOST_CHECK(tracker.AddReport(4, GROUP_A, Addr("1.2.3.4:40001"), /*allow_local=*/false));
     BOOST_CHECK(!tracker.Get(NET_IPV4));
     BOOST_CHECK(tracker.GetInfo(NET_IPV4).conflicting);
 
@@ -81,36 +81,36 @@ BOOST_AUTO_TEST_CASE(external_address_single_dissenter_is_ignored)
 
 BOOST_AUTO_TEST_CASE(external_address_report_replaced_per_peer)
 {
-    ExternalAddressTracker tracker{/*allow_local=*/false};
-    BOOST_CHECK(tracker.AddReport(1, GROUP_A, Addr("1.2.3.4:8335")));
-    BOOST_CHECK(tracker.AddReport(2, GROUP_B, Addr("1.2.3.4:8335")));
+    ExternalAddressTracker tracker;
+    BOOST_CHECK(tracker.AddReport(1, GROUP_A, Addr("1.2.3.4:8335"), /*allow_local=*/false));
+    BOOST_CHECK(tracker.AddReport(2, GROUP_B, Addr("1.2.3.4:8335"), /*allow_local=*/false));
     BOOST_REQUIRE(tracker.Get(NET_IPV4));
     // A peer's newer report replaces its older one.
-    BOOST_CHECK(tracker.AddReport(2, GROUP_B, Addr("1.2.3.4:40001")));
+    BOOST_CHECK(tracker.AddReport(2, GROUP_B, Addr("1.2.3.4:40001"), /*allow_local=*/false));
     BOOST_CHECK(!tracker.Get(NET_IPV4));
     BOOST_CHECK_EQUAL(tracker.GetInfo(NET_IPV4).reports, 2);
 }
 
 BOOST_AUTO_TEST_CASE(external_address_rejects_unusable_reports)
 {
-    ExternalAddressTracker tracker{/*allow_local=*/false};
+    ExternalAddressTracker tracker;
     // Port 0, non-routable address, and non-IP networks are not reports (R-2.1).
-    BOOST_CHECK(!tracker.AddReport(1, GROUP_A, Addr("1.2.3.4:0")));
-    BOOST_CHECK(!tracker.AddReport(1, GROUP_A, Addr("127.0.0.1:8335")));
-    BOOST_CHECK(!tracker.AddReport(1, GROUP_A, Addr("10.0.0.1:8335")));
-    BOOST_CHECK(!tracker.AddReport(1, GROUP_A, CService{}));
+    BOOST_CHECK(!tracker.AddReport(1, GROUP_A, Addr("1.2.3.4:0"), /*allow_local=*/false));
+    BOOST_CHECK(!tracker.AddReport(1, GROUP_A, Addr("127.0.0.1:8335"), /*allow_local=*/false));
+    BOOST_CHECK(!tracker.AddReport(1, GROUP_A, Addr("10.0.0.1:8335"), /*allow_local=*/false));
+    BOOST_CHECK(!tracker.AddReport(1, GROUP_A, CService{}, /*allow_local=*/false));
     BOOST_CHECK_EQUAL(tracker.GetInfo(NET_IPV4).reports, 0);
-    BOOST_CHECK(tracker.AddReport(1, GROUP_A, Addr("[2a00:1450::1]:8335")));
+    BOOST_CHECK(tracker.AddReport(1, GROUP_A, Addr("[2a00:1450::1]:8335"), /*allow_local=*/false));
     BOOST_CHECK_EQUAL(tracker.GetInfo(NET_IPV6).reports, 1);
 }
 
 BOOST_AUTO_TEST_CASE(external_address_on_test_networks)
 {
     // With allow_local, loopback addresses count and every peer is its own group (R-2.5).
-    ExternalAddressTracker tracker{/*allow_local=*/true};
-    BOOST_CHECK(tracker.AddReport(1, GROUP_A, Addr("127.0.0.1:18446")));
+    ExternalAddressTracker tracker;
+    BOOST_CHECK(tracker.AddReport(1, GROUP_A, Addr("127.0.0.1:18446"), /*allow_local=*/true));
     BOOST_CHECK(!tracker.Get(NET_IPV4));
-    BOOST_CHECK(tracker.AddReport(2, GROUP_A, Addr("127.0.0.1:18446")));
+    BOOST_CHECK(tracker.AddReport(2, GROUP_A, Addr("127.0.0.1:18446"), /*allow_local=*/true));
     BOOST_REQUIRE(tracker.Get(NET_IPV4));
     BOOST_CHECK_EQUAL(tracker.Get(NET_IPV4)->ToStringAddrPort(), "127.0.0.1:18446");
 }

@@ -108,14 +108,14 @@ bool IsWellFormedEndpoint(const CService& endpoint);
 class ExternalAddressTracker
 {
 public:
-    explicit ExternalAddressTracker(bool allow_local) : m_allow_local{allow_local} {}
-
     /**
      * Record what peer `id` reports as our address.
      * @param[in] group The peer's network group, as used for outbound diversity.
+     * @param[in] allow_local On test networks: accept non-routable addresses and
+     * count the peer as its own network group (R-2.5).
      * @return true if the report was recorded, false if it is unusable (R-2.1).
      */
-    bool AddReport(NodeId id, const std::vector<unsigned char>& group, const CService& reported)
+    bool AddReport(NodeId id, const std::vector<unsigned char>& group, const CService& reported, bool allow_local)
         EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
     /** Forget the report of a peer that disconnected. */
@@ -144,7 +144,6 @@ private:
         CService addr;
     };
 
-    const bool m_allow_local;
     mutable Mutex m_mutex;
     std::map<NodeId, Report> m_reports GUARDED_BY(m_mutex);
 };

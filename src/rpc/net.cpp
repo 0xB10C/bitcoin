@@ -1193,6 +1193,61 @@ static RPCMethod getaddrmaninfo()
     };
 }
 
+static RPCMethod getholepunchinfo()
+{
+    return RPCMethod{
+        "getholepunchinfo",
+        "Returns the state of TCP hole punching through boards (-holepunch, -holepunchboard).\n",
+        {},
+        RPCResult{
+            RPCResult::Type::OBJ, "", "",
+            {
+                {RPCResult::Type::BOOL, "enabled", "Whether this node visits boards and punches"},
+                {RPCResult::Type::BOOL, "board", "Whether this node acts as a board"},
+                {RPCResult::Type::NUM, "port", /*optional=*/true, "The punch port: the local port of board connections and punch attempts"},
+                {RPCResult::Type::ARR, "external", "Our external address and port per address family, as reported by boards",
+                    {
+                        {RPCResult::Type::OBJ, "", "",
+                            {
+                                {RPCResult::Type::STR, "network", "The address family (ipv4, ipv6)"},
+                                {RPCResult::Type::STR, "address", /*optional=*/true, "(ip:port) The external address, if at least two boards in different network groups agree on it"},
+                                {RPCResult::Type::NUM, "reporters", "The number of boards that report the external address"},
+                                {RPCResult::Type::NUM, "reports", "The number of boards whose report is tracked"},
+                                {RPCResult::Type::BOOL, "conflicting", "Whether boards disagree in a way that rules out an external address"},
+                            }},
+                    }},
+            }},
+        RPCExamples{
+            HelpExampleCli("getholepunchinfo", "")
+            + HelpExampleRpc("getholepunchinfo", "")
+        },
+        [&](const RPCMethod& self, const JSONRPCRequest& request) -> UniValue
+{
+    NodeContext& node = EnsureAnyNodeContext(request.context);
+    const CConnman& connman = EnsureConnman(node);
+    const holepunch::Options& options{connman.GetHolePunchOptions()};
+
+    UniValue obj(UniValue::VOBJ);
+    obj.pushKV("enabled", options.enabled);
+    obj.pushKV("board", options.board);
+    if (options.enabled) obj.pushKV("port", options.port);
+    UniValue external(UniValue::VARR);
+    for (const Network net : {NET_IPV4, NET_IPV6}) {
+        const auto info{connman.GetHolePunchExternalInfo(net)};
+        UniValue family(UniValue::VOBJ);
+        family.pushKV("network", GetNetworkName(net));
+        if (info.address) family.pushKV("address", info.address->ToStringAddrPort());
+        family.pushKV("reporters", info.reporters);
+        family.pushKV("reports", info.reports);
+        family.pushKV("conflicting", info.conflicting);
+        external.push_back(std::move(family));
+    }
+    obj.pushKV("external", std::move(external));
+    return obj;
+},
+    };
+}
+
 static RPCMethod exportasmap()
 {
     return RPCMethod{
@@ -1337,6 +1392,7 @@ void RegisterNetRPCCommands(CRPCTable& t)
         {"network", &setnetworkactive},
         {"network", &getnodeaddresses},
         {"network", &getaddrmaninfo},
+        {"network", &getholepunchinfo},
         {"network", &exportasmap},
         {"hidden", &addconnection},
         {"hidden", &addpeeraddress},

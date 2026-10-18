@@ -1689,7 +1689,10 @@ void PeerManagerImpl::PushNodeVersion(CNode& pnode, const Peer& peer)
         my_services = peer.m_our_services;
         my_time = TicksSinceEpoch<std::chrono::seconds>(NodeClock::now());
         your_services = addr.nServices;
-        your_addr = addr.IsRoutable() && !IsProxy(addr) && addr.IsAddrV1Compatible() ? CService{addr} : CService{};
+        // On regtest every node is at a loopback address; report it so that hole
+        // punching can be tested there (R-2.5).
+        const bool report_addr{addr.IsRoutable() || m_connman.GetHolePunchOptions().allow_local};
+        your_addr = report_addr && !IsProxy(addr) && addr.IsAddrV1Compatible() ? CService{addr} : CService{};
         my_user_agent = strSubVersion;
         my_height = m_best_height;
         my_tx_relay = !RejectIncomingTxs(pnode);
@@ -1865,6 +1868,7 @@ void PeerManagerImpl::FinalizeNode(const CNode& node)
         LOCK(m_headers_presync_mutex);
         m_headers_presync_stats.erase(nodeid);
     }
+    if (node.IsHolePunchBoardConn()) m_connman.HolePunchForget(nodeid);
     if (node.IsPrivateBroadcastConn()) {
         m_tx_for_private_broadcast.NodeDisconnected(nodeid);
         // We consider a transaction sent to a peer if we sent them an INV.
@@ -3949,6 +3953,9 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         pfrom.m_has_all_wanted_services = HasAllDesirableServiceFlags(nServices);
         peer.m_their_services = nServices;
         pfrom.SetAddrLocal(addrMe);
+        // A board saw this connection come from the punch port, so what it reports
+        // is the endpoint that punch attempts will be seen from (R-2.1).
+        if (pfrom.IsHolePunchBoardConn()) m_connman.HolePunchReport(pfrom, addrMe);
         {
             LOCK(pfrom.m_subver_mutex);
             pfrom.cleanSubVer = cleanSubVer;

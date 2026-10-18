@@ -2,7 +2,7 @@
 # Copyright (c) 2026 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Test TCP hole punching through boards: options, board connections and the feature exchange."""
+"""Test TCP hole punching through boards: options, board connections, the feature exchange and the external address."""
 
 from test_framework.messages import (
     msg_feature,
@@ -27,16 +27,20 @@ def feature_data(flags, version=0):
 
 class HolePunchPeer(P2PInterface):
     """A test peer that sends the hole punching feature with `flags` before verack, or nothing if None.
-    `data` replaces the feature payload, to send a malformed one."""
+    `data` replaces the feature payload, to send a malformed one. `report` is the (ip, port) it
+    reports as the node's address in version.addr_recv."""
 
-    def __init__(self, flags=None, data=None):
+    def __init__(self, flags=None, data=None, report=None):
         super().__init__()
         self.flags = flags
         self.data = data
+        self.report = report
         self.features = []
 
     def peer_connect_send_version(self, services):
         super().peer_connect_send_version(services)
+        if self.report is not None:
+            self.on_connection_send_msg.addrTo.ip, self.on_connection_send_msg.addrTo.port = self.report
         # A visitor's version has transaction relay disabled (R-3.5). The other test
         # peers do the same, so that the cap on tx-relaying inbound peers stays out
         # of the way when inbound slots are counted.
@@ -183,6 +187,7 @@ class HolePunchTest(BitcoinTestFramework):
         peer = visitor.add_outbound_p2p_connection(HolePunchPeer(flags=FLAG_BOARD), p2p_idx=0, connection_type="holepunch-board")
         peer.send_without_ping(msg_getaddr())
         peer.wait_for_disconnect()
+        visitor.disconnect_p2ps()
 
         self.log.info("A board sends nothing but pings to a visitor and closes on any other message")
         peer = board.add_p2p_connection(HolePunchPeer(flags=FLAG_VISITOR))
@@ -199,6 +204,50 @@ class HolePunchTest(BitcoinTestFramework):
         extra.wait_for_disconnect()
         assert_equal(len([p for p in board.getpeerinfo() if p["holepunch_flags"] == ["VISITOR"]]), 32)
         board.disconnect_p2ps()
+
+    def test_external_address(self):
+        visitor = self.nodes[0]
+
+        def external():
+            return visitor.getholepunchinfo()["external"][0]
+
+        def board(idx, report):
+            return visitor.add_outbound_p2p_connection(HolePunchPeer(flags=FLAG_BOARD, report=report), p2p_idx=idx, connection_type="holepunch-board")
+
+        self.log.info("Nothing is known without reports")
+        info = visitor.getholepunchinfo()
+        assert_equal(info["enabled"], True)
+        assert_equal(info["board"], False)
+        assert_equal(info["port"], holepunch_port(0))
+        assert_equal(external(), {"network": "ipv4", "reporters": 0, "reports": 0, "conflicting": False})
+
+        self.log.info("One board's report is not enough, two agreeing boards give the external address")
+        board(0, ("1.2.3.4", 5555))
+        assert_equal(external()["reports"], 1)
+        assert "address" not in external()
+        board(1, ("1.2.3.4", 5555))
+        assert_equal(external()["address"], "1.2.3.4:5555")
+        assert_equal(external()["reporters"], 2)
+
+        self.log.info("A single dissenting board changes nothing, a second agreeing with it drops the address")
+        dissenter1 = board(2, ("1.2.3.4", 6666))
+        assert_equal(external()["address"], "1.2.3.4:5555")
+        assert_equal(external()["conflicting"], False)
+        dissenter2 = board(3, ("1.2.3.4", 6666))
+        assert "address" not in external()
+        assert_equal(external()["conflicting"], True)
+
+        self.log.info("Once the dissenters are gone, the address is back")
+        dissenter1.peer_disconnect()
+        dissenter2.peer_disconnect()
+        self.wait_until(lambda: external()["reports"] == 2)
+        assert_equal(external()["address"], "1.2.3.4:5555")
+
+        self.log.info("Ordinary outbound connections do not report")
+        visitor.add_outbound_p2p_connection(HolePunchPeer(flags=FLAG_BOARD, report=("9.9.9.9", 1)), p2p_idx=4)
+        assert_equal(external()["reports"], 2)
+        visitor.disconnect_p2ps()
+        self.wait_until(lambda: external()["reports"] == 0)
 
     def test_visitors_outside_inbound_limit(self):
         board = self.nodes[1]
@@ -222,6 +271,7 @@ class HolePunchTest(BitcoinTestFramework):
         self.test_board_connection_port()
         self.test_feature_exchange()
         self.test_board_connection_protocol()
+        self.test_external_address()
         self.test_visitors_outside_inbound_limit()
 
 

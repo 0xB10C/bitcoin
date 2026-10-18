@@ -70,14 +70,14 @@ bool IsWellFormedEndpoint(const CService& endpoint)
     return (endpoint.IsIPv4() || endpoint.IsIPv6()) && !endpoint.IsBindAny() && endpoint.GetPort() != 0;
 }
 
-bool ExternalAddressTracker::AddReport(NodeId id, const std::vector<unsigned char>& group, const CService& reported)
+bool ExternalAddressTracker::AddReport(NodeId id, const std::vector<unsigned char>& group, const CService& reported, bool allow_local)
 {
     if (Family(reported) == NET_UNROUTABLE) return false;
     if (reported.GetPort() == 0) return false;
-    if (!m_allow_local && !reported.IsRoutable()) return false;
+    if (!allow_local && !reported.IsRoutable()) return false;
 
     Report report{group, reported};
-    if (m_allow_local) {
+    if (allow_local) {
         // Each peer counts as its own network group (R-2.5).
         report.group.clear();
         for (int i = 0; i < 8; ++i) report.group.push_back(static_cast<unsigned char>(id >> (8 * i)));

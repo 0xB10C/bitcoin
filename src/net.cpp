@@ -3869,6 +3869,21 @@ CConnman::BoardVisitorCounts CConnman::CountBoardVisitors(const CNode& visitor) 
     return counts;
 }
 
+void CConnman::HolePunchReport(const CNode& node, const CService& reported)
+{
+    m_holepunch_external.AddReport(node.GetId(), m_netgroupman.GetGroup(node.addr), reported, m_holepunch.allow_local);
+}
+
+void CConnman::HolePunchForget(NodeId id)
+{
+    m_holepunch_external.RemovePeer(id);
+}
+
+holepunch::ExternalAddressTracker::Info CConnman::GetHolePunchExternalInfo(Network net) const
+{
+    return m_holepunch_external.GetInfo(net);
+}
+
 std::vector<CAddress> CConnman::GetAddressesUnsafe(size_t max_addresses, size_t max_pct, std::optional<Network> network, const bool filtered) const
 {
     std::vector<CAddress> addresses = addrman.get().GetAddr(max_addresses, max_pct, network, filtered);

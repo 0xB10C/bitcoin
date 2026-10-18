@@ -1631,6 +1631,17 @@ public:
      */
     BoardVisitorCounts CountBoardVisitors(const CNode& visitor) const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
+    /**
+     * Record what a board reports as our address and port in its
+     * version.addr_recv (R-2.1). `node` is the board connection the report
+     * came on.
+     */
+    void HolePunchReport(const CNode& node, const CService& reported);
+    /** Forget the report of a peer that disconnected. */
+    void HolePunchForget(NodeId id);
+    /** Our external address for `net` (NET_IPV4 or NET_IPV6) and how it was arrived at (R-2.2, R-2.3). */
+    holepunch::ExternalAddressTracker::Info GetHolePunchExternalInfo(Network net) const;
+
 private:
 
     void DeleteNode(CNode* pnode);
@@ -1788,6 +1799,8 @@ private:
 
     bool m_use_addrman_outgoing;
     holepunch::Options m_holepunch;
+    /** What boards report as our address, per address family. */
+    holepunch::ExternalAddressTracker m_holepunch_external;
     CClientUIInterface* m_client_interface;
     NetEventsInterface* m_msgproc;
     /** Pointer to this node's banman. May be nullptr - check existence before dereferencing. */
