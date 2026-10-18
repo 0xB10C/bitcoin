@@ -341,6 +341,11 @@ enum ServiceFlags : uint64_t {
     // NODE_P2P_V2 means the node supports BIP324 transport
     NODE_P2P_V2 = (1 << 11),
 
+    // NODE_HOLEPUNCH_BOARD means the node acts as a board for TCP hole
+    // punching: it reports the external address of nodes behind NATs and
+    // relays their announcements to each other. Experimental bit.
+    NODE_HOLEPUNCH_BOARD = (1 << 24),
+
     // Bits 24-31 are reserved for temporary experiments. Just pick a bit that
     // isn't getting used, or one not being used much, and notify the
     // bitcoin-development mailing list. Remember that service bits are just

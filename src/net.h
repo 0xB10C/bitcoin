@@ -91,6 +91,10 @@ inline constexpr bool DEFAULT_BLOCKSONLY = false;
 inline constexpr int64_t DEFAULT_PEER_CONNECT_TIMEOUT = 60;
 /** Default for -privatebroadcast. */
 inline constexpr bool DEFAULT_PRIVATE_BROADCAST{false};
+/** Whether to visit hole punching boards and punch to other nodes behind NATs. */
+inline constexpr bool DEFAULT_HOLEPUNCH{false};
+/** Whether to act as a hole punching board. */
+inline constexpr bool DEFAULT_HOLEPUNCH_BOARD{false};
 /** Number of file descriptors required for message capture **/
 inline constexpr int NUM_FDS_MESSAGE_CAPTURE = 1;
 /** Interval for ASMap Health Check **/

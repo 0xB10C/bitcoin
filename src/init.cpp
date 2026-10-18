@@ -45,6 +45,7 @@
 #include <key.h>
 #include <logging.h>
 #include <mapport.h>
+#include <holepunch.h>
 #include <net.h>
 #include <net_permissions.h>
 #include <net_processing.h>
@@ -595,6 +596,9 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-i2pacceptincoming", strprintf("Whether to accept inbound I2P connections (default: %i). Ignored if -i2psam is not set. Listening for inbound I2P connections is done through the SAM proxy, not by binding to a local address and port.", DEFAULT_I2P_ACCEPT_INCOMING), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-onlynet=<net>", "Make automatic outbound connections only to network <net> (" + Join(GetNetworkNames(), ", ") + "). Inbound and manual connections are not affected by this option. It can be specified multiple times to allow multiple networks.", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-v2transport", strprintf("Support v2 transport (default: %u)", DEFAULT_V2_TRANSPORT), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-holepunch", strprintf("EXPERIMENTAL: Connect to other nodes behind NATs by TCP hole punching: keep connections from one local port, the punch port, to nodes that act as boards, which report our external address and relay announcements of nodes to punch to. For nodes that cannot accept incoming connections. Requires -v2transport (default: %u)", DEFAULT_HOLEPUNCH), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-holepunchport=<port>", "The punch port (default: a random port from the dynamic range, chosen at startup)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-holepunchboard", strprintf("EXPERIMENTAL: Act as a hole punching board for nodes behind NATs. Requires -listen and -v2transport (default: %u)", DEFAULT_HOLEPUNCH_BOARD), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-peerbloomfilters", strprintf("Support filtering of blocks and transaction with bloom filters (default: %u)", DEFAULT_PEERBLOOMFILTERS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-peerblockfilters", strprintf("Serve compact block filters to peers per BIP 157 (default: %u)", DEFAULT_PEERBLOCKFILTERS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-txreconciliation", strprintf("Enable transaction reconciliations per BIP 330 (default: %d)", DEFAULT_TXRECONCILIATION_ENABLE), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CONNECTION);
@@ -1019,6 +1023,19 @@ bool AppInitParameterInteraction(const ArgsManager& args)
     // Signal NODE_P2P_V2 if BIP324 v2 transport is enabled.
     if (args.GetBoolArg("-v2transport", DEFAULT_V2_TRANSPORT)) {
         g_local_services = ServiceFlags(g_local_services | NODE_P2P_V2);
+    }
+
+    if (args.GetBoolArg("-holepunch", DEFAULT_HOLEPUNCH) && !(g_local_services & NODE_P2P_V2)) {
+        return InitError(_("-holepunch requires -v2transport"));
+    }
+    if (args.GetBoolArg("-holepunchboard", DEFAULT_HOLEPUNCH_BOARD)) {
+        if (!(g_local_services & NODE_P2P_V2)) {
+            return InitError(_("-holepunchboard requires -v2transport"));
+        }
+        if (!args.GetBoolArg("-listen", DEFAULT_LISTEN)) {
+            return InitError(_("-holepunchboard requires -listen"));
+        }
+        g_local_services = ServiceFlags(g_local_services | NODE_HOLEPUNCH_BOARD);
     }
 
     // Signal NODE_COMPACT_FILTERS if peerblockfilters and basic filters index are both enabled.
@@ -2391,6 +2408,31 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     }
 
     connOptions.m_i2p_accept_incoming = args.GetBoolArg("-i2pacceptincoming", DEFAULT_I2P_ACCEPT_INCOMING);
+
+    connOptions.m_holepunch.enabled = args.GetBoolArg("-holepunch", DEFAULT_HOLEPUNCH);
+    connOptions.m_holepunch.board = args.GetBoolArg("-holepunchboard", DEFAULT_HOLEPUNCH_BOARD);
+    connOptions.m_holepunch.allow_local = chainparams.GetChainType() == ChainType::REGTEST;
+    if (connOptions.m_holepunch.enabled) {
+        int64_t punch_port{0};
+        if (args.IsArgSet("-holepunchport")) {
+            punch_port = args.GetIntArg("-holepunchport", 0);
+            if (punch_port < 1 || punch_port > 65535) {
+                return InitError(strprintf(_("Invalid port specified in %s: '%s'"), "-holepunchport", args.GetArg("-holepunchport", "")));
+            }
+            if (IsBadPort(static_cast<uint16_t>(punch_port))) {
+                return InitError(strprintf(_("Port %d in %s is one other nodes refuse to connect to, choose another"), punch_port, "-holepunchport"));
+            }
+        } else {
+            // A random port, fixed for this run: nothing depends on its number, and a
+            // well-known one would mark our connections to observers.
+            FastRandomContext rng;
+            const auto picked{holepunch::PickRandomPunchPort(rng)};
+            if (!picked) return InitError(_("No free port for hole punching was found, set -holepunchport"));
+            punch_port = *picked;
+        }
+        connOptions.m_holepunch.port = static_cast<uint16_t>(punch_port);
+        LogInfo("Hole punching enabled, punch port %d", connOptions.m_holepunch.port);
+    }
 
     if (auto conflict = CheckBindingConflicts(connOptions)) {
         return InitError(strprintf(
