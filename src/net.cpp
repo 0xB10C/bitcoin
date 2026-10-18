@@ -2690,6 +2690,9 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
 
         PerformReconnections();
 
+        // Board connections take no outbound slot; one attempt per iteration.
+        if (MaybeOpenHolePunchBoardConnection(rng)) continue;
+
         CountingSemaphoreGrant<> grant(*semOutbound);
         if (m_interrupt_net->interrupted()) {
             return;
@@ -3148,7 +3151,11 @@ bool CConnman::OpenNetworkConnection(const CAddress& addrConnect,
     }
     if (!pszDest) {
         bool banned_or_discouraged = m_banman && (m_banman->IsDiscouraged(addrConnect) || m_banman->IsBanned(addrConnect));
-        if (IsLocal(addrConnect) || banned_or_discouraged || AlreadyConnectedToAddress(addrConnect)) {
+        // On a test network every board has the same address, so a board connection
+        // counts as already open only if the port matches too.
+        const bool by_endpoint{conn_type == ConnectionType::HOLEPUNCH_BOARD && m_holepunch.allow_local};
+        const bool already_connected{by_endpoint ? AlreadyConnectedToAddressPort(addrConnect) : AlreadyConnectedToAddress(addrConnect)};
+        if (IsLocal(addrConnect) || banned_or_discouraged || already_connected) {
             return false;
         }
     } else if (AlreadyConnectedToHost(pszDest)) {
@@ -3160,6 +3167,12 @@ bool CConnman::OpenNetworkConnection(const CAddress& addrConnect,
     if (!pnode)
         return false;
     pnode->grantOutbound = std::move(grant_outbound);
+    if (conn_type == ConnectionType::HOLEPUNCH_BOARD) {
+        // Each board connection lives BOARD_ROTATE give or take BOARD_ROTATE_SPREAD, so
+        // that rotations are not aligned across nodes (R-5.2).
+        FastRandomContext rng;
+        pnode->m_holepunch_board_until = rng.rand_uniform_delay(pnode->m_connected + holepunch::BOARD_ROTATE - holepunch::BOARD_ROTATE_SPREAD, 2 * holepunch::BOARD_ROTATE_SPREAD);
+    }
 
     m_msgproc->InitializeNode(*pnode, m_local_services);
     {
@@ -3871,7 +3884,121 @@ CConnman::BoardVisitorCounts CConnman::CountBoardVisitors(const CNode& visitor) 
 
 void CConnman::HolePunchReport(const CNode& node, const CService& reported)
 {
-    m_holepunch_external.AddReport(node.GetId(), m_netgroupman.GetGroup(node.addr), reported, m_holepunch.allow_local);
+    if (!m_holepunch_external.AddReport(node.GetId(), m_netgroupman.GetGroup(node.addr), reported, m_holepunch.allow_local)) return;
+    const Network family{reported.IsIPv4() ? NET_IPV4 : NET_IPV6};
+    if (m_holepunch_external.Get(family)) HolePunchBoardSucceeded(family);
+}
+
+void CConnman::HolePunchBoardFailed(Network family)
+{
+    LOCK(m_holepunch_mutex);
+    auto& state{m_holepunch_boards[family]};
+    if (++state.fails < holepunch::BOARD_FAIL_MAX) return;
+    state.fails = 0;
+    state.backoff_until = NodeClock::now() + holepunch::BOARD_BACKOFF;
+    LogInfo("Hole punching: %d board connections for %s in a row gave no result, pausing for %d minutes", holepunch::BOARD_FAIL_MAX, GetNetworkName(family), Ticks<std::chrono::minutes>(holepunch::BOARD_BACKOFF));
+}
+
+void CConnman::HolePunchBoardSucceeded(Network family)
+{
+    LOCK(m_holepunch_mutex);
+    m_holepunch_boards[family].fails = 0;
+}
+
+CConnman::HolePunchBoardState CConnman::GetHolePunchBoardState(Network family) const
+{
+    LOCK(m_holepunch_mutex);
+    const auto it{m_holepunch_boards.find(family)};
+    return it == m_holepunch_boards.end() ? HolePunchBoardState{} : it->second;
+}
+
+std::vector<CConnman::HolePunchBoardInfo> CConnman::GetHolePunchBoards() const
+{
+    std::vector<HolePunchBoardInfo> boards;
+    LOCK(m_nodes_mutex);
+    for (const CNode* node : m_nodes) {
+        if (!node->IsHolePunchBoardConn() || node->fDisconnect) continue;
+        boards.push_back({.id = node->GetId(), .addr = node->addr, .connected = node->m_connected, .until = node->m_holepunch_board_until.load()});
+    }
+    return boards;
+}
+
+bool CConnman::HolePunchSlotFree() const
+{
+    int inbound{0};
+    LOCK(m_nodes_mutex);
+    for (const CNode* node : m_nodes) {
+        if (node->IsInboundConn() && !node->m_board_visitor) ++inbound;
+    }
+    return inbound < m_max_inbound;
+}
+
+bool CConnman::MaybeOpenHolePunchBoardConnection(FastRandomContext& rng)
+{
+    if (!m_holepunch.enabled || !fNetworkActive) return false;
+    const auto now{NodeClock::now()};
+
+    // Close board connections at the end of their lifetime, and note the network
+    // groups of the open ones per family.
+    std::map<Network, std::vector<std::vector<unsigned char>>> open_groups;
+    {
+        LOCK(m_nodes_mutex);
+        for (CNode* node : m_nodes) {
+            if (!node->IsHolePunchBoardConn() || node->fDisconnect) continue;
+            if (now >= node->m_holepunch_board_until.load()) {
+                LogDebug(BCLog::HOLEPUNCH, "board connection reached the end of its lifetime, %s", node->DisconnectMsg());
+                node->fDisconnect = true;
+                continue;
+            }
+            const Network family{node->addr.IsIPv4() ? NET_IPV4 : NET_IPV6};
+            open_groups[family].push_back(m_holepunch.allow_local ? std::vector<unsigned char>{} : m_netgroupman.GetGroup(node->addr));
+        }
+    }
+
+    // With no slot for a punched connection, there is nothing to announce (R-5.3).
+    if (!HolePunchSlotFree()) {
+        LOCK(m_nodes_mutex);
+        for (CNode* node : m_nodes) {
+            if (node->IsHolePunchBoardConn() && !node->fDisconnect) {
+                LogDebug(BCLog::HOLEPUNCH, "no free slot for a punched connection, %s", node->DisconnectMsg());
+                node->fDisconnect = true;
+            }
+        }
+        return false;
+    }
+
+    for (const Network family : {NET_IPV4, NET_IPV6}) {
+        if (!g_reachable_nets.Contains(family)) continue;
+        if (open_groups[family].size() >= holepunch::BOARDS) continue;
+        if (now < GetHolePunchBoardState(family).backoff_until) continue;
+
+        std::vector<CAddress> known{addrman.get().GetAddr(/*max_addresses=*/0, /*max_pct=*/0, family, /*filtered=*/false)};
+        for (const CService& seed : m_holepunch.board_seeds) {
+            known.emplace_back(seed, ServiceFlags(NODE_HOLEPUNCH_BOARD | NODE_P2P_V2));
+        }
+        std::vector<CAddress> candidates;
+        for (const CAddress& addr : known) {
+            if ((family == NET_IPV4) != addr.IsIPv4()) continue;
+            if (!(addr.nServices & NODE_HOLEPUNCH_BOARD) || !(addr.nServices & NODE_P2P_V2)) continue;
+            if (IsLocal(addr)) continue;
+            if (m_holepunch.allow_local ? AlreadyConnectedToAddressPort(addr) : AlreadyConnectedToAddress(addr)) continue;
+            if (!m_holepunch.allow_local) {
+                const auto group{m_netgroupman.GetGroup(addr)};
+                if (std::find(open_groups[family].begin(), open_groups[family].end(), group) != open_groups[family].end()) continue;
+            }
+            candidates.push_back(addr);
+        }
+        if (candidates.empty()) continue;
+
+        const CAddress& board{candidates[rng.randrange(candidates.size())]};
+        LogDebug(BCLog::HOLEPUNCH, "opening a board connection to %s, %d of %d boards for %s open", board.ToStringAddrPort(), open_groups[family].size(), holepunch::BOARDS, GetNetworkName(family));
+        if (!OpenNetworkConnection(board, /*fCountFailure=*/false, /*grant_outbound=*/{}, /*pszDest=*/nullptr,
+                                   ConnectionType::HOLEPUNCH_BOARD, /*use_v2transport=*/true, /*proxy_override=*/std::nullopt)) {
+            HolePunchBoardFailed(family);
+        }
+        return true;
+    }
+    return false;
 }
 
 void CConnman::HolePunchForget(NodeId id)

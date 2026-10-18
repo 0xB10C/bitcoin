@@ -1205,15 +1205,27 @@ static RPCMethod getholepunchinfo()
                 {RPCResult::Type::BOOL, "enabled", "Whether this node visits boards and punches"},
                 {RPCResult::Type::BOOL, "board", "Whether this node acts as a board"},
                 {RPCResult::Type::NUM, "port", /*optional=*/true, "The punch port: the local port of board connections and punch attempts"},
-                {RPCResult::Type::ARR, "external", "Our external address and port per address family, as reported by boards",
+                {RPCResult::Type::ARR, "families", "The state per address family",
                     {
                         {RPCResult::Type::OBJ, "", "",
                             {
                                 {RPCResult::Type::STR, "network", "The address family (ipv4, ipv6)"},
-                                {RPCResult::Type::STR, "address", /*optional=*/true, "(ip:port) The external address, if at least two boards in different network groups agree on it"},
+                                {RPCResult::Type::STR, "address", /*optional=*/true, "(ip:port) Our external address, if at least two boards in different network groups agree on it"},
                                 {RPCResult::Type::NUM, "reporters", "The number of boards that report the external address"},
                                 {RPCResult::Type::NUM, "reports", "The number of boards whose report is tracked"},
                                 {RPCResult::Type::BOOL, "conflicting", "Whether boards disagree in a way that rules out an external address"},
+                                {RPCResult::Type::ARR, "boards", "The open board connections",
+                                    {
+                                        {RPCResult::Type::OBJ, "", "",
+                                            {
+                                                {RPCResult::Type::NUM, "id", "The peer id"},
+                                                {RPCResult::Type::STR, "addr", "(ip:port) The board's address"},
+                                                {RPCResult::Type::NUM_TIME, "connected", "When the connection was opened"},
+                                                {RPCResult::Type::NUM_TIME, "until", "When the connection is replaced by one to another board"},
+                                            }},
+                                    }},
+                                {RPCResult::Type::NUM, "board_fails", "Board connections in a row that gave no result"},
+                                {RPCResult::Type::NUM_TIME, "board_backoff_until", "Until when no board connection is opened after repeated failures, 0 if not pausing"},
                             }},
                     }},
             }},
@@ -1231,7 +1243,8 @@ static RPCMethod getholepunchinfo()
     obj.pushKV("enabled", options.enabled);
     obj.pushKV("board", options.board);
     if (options.enabled) obj.pushKV("port", options.port);
-    UniValue external(UniValue::VARR);
+    const auto boards{connman.GetHolePunchBoards()};
+    UniValue families(UniValue::VARR);
     for (const Network net : {NET_IPV4, NET_IPV6}) {
         const auto info{connman.GetHolePunchExternalInfo(net)};
         UniValue family(UniValue::VOBJ);
@@ -1240,9 +1253,23 @@ static RPCMethod getholepunchinfo()
         family.pushKV("reporters", info.reporters);
         family.pushKV("reports", info.reports);
         family.pushKV("conflicting", info.conflicting);
-        external.push_back(std::move(family));
+        UniValue family_boards(UniValue::VARR);
+        for (const auto& board : boards) {
+            if ((net == NET_IPV4) != board.addr.IsIPv4()) continue;
+            UniValue entry(UniValue::VOBJ);
+            entry.pushKV("id", board.id);
+            entry.pushKV("addr", board.addr.ToStringAddrPort());
+            entry.pushKV("connected", TicksSinceEpoch<std::chrono::seconds>(board.connected));
+            entry.pushKV("until", TicksSinceEpoch<std::chrono::seconds>(board.until));
+            family_boards.push_back(std::move(entry));
+        }
+        family.pushKV("boards", std::move(family_boards));
+        const auto state{connman.GetHolePunchBoardState(net)};
+        family.pushKV("board_fails", state.fails);
+        family.pushKV("board_backoff_until", TicksSinceEpoch<std::chrono::seconds>(state.backoff_until));
+        families.push_back(std::move(family));
     }
-    obj.pushKV("external", std::move(external));
+    obj.pushKV("families", std::move(families));
     return obj;
 },
     };

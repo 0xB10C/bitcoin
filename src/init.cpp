@@ -599,6 +599,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-holepunch", strprintf("EXPERIMENTAL: Connect to other nodes behind NATs by TCP hole punching: keep connections from one local port, the punch port, to nodes that act as boards, which report our external address and relay announcements of nodes to punch to. For nodes that cannot accept incoming connections. Requires -v2transport (default: %u)", DEFAULT_HOLEPUNCH), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-holepunchport=<port>", "The punch port (default: a random port from the dynamic range, chosen at startup)", ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-holepunchboard", strprintf("EXPERIMENTAL: Act as a hole punching board for nodes behind NATs. Requires -listen and -v2transport (default: %u)", DEFAULT_HOLEPUNCH_BOARD), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
+    argsman.AddArg("-holepunchboardseed=<ip:port>", "Open board connections to this address besides the boards found in the address manager. Can be specified multiple times. For testing, where boards are at addresses the address manager does not keep.", ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CONNECTION);
     argsman.AddArg("-peerbloomfilters", strprintf("Support filtering of blocks and transaction with bloom filters (default: %u)", DEFAULT_PEERBLOOMFILTERS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-peerblockfilters", strprintf("Serve compact block filters to peers per BIP 157 (default: %u)", DEFAULT_PEERBLOCKFILTERS), ArgsManager::ALLOW_ANY, OptionsCategory::CONNECTION);
     argsman.AddArg("-txreconciliation", strprintf("Enable transaction reconciliations per BIP 330 (default: %d)", DEFAULT_TXRECONCILIATION_ENABLE), ArgsManager::ALLOW_ANY | ArgsManager::DEBUG_ONLY, OptionsCategory::CONNECTION);
@@ -2432,6 +2433,13 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
         }
         connOptions.m_holepunch.port = static_cast<uint16_t>(punch_port);
         LogInfo("Hole punching enabled, punch port %d", connOptions.m_holepunch.port);
+        for (const std::string& seed : args.GetArgs("-holepunchboardseed")) {
+            const auto addr{Lookup(seed, /*portDefault=*/0, /*fAllowLookup=*/false)};
+            if (!addr || addr->GetPort() == 0) {
+                return InitError(strprintf(_("Invalid address specified in %s: '%s'"), "-holepunchboardseed", seed));
+            }
+            connOptions.m_holepunch.board_seeds.push_back(*addr);
+        }
     }
 
     if (auto conflict = CheckBindingConflicts(connOptions)) {

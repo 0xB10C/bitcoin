@@ -37,6 +37,18 @@ typedef int64_t NodeId;
 inline constexpr uint16_t PUNCH_PORT_MIN{49152};
 inline constexpr uint16_t PUNCH_PORT_MAX{65535};
 
+// Limits of board connections (section 5 of the draft, R-5.2).
+/** Board connections a visitor keeps per announced address family. */
+inline constexpr size_t BOARDS{2};
+/** A board connection is replaced about this long after it was opened, at a time not aligned across nodes. */
+inline constexpr auto BOARD_ROTATE{std::chrono::hours{6}};
+/** How far from BOARD_ROTATE a connection's lifetime may lie, either way. */
+inline constexpr auto BOARD_ROTATE_SPREAD{std::chrono::hours{1}};
+/** After this many replacements in a row without a result for one family, the visitor pauses. */
+inline constexpr int BOARD_FAIL_MAX{4};
+/** How long it pauses. */
+inline constexpr auto BOARD_BACKOFF{std::chrono::hours{1}};
+
 // Limits of the board pool (section 5 of the draft, R-5.5).
 /** Visitors a board holds at most. */
 inline constexpr size_t BOARD_VISITORS_MAX{32};
@@ -163,6 +175,8 @@ struct Options {
     uint16_t port{0};
     /** Whether the node acts as a board for others. */
     bool board{false};
+    /** Boards to connect to besides those found in the address manager (-holepunchboardseed, for tests). */
+    std::vector<CService> board_seeds;
     /** On test networks: accept non-routable addresses, count each peer as
      * its own network group, and compare endpoints where the draft compares
      * addresses (R-2.5). */

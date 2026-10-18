@@ -5,6 +5,8 @@
 """Test TCP hole punching through boards: options, board connections, the feature exchange and the external address."""
 
 from test_framework.messages import (
+    NODE_HOLEPUNCH_BOARD,
+    NODE_P2P_V2,
     msg_feature,
     msg_getaddr,
     msg_inv,
@@ -12,9 +14,13 @@ from test_framework.messages import (
 from test_framework.p2p import P2PInterface
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
+    MAX_NODES,
     assert_equal,
     holepunch_port,
+    p2p_port,
 )
+
+BOARD_SERVICES = NODE_HOLEPUNCH_BOARD | NODE_P2P_V2
 
 HOLEPUNCH_FEATURE_ID = "https://delvingbitcoin.org/t/2497/22"
 FLAG_BOARD = 1 << 0
@@ -77,13 +83,17 @@ class HolePunchPeer(P2PInterface):
 
 class HolePunchTest(BitcoinTestFramework):
     def set_test_params(self):
-        self.num_nodes = 2
+        self.num_nodes = 3
         self.extra_args = [
             # A visitor: it opens board connections from its punch port.
             ["-v2transport=1", "-holepunch=1", f"-holepunchport={holepunch_port(0)}"],
             # A board.
             ["-v2transport=1", "-holepunchboard=1"],
+            # A second visitor, for the back-off test.
+            ["-v2transport=1", "-holepunch=1", f"-holepunchport={holepunch_port(2)}"],
         ]
+        # Board connections are opened by the automatic connection logic.
+        self.disable_autoconnect = False
 
     def setup_network(self):
         self.setup_nodes()
@@ -139,7 +149,7 @@ class HolePunchTest(BitcoinTestFramework):
         node.disconnect_p2ps()
 
     def test_feature_exchange(self):
-        visitor, board = self.nodes
+        visitor, board = self.nodes[0], self.nodes[1]
 
         self.log.info("A visitor sends VISITOR on a board connection and keeps it when the board answers BOARD")
         peer = visitor.add_outbound_p2p_connection(HolePunchPeer(flags=FLAG_BOARD), p2p_idx=0, connection_type="holepunch-board")
@@ -172,7 +182,7 @@ class HolePunchTest(BitcoinTestFramework):
         peer.wait_for_disconnect()
 
     def test_board_connection_protocol(self):
-        visitor, board = self.nodes
+        visitor, board = self.nodes[0], self.nodes[1]
         quiet = ["getaddr", "sendheaders", "getheaders", "sendcmpct", "inv", "feefilter"]
 
         self.log.info("A visitor disables transaction relay and sends nothing but pings after verack")
@@ -209,7 +219,7 @@ class HolePunchTest(BitcoinTestFramework):
         visitor = self.nodes[0]
 
         def external():
-            return visitor.getholepunchinfo()["external"][0]
+            return visitor.getholepunchinfo()["families"][0]
 
         def board(idx, report):
             return visitor.add_outbound_p2p_connection(HolePunchPeer(flags=FLAG_BOARD, report=report), p2p_idx=idx, connection_type="holepunch-board")
@@ -219,7 +229,9 @@ class HolePunchTest(BitcoinTestFramework):
         assert_equal(info["enabled"], True)
         assert_equal(info["board"], False)
         assert_equal(info["port"], holepunch_port(0))
-        assert_equal(external(), {"network": "ipv4", "reporters": 0, "reports": 0, "conflicting": False})
+        assert_equal(external()["reports"], 0)
+        assert_equal(external()["conflicting"], False)
+        assert "address" not in external()
 
         self.log.info("One board's report is not enough, two agreeing boards give the external address")
         board(0, ("1.2.3.4", 5555))
@@ -229,25 +241,90 @@ class HolePunchTest(BitcoinTestFramework):
         assert_equal(external()["address"], "1.2.3.4:5555")
         assert_equal(external()["reporters"], 2)
 
-        self.log.info("A single dissenting board changes nothing, a second agreeing with it drops the address")
-        dissenter1 = board(2, ("1.2.3.4", 6666))
+        self.log.info("A single dissenting board changes nothing")
+        board(2, ("1.2.3.4", 6666))
         assert_equal(external()["address"], "1.2.3.4:5555")
         assert_equal(external()["conflicting"], False)
-        dissenter2 = board(3, ("1.2.3.4", 6666))
-        assert "address" not in external()
-        assert_equal(external()["conflicting"], True)
 
-        self.log.info("Once the dissenters are gone, the address is back")
-        dissenter1.peer_disconnect()
-        dissenter2.peer_disconnect()
-        self.wait_until(lambda: external()["reports"] == 2)
+        self.log.info("A second board agreeing with the dissenter is replaced, and the address stays")
+        dissenter2 = visitor.add_outbound_p2p_connection(HolePunchPeer(flags=FLAG_BOARD, report=("1.2.3.4", 6666)), p2p_idx=3, connection_type="holepunch-board", wait_for_disconnect=True)
+        self.wait_until(lambda: external()["reports"] == 3)
         assert_equal(external()["address"], "1.2.3.4:5555")
+        assert_equal(external()["conflicting"], False)
 
         self.log.info("Ordinary outbound connections do not report")
         visitor.add_outbound_p2p_connection(HolePunchPeer(flags=FLAG_BOARD, report=("9.9.9.9", 1)), p2p_idx=4)
-        assert_equal(external()["reports"], 2)
+        assert_equal(external()["reports"], 3)
         visitor.disconnect_p2ps()
         self.wait_until(lambda: external()["reports"] == 0)
+
+    def listen_as_board(self, idx, flags=FLAG_BOARD):
+        """Listen like a board on the test framework's port for `idx`. Returns the mock
+        and the port; `-holepunchboardseed` points a visitor at it."""
+        peer = HolePunchPeer(flags=flags)
+        peer.peer_accept_connection(connect_cb=lambda address, port: None, connect_id=idx + 1, net=self.chain, timeout_factor=self.options.timeout_factor, supports_v2_p2p=True, reconnect=False, services=BOARD_SERVICES)()
+        return peer, p2p_port(MAX_NODES - (idx + 1))
+
+    def test_board_connections(self):
+        visitor = self.nodes[0]
+
+        def boards():
+            return visitor.getholepunchinfo()["families"][0]["boards"]
+
+        def connected(mocks):
+            return [m for m in mocks if m.is_connected]
+
+        self.log.info("A visitor keeps two board connections per family, from the punch port")
+        listeners = [self.listen_as_board(idx) for idx in range(3)]
+        seeds = [f"-holepunchboardseed=127.0.0.1:{port}" for _, port in listeners]
+        self.restart_node(0, extra_args=self.extra_args[0] + seeds)
+        mocks = [mock for mock, _ in listeners]
+        self.wait_until(lambda: len(connected(mocks)) == 2)
+        for mock in connected(mocks):
+            mock.wait_for_verack()
+        self.wait_until(lambda: len(boards()) == 2)
+        for mock in connected(mocks):
+            assert_equal(mock.dstport, holepunch_port(0))
+        for peer in visitor.getpeerinfo():
+            assert_equal(peer["connection_type"], "holepunch-board")
+            assert_equal(peer["transport_protocol_type"], "v2")
+        for board in boards():
+            assert 5 * 3600 <= board["until"] - board["connected"] <= 7 * 3600
+        # The third board is left alone while two connections are open.
+        connected(mocks)[0].sync_with_ping()
+        assert_equal(len(connected(mocks)), 2)
+        assert_equal(len(boards()), 2)
+
+        self.log.info("A closed board connection is replaced by one to another board")
+        closing = connected(mocks)[0]
+        closing_idx = mocks.index(closing)
+        # Listen again on the closing board's port first, so that either it or the
+        # third board can be picked as the replacement.
+        mocks[closing_idx], _ = self.listen_as_board(closing_idx)
+        closing.peer_disconnect()
+        closing.wait_for_disconnect()
+        self.wait_until(lambda: len(connected(mocks)) == 2)
+        for mock in connected(mocks):
+            mock.wait_for_verack()
+        self.wait_until(lambda: len(boards()) == 2)
+        assert_equal(visitor.getholepunchinfo()["families"][0]["board_fails"], 0)
+        # Forget the seeds before dropping the mocks, so that nothing reconnects to them.
+        self.restart_node(0)
+        for mock in mocks:
+            mock.peer_disconnect()
+
+        self.log.info("After four board connections in a row without a result, a family pauses for an hour")
+        visitor2 = self.nodes[2]
+        family = lambda: visitor2.getholepunchinfo()["families"][0]
+        # A board address nothing listens on: every attempt is refused.
+        self.restart_node(2, extra_args=self.extra_args[2] + [f"-holepunchboardseed=127.0.0.1:{p2p_port(MAX_NODES)}"])
+        self.wait_until(lambda: family()["board_backoff_until"] > 0)
+        assert_equal(family()["board_fails"], 0)
+        paused_until = family()["board_backoff_until"]
+        # Once the pause is over, attempts resume.
+        visitor2.setmocktime(paused_until + 1)
+        self.wait_until(lambda: family()["board_fails"] > 0)
+        visitor2.setmocktime(0)
 
     def test_visitors_outside_inbound_limit(self):
         board = self.nodes[1]
@@ -272,6 +349,7 @@ class HolePunchTest(BitcoinTestFramework):
         self.test_feature_exchange()
         self.test_board_connection_protocol()
         self.test_external_address()
+        self.test_board_connections()
         self.test_visitors_outside_inbound_limit()
 
 

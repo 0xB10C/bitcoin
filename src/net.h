@@ -721,6 +721,9 @@ public:
     //! Unix epoch time at peer connection
     const NodeClock::time_point m_connected;
 
+    /** When a board connection is closed to be replaced by one to another board (R-5.2 of the hole punching draft). */
+    std::atomic<NodeClock::time_point> m_holepunch_board_until{NodeClock::epoch};
+
     //! Proxy to use regardless of global proxy settings if reconnecting to this node.
     const std::optional<Proxy> m_proxy_override;
 
@@ -1493,7 +1496,8 @@ private:
                                  !m_nodes_mutex,
                                  !m_reconnections_mutex,
                                  !m_unused_i2p_sessions_mutex,
-                                 !m_anchors_mutex);
+                                 !m_anchors_mutex,
+                                 !m_holepunch_mutex);
 
     /// \anchor msghand
     void ThreadMessageHandler() EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !mutexMsgProc);
@@ -1607,6 +1611,11 @@ private:
 
     void AddWhitelistPermissionFlags(NetPermissionFlags& flags, std::optional<CNetAddr> addr, const std::vector<NetWhitelistPermissions>& ranges) const;
 
+    struct HolePunchBoardState {
+        int fails{0};
+        NodeClock::time_point backoff_until{NodeClock::epoch};
+    };
+
     /**
      * The local address a board connection or punch attempt to `target` is
      * made from: the wildcard address of the target's family with the punch
@@ -1615,12 +1624,27 @@ private:
      */
     std::optional<CService> HolePunchBindAddress(const CService& target) const;
 
+    /**
+     * Keep BOARDS board connections per family open: close the ones past
+     * their lifetime and open one to a board from the address manager when a
+     * family has fewer than BOARDS, is not pausing, and a slot is free (R-5.2,
+     * R-5.3). Boards are chosen at random among those not already connected
+     * to and not in the network group of the family's other board.
+     * @return true if a connection was attempted.
+     */
+    bool MaybeOpenHolePunchBoardConnection(FastRandomContext& rng)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_unused_i2p_sessions_mutex, !m_holepunch_mutex);
+
+    mutable Mutex m_holepunch_mutex;
+    std::map<Network, HolePunchBoardState> m_holepunch_boards GUARDED_BY(m_holepunch_mutex);
+
 public:
     struct BoardVisitorCounts {
         size_t total{0};
         size_t same_group{0};
         size_t same_address{0};
     };
+
 
     /**
      * Count the board visitors other than `visitor` that are not being
@@ -1636,11 +1660,37 @@ public:
      * version.addr_recv (R-2.1). `node` is the board connection the report
      * came on.
      */
-    void HolePunchReport(const CNode& node, const CService& reported);
+    void HolePunchReport(const CNode& node, const CService& reported) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
     /** Forget the report of a peer that disconnected. */
     void HolePunchForget(NodeId id);
     /** Our external address for `net` (NET_IPV4 or NET_IPV6) and how it was arrived at (R-2.2, R-2.3). */
     holepunch::ExternalAddressTracker::Info GetHolePunchExternalInfo(Network net) const;
+
+    /**
+     * Count a board connection of `family` that ended without a result: refused,
+     * closed before serving anything, or in conflict with the other board's
+     * report. After BOARD_FAIL_MAX in a row the family pauses for BOARD_BACKOFF.
+     */
+    void HolePunchBoardFailed(Network family) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
+    /** A board of `family` yielded a result: the failures in a row are forgotten. */
+    void HolePunchBoardSucceeded(Network family) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
+
+    HolePunchBoardState GetHolePunchBoardState(Network family) const EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
+
+    struct HolePunchBoardInfo {
+        NodeId id;
+        CService addr;
+        NodeClock::time_point connected;
+        NodeClock::time_point until;
+    };
+    /** The open board connections. */
+    std::vector<HolePunchBoardInfo> GetHolePunchBoards() const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+
+    /**
+     * Whether the node can take the connection a session would produce: a
+     * free inbound slot for the responder side (R-5.3, section 9).
+     */
+    bool HolePunchSlotFree() const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
 private:
 
