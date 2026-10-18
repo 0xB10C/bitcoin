@@ -11,6 +11,15 @@ the source refer to it.
 
 This is experimental.
 
+## Before enabling it
+
+Hole punching only works if the NAT in front of the node keeps one local
+port mapped to one external address and port whatever the destination is.
+`contrib/holepunch/nat-check.py` measures that from the host itself, by
+asking a few reachable nodes what address they see it at. Its exit code is
+the verdict: zero if punching can work, one if the NAT maps per
+destination, two if too few peers answered.
+
 ## Visitors
 
 A node that cannot accept incoming connections takes part with

@@ -21,6 +21,9 @@ Utility to generate the pnSeed[] array that is compiled into the client.
 ### [ASMap](/contrib/asmap) ###
 Utilities to analyze and process asmap files.
 
+### [Hole punching](/contrib/holepunch) ###
+Check whether TCP hole punching can work from this host, before enabling `-holepunch`.
+
 Build Tools and Keys
 ---------------------
 
