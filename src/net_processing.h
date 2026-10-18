@@ -74,6 +74,23 @@ struct CNodeStateStats {
     NodeClock::time_point m_last_block_announcement;
 };
 
+/** The state of hole punching that lives in the peer manager, for RPC. */
+struct HolePunchInfo {
+    struct Family {
+        Network net;
+        /** The current key, if one was made. */
+        std::optional<CPubKey> pubkey;
+        /** When the key is replaced at the latest. */
+        NodeClock::time_point key_rotates_at;
+        /** The external address announced under the key, if any. */
+        std::optional<CService> announced;
+    };
+    std::vector<Family> families;
+    size_t table_entries{0};
+    /** Table entries per source group. */
+    std::map<std::vector<unsigned char>, size_t> table_by_source;
+};
+
 struct PeerManagerInfo {
     struct InvBucketInfo {
         size_t backlog_count{0};
@@ -137,6 +154,8 @@ public:
 
     /** Get peer manager info. */
     virtual PeerManagerInfo GetInfo() const = 0;
+
+    virtual HolePunchInfo GetHolePunchInfo() const = 0;
 
     /** Get info about transactions currently being privately broadcast. */
     virtual std::vector<PrivateBroadcast::TxBroadcastInfo> GetPrivateBroadcastInfo() const = 0;

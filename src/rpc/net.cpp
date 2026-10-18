@@ -1226,6 +1226,21 @@ static RPCMethod getholepunchinfo()
                                     }},
                                 {RPCResult::Type::NUM, "board_fails", "Board connections in a row that gave no result"},
                                 {RPCResult::Type::NUM_TIME, "board_backoff_until", "Until when no board connection is opened after repeated failures, 0 if not pausing"},
+                                {RPCResult::Type::STR_HEX, "key", /*optional=*/true, "Our current public key for this family"},
+                                {RPCResult::Type::NUM_TIME, "key_rotates_at", /*optional=*/true, "When the key is replaced at the latest"},
+                                {RPCResult::Type::STR, "announced", /*optional=*/true, "(ip:port) The external address announced under the key"},
+                            }},
+                    }},
+                {RPCResult::Type::OBJ, "table", "The entries learned from boards",
+                    {
+                        {RPCResult::Type::NUM, "entries", "The number of entries"},
+                        {RPCResult::Type::ARR, "sources", "Entries per source group",
+                            {
+                                {RPCResult::Type::OBJ, "", "",
+                                    {
+                                        {RPCResult::Type::STR_HEX, "group", "The source network group"},
+                                        {RPCResult::Type::NUM, "entries", "Entries from boards in that group"},
+                                    }},
                             }},
                     }},
             }},
@@ -1237,7 +1252,9 @@ static RPCMethod getholepunchinfo()
 {
     NodeContext& node = EnsureAnyNodeContext(request.context);
     const CConnman& connman = EnsureConnman(node);
+    const PeerManager& peerman = EnsurePeerman(node);
     const holepunch::Options& options{connman.GetHolePunchOptions()};
+    const HolePunchInfo peerman_info{peerman.GetHolePunchInfo()};
 
     UniValue obj(UniValue::VOBJ);
     obj.pushKV("enabled", options.enabled);
@@ -1267,9 +1284,26 @@ static RPCMethod getholepunchinfo()
         const auto state{connman.GetHolePunchBoardState(net)};
         family.pushKV("board_fails", state.fails);
         family.pushKV("board_backoff_until", TicksSinceEpoch<std::chrono::seconds>(state.backoff_until));
+        for (const auto& fam : peerman_info.families) {
+            if (fam.net != net || !fam.pubkey) continue;
+            family.pushKV("key", HexStr(*fam.pubkey));
+            family.pushKV("key_rotates_at", TicksSinceEpoch<std::chrono::seconds>(fam.key_rotates_at));
+            if (fam.announced) family.pushKV("announced", fam.announced->ToStringAddrPort());
+        }
         families.push_back(std::move(family));
     }
     obj.pushKV("families", std::move(families));
+    UniValue table(UniValue::VOBJ);
+    table.pushKV("entries", peerman_info.table_entries);
+    UniValue sources(UniValue::VARR);
+    for (const auto& [group, entries] : peerman_info.table_by_source) {
+        UniValue source(UniValue::VOBJ);
+        source.pushKV("group", HexStr(group));
+        source.pushKV("entries", entries);
+        sources.push_back(std::move(source));
+    }
+    table.pushKV("sources", std::move(sources));
+    obj.pushKV("table", std::move(table));
     return obj;
 },
     };

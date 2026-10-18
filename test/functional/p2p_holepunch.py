@@ -2,11 +2,20 @@
 # Copyright (c) 2026 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Test TCP hole punching through boards: options, board connections, the feature exchange and the external address."""
+"""Test TCP hole punching through boards: options, board connections, the feature exchange,
+the external address, and announcing to boards."""
 
+import socket
+import time
+
+from test_framework.key import ECKey
 from test_framework.messages import (
+    CAddress,
     NODE_HOLEPUNCH_BOARD,
+    NODE_NETWORK,
     NODE_P2P_V2,
+    NODE_WITNESS,
+    msg_addrv2,
     msg_feature,
     msg_getaddr,
     msg_inv,
@@ -21,6 +30,31 @@ from test_framework.util import (
 )
 
 BOARD_SERVICES = NODE_HOLEPUNCH_BOARD | NODE_P2P_V2
+ENTRY_SERVICES = NODE_NETWORK | NODE_WITNESS | NODE_P2P_V2
+
+
+def new_pubkey():
+    key = ECKey()
+    key.generate()
+    return key.get_pubkey().get_bytes()
+
+
+def punchkey_element(ip, port, pubkey, services=ENTRY_SERVICES, net=CAddress.NET_IPV4):
+    """A PUNCHKEY element announcing `ip:port` under `pubkey`."""
+    addr = CAddress()
+    addr.net = CAddress.NET_PUNCHKEY
+    addr.ip = bytes([net]) + socket.inet_aton(ip) + pubkey
+    addr.port = port
+    addr.nServices = services
+    addr.time = int(time.time())
+    return addr
+
+
+def decode_element(addr):
+    """(ip, port, pubkey) of a PUNCHKEY element with an IPv4 address."""
+    assert_equal(addr.net, CAddress.NET_PUNCHKEY)
+    assert_equal(addr.ip[0], CAddress.NET_IPV4)
+    return socket.inet_ntoa(addr.ip[1:5]), addr.port, addr.ip[5:]
 
 HOLEPUNCH_FEATURE_ID = "https://delvingbitcoin.org/t/2497/22"
 FLAG_BOARD = 1 << 0
@@ -36,12 +70,24 @@ class HolePunchPeer(P2PInterface):
     `data` replaces the feature payload, to send a malformed one. `report` is the (ip, port) it
     reports as the node's address in version.addr_recv."""
 
-    def __init__(self, flags=None, data=None, report=None):
+    def __init__(self, flags=None, data=None, report=None, echo=False):
         super().__init__()
         self.flags = flags
         self.data = data
         self.report = report
+        # Answer every addrv2 with its elements, as a board acknowledges with its live entries.
+        self.echo = echo
         self.features = []
+        self.elements = []
+
+    def on_addrv2(self, message):
+        self.elements.extend(message.addrs)
+        if self.echo:
+            self.send_without_ping(message)
+
+    def announced(self):
+        """(ip, port, pubkey) of the last element the node announced."""
+        return decode_element(self.elements[-1])
 
     def peer_connect_send_version(self, services):
         super().peer_connect_send_version(services)
@@ -326,6 +372,106 @@ class HolePunchTest(BitcoinTestFramework):
         self.wait_until(lambda: family()["board_fails"] > 0)
         visitor2.setmocktime(0)
 
+    def test_announcements(self):
+        visitor = self.nodes[0]
+        self.restart_node(0)
+
+        def family():
+            return visitor.getholepunchinfo()["families"][0]
+
+        def table():
+            return visitor.getholepunchinfo()["table"]
+
+        def board(idx, echo=True, report=("1.2.3.4", 5555)):
+            return visitor.add_outbound_p2p_connection(HolePunchPeer(flags=FLAG_BOARD, report=report, echo=echo), p2p_idx=idx, connection_type="holepunch-board")
+
+        self.log.info("Once the external address is known, a visitor announces it with its key on every board connection")
+        board_a = board(0)
+        board_a.sync_with_ping()
+        assert_equal(board_a.elements, [])
+        assert "key" not in family()
+        board_b = board(1)
+        for mock in (board_a, board_b):
+            mock.wait_until(lambda: len(mock.elements) == 1)
+        ip, port, pubkey = board_a.announced()
+        assert_equal((ip, port), ("1.2.3.4", 5555))
+        assert_equal(len(pubkey), 33)
+        assert pubkey[0] in (2, 3)
+        assert_equal(board_b.announced(), (ip, port, pubkey))
+        assert_equal(board_a.elements[0].nServices & NODE_P2P_V2, NODE_P2P_V2)
+        assert_equal(family()["key"], pubkey.hex())
+        assert_equal(family()["announced"], "1.2.3.4:5555")
+        now = int(time.time())
+        assert 12 * 3600 - 60 <= family()["key_rotates_at"] - now <= 24 * 3600
+
+        self.log.info("Entries a board serves go to the table; our own entry is the acknowledgement and is not stored")
+        others = [("8.8.8.%d" % i, 9000 + i, new_pubkey()) for i in range(1, 4)]
+        board_a.send_and_ping(msg_addrv2())  # an empty answer
+        elements = [punchkey_element(ip, port, key) for ip, port, key in others]
+        elements.append(punchkey_element("1.2.3.4", 5555, pubkey))  # our own, served back
+        elements.append(punchkey_element("1.2.3.4", 5555, new_pubkey()))  # our address under another key
+        elements.append(punchkey_element("5.5.5.5", 5, pubkey))  # our key under another address
+        elements.append(punchkey_element("8.8.8.9", 9009, new_pubkey(), services=NODE_NETWORK))  # no NODE_P2P_V2
+        elements.append(punchkey_element("10.0.0.1", 9010, new_pubkey()))  # routable on regtest
+        msg = msg_addrv2()
+        msg.addrs = elements
+        board_a.send_and_ping(msg)
+        assert_equal(table()["entries"], 4)
+        assert_equal(len(table()["sources"]), 1)
+
+        self.log.info("A visitor never forwards an element")
+        board_b.sync_with_ping()
+        assert_equal(len(board_b.elements), 1)
+
+        self.log.info("An element that is not PUNCHKEY on a board connection disconnects")
+        msg = msg_addrv2()
+        ordinary = CAddress()
+        ordinary.ip, ordinary.port, ordinary.nServices = "8.8.8.8", 8333, NODE_NETWORK
+        msg.addrs = [ordinary]
+        board_a.send_without_ping(msg)
+        board_a.wait_for_disconnect()
+
+        self.log.info("A PUNCHKEY element on an ordinary connection disconnects")
+        peer = visitor.add_p2p_connection(HolePunchPeer(flags=None))
+        msg = msg_addrv2()
+        msg.addrs = [punchkey_element("8.8.8.1", 9001, new_pubkey())]
+        peer.send_without_ping(msg)
+        peer.wait_for_disconnect()
+
+        self.log.info("A board that does not acknowledge the element within BOARD_ACK is replaced")
+        board_c = board(2, echo=False)
+        board_c.wait_until(lambda: len(board_c.elements) == 1)
+        fails = family()["board_fails"]
+        visitor.setmocktime(int(time.time()) + 61)
+        board_c.wait_for_disconnect()
+        assert_equal(family()["board_fails"], fails + 1)
+        board_b.sync_with_ping()  # acknowledged, stays
+        visitor.setmocktime(0)
+
+        self.log.info("A new external address is announced under a new key, with the other family's key untouched")
+        visitor.disconnect_p2ps()
+        self.wait_until(lambda: family()["reports"] == 0)
+        board_d = board(3, report=("1.2.3.5", 5555))
+        board_e = board(4, report=("1.2.3.5", 5555))
+        for mock in (board_d, board_e):
+            mock.wait_until(lambda: len(mock.elements) == 1)
+        ip, port, pubkey2 = board_d.announced()
+        assert_equal((ip, port), ("1.2.3.5", 5555))
+        assert pubkey2 != pubkey
+        assert_equal(family()["key"], pubkey2.hex())
+        assert "key" not in visitor.getholepunchinfo()["families"][1]
+
+        self.log.info("A key is replaced at the latest after KEY_ROTATE, and announced again")
+        visitor.setmocktime(family()["key_rotates_at"] + 1)
+        for mock in (board_d, board_e):
+            mock.wait_until(lambda: len(mock.elements) == 2)
+        ip, port, pubkey3 = board_d.announced()
+        assert_equal((ip, port), ("1.2.3.5", 5555))
+        assert pubkey3 != pubkey2
+        assert_equal(board_e.announced(), (ip, port, pubkey3))
+        visitor.setmocktime(0)
+        visitor.disconnect_p2ps()
+
     def test_visitors_outside_inbound_limit(self):
         board = self.nodes[1]
         self.log.info("Visitors do not take inbound slots at a board")
@@ -350,6 +496,7 @@ class HolePunchTest(BitcoinTestFramework):
         self.test_board_connection_protocol()
         self.test_external_address()
         self.test_board_connections()
+        self.test_announcements()
         self.test_visitors_outside_inbound_limit()
 
 

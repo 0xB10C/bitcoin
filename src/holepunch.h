@@ -49,6 +49,11 @@ inline constexpr int BOARD_FAIL_MAX{4};
 /** How long it pauses. */
 inline constexpr auto BOARD_BACKOFF{std::chrono::hours{1}};
 
+/** How long a visitor waits for the board's answer to its element (R-5.3). */
+inline constexpr auto BOARD_ACK{std::chrono::seconds{60}};
+/** Elements processed from one peer per hour at most (R-5.10). */
+inline constexpr uint32_t PUNCHKEY_PER_HOUR{240};
+
 // Limits of the board pool (section 5 of the draft, R-5.5).
 /** Visitors a board holds at most. */
 inline constexpr size_t BOARD_VISITORS_MAX{32};

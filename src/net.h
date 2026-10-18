@@ -1663,6 +1663,11 @@ public:
     void HolePunchReport(const CNode& node, const CService& reported) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
     /** Forget the report of a peer that disconnected. */
     void HolePunchForget(NodeId id);
+    /**
+     * The network group of `node` as a source of hole punching entries (R-5.4).
+     * On test networks every peer is its own group (R-2.5).
+     */
+    std::vector<unsigned char> GetHolePunchGroup(const CNode& node) const;
     /** Our external address for `net` (NET_IPV4 or NET_IPV6) and how it was arrived at (R-2.2, R-2.3). */
     holepunch::ExternalAddressTracker::Info GetHolePunchExternalInfo(Network net) const;
 

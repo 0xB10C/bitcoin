@@ -4006,6 +4006,14 @@ void CConnman::HolePunchForget(NodeId id)
     m_holepunch_external.RemovePeer(id);
 }
 
+std::vector<unsigned char> CConnman::GetHolePunchGroup(const CNode& node) const
+{
+    if (!m_holepunch.allow_local) return m_netgroupman.GetGroup(node.addr);
+    std::vector<unsigned char> group;
+    for (int i = 0; i < 8; ++i) group.push_back(static_cast<unsigned char>(node.GetId() >> (8 * i)));
+    return group;
+}
+
 holepunch::ExternalAddressTracker::Info CConnman::GetHolePunchExternalInfo(Network net) const
 {
     return m_holepunch_external.GetInfo(net);

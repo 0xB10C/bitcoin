@@ -292,6 +292,15 @@ struct Peer {
     std::atomic<uint32_t> m_holepunch_flags_sent{0};
     /** Hole punching feature flags this peer sent us, 0 if none. */
     std::atomic<uint32_t> m_holepunch_flags_received{0};
+    /** On a board connection we opened: the element we last sent (R-5.3). */
+    std::optional<holepunch::PunchKey> m_holepunch_sent GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
+    /** When it was sent. */
+    NodeClock::time_point m_holepunch_sent_at GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
+    /** Whether the board answered with our own entry since then. */
+    bool m_holepunch_acked GUARDED_BY(NetEventsInterface::g_msgproc_mutex){false};
+    /** Elements received from this peer in the hour that began at m_punchkey_hour (R-5.10). */
+    uint32_t m_punchkey_count GUARDED_BY(NetEventsInterface::g_msgproc_mutex){0};
+    NodeClock::time_point m_punchkey_hour GUARDED_BY(NetEventsInterface::g_msgproc_mutex){};
     /** The feerate in the most recent BIP133 `feefilter` message sent to the peer.
      *  It is *not* a p2p protocol violation for the peer to send us
      *  transactions with a lower fee rate than this. See BIP133. */
@@ -599,9 +608,9 @@ public:
     void FinalizeNode(const CNode& node) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_headers_presync_mutex, !m_tx_download_mutex);
     bool HasAllDesirableServiceFlags(ServiceFlags services) const override;
     bool ProcessMessages(CNode& node, std::atomic<bool>& interrupt) override
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_holepunch_mutex);
     bool SendMessages(CNode& node) override
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_holepunch_mutex);
 
     /** Implement PeerManager */
     void StartScheduledTasks(CScheduler& scheduler) override;
@@ -611,6 +620,7 @@ public:
     bool GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     std::vector<node::TxOrphanage::OrphanInfo> GetOrphanTransactions() override EXCLUSIVE_LOCKS_REQUIRED(!m_tx_download_mutex);
     PeerManagerInfo GetInfo() const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_inv_to_send_mutex);
+    HolePunchInfo GetHolePunchInfo() const override EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
     std::vector<PrivateBroadcast::TxBroadcastInfo> GetPrivateBroadcastInfo() const override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     std::vector<CTransactionRef> AbortPrivateBroadcast(const uint256& id) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void SendPings() override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
@@ -628,7 +638,7 @@ public:
 private:
     void ProcessMessage(Peer& peer, CNode& pfrom, const std::string& msg_type, DataStream& vRecv, NodeClock::time_point time_received,
                         const std::atomic<bool>& interruptMsgProc)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, !m_most_recent_block_mutex, !m_headers_presync_mutex, g_msgproc_mutex, !m_tx_download_mutex, !m_inv_to_send_mutex, !m_holepunch_mutex);
 
     /** Consider evicting an outbound peer based on the amount of time they've been behind our tip */
     void ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seconds time_in_seconds) EXCLUSIVE_LOCKS_REQUIRED(cs_main, g_msgproc_mutex);
@@ -904,6 +914,33 @@ private:
      * a board and sent VISITOR while we sent BOARD.
      */
     bool IsBoardConnection(const CNode& node, const Peer& peer) const;
+
+    /** One address family's key (section 4 of the draft). */
+    struct HolePunchFamily {
+        CKey key;
+        /** When the key is replaced at the latest (R-4.3). */
+        NodeClock::time_point rotate_at;
+        /** The external address announced under `key`; a change replaces the key (R-4.3). */
+        std::optional<CService> announced;
+    };
+    mutable Mutex m_holepunch_mutex;
+    std::map<Network, HolePunchFamily> m_holepunch_families GUARDED_BY(m_holepunch_mutex);
+    /** The entries learned from boards (section 6). */
+    holepunch::Table m_holepunch_table;
+
+    /** The key for `family`, made or rotated as needed. */
+    CKey HolePunchKey(Network family, NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(m_holepunch_mutex);
+    /**
+     * What we announce for `family` now: our external address and the key
+     * for it, or nothing without an external address (R-2.4, R-5.3).
+     */
+    std::optional<holepunch::PunchKey> HolePunchAnnouncement(Network family, NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
+    /** Whether an element names one of our keys or external addresses, so it is about us. */
+    bool IsOwnHolePunchEntry(const holepunch::PunchKey& key) EXCLUSIVE_LOCKS_REQUIRED(!m_holepunch_mutex);
+    /** Send our element on a board connection when it changed, and replace the board when it does not acknowledge it (R-5.3). */
+    void MaybeAnnounceToBoard(CNode& node, Peer& peer, NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_holepunch_mutex);
+    /** Elements a board sent us (R-5.4, R-5.10). */
+    void ProcessBoardElements(CNode& pfrom, Peer& peer, const std::vector<CAddress>& elements) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_holepunch_mutex);
 
     /** Whether we've completed initial sync yet, for determining when to turn
       * on extra block-relay-only peers. */
@@ -4440,6 +4477,10 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
         std::vector<CAddress> vAddr;
         vRecv >> ser_params(vAddr);
+        if (IsBoardConnection(pfrom, peer)) {
+            ProcessBoardElements(pfrom, peer, vAddr);
+            return;
+        }
         ProcessAddrs(msg_type, pfrom, peer, std::move(vAddr), interruptMsgProc);
         return;
     }
@@ -5992,6 +6033,125 @@ bool PeerManagerImpl::IsBoardConnection(const CNode& node, const Peer& peer) con
     return node.IsInboundConn() && (sent & holepunch::FeatureData::FLAG_BOARD) && (received & holepunch::FeatureData::FLAG_VISITOR);
 }
 
+CKey PeerManagerImpl::HolePunchKey(Network family, NodeClock::time_point now)
+{
+    AssertLockHeld(m_holepunch_mutex);
+    auto& fam{m_holepunch_families[family]};
+    if (!fam.key.IsValid() || now >= fam.rotate_at) {
+        // A fresh key per family, replaced at least every KEY_ROTATE at a time
+        // not aligned across nodes or with the other family (R-4.1 to R-4.3).
+        fam.key.MakeNewKey(/*fCompressed=*/true);
+        FastRandomContext rng;
+        fam.rotate_at = rng.rand_uniform_delay(now + holepunch::KEY_ROTATE / 2, holepunch::KEY_ROTATE / 2);
+        fam.announced.reset();
+        LogDebug(BCLog::HOLEPUNCH, "new %s key %s, rotating by %s", GetNetworkName(family), HexStr(fam.key.GetPubKey()), FormatISO8601DateTime(TicksSinceEpoch<std::chrono::seconds>(fam.rotate_at)));
+    }
+    return fam.key;
+}
+
+std::optional<holepunch::PunchKey> PeerManagerImpl::HolePunchAnnouncement(Network family, NodeClock::time_point now)
+{
+    const auto external{m_connman.GetHolePunchExternalInfo(family).address};
+    if (!external) return std::nullopt;
+    LOCK(m_holepunch_mutex);
+    auto& fam{m_holepunch_families[family]};
+    // A new address is never announced under a key seen with the old one (R-4.3).
+    if (fam.announced && *fam.announced != *external) fam.rotate_at = now;
+    const CKey key{HolePunchKey(family, now)};
+    fam.announced = external;
+    return holepunch::PunchKey{.endpoint = *external, .pubkey = key.GetPubKey(), .services = m_connman.GetLocalServices()};
+}
+
+bool PeerManagerImpl::IsOwnHolePunchEntry(const holepunch::PunchKey& key)
+{
+    LOCK(m_holepunch_mutex);
+    for (const auto& [net, fam] : m_holepunch_families) {
+        if (fam.key.IsValid() && fam.key.GetPubKey() == key.pubkey) return true;
+        if (fam.announced && *fam.announced == key.endpoint) return true;
+    }
+    return false;
+}
+
+void PeerManagerImpl::MaybeAnnounceToBoard(CNode& node, Peer& peer, NodeClock::time_point now)
+{
+    AssertLockHeld(g_msgproc_mutex);
+    const Network family{node.addr.IsIPv4() ? NET_IPV4 : NET_IPV6};
+    const auto announcement{HolePunchAnnouncement(family, now)};
+    if (!announcement) return;
+    if (!peer.m_holepunch_sent || peer.m_holepunch_sent->endpoint != announcement->endpoint || peer.m_holepunch_sent->pubkey != announcement->pubkey) {
+        LogDebug(BCLog::HOLEPUNCH, "announcing %s with key %s to board peer=%d", announcement->endpoint.ToStringAddrPort(), HexStr(announcement->pubkey), node.GetId());
+        MakeAndPushMessage(node, NetMsgType::ADDRV2, CAddress::V2_NETWORK(std::vector<CAddress>{announcement->ToAddress(std::chrono::time_point_cast<std::chrono::seconds>(now))}));
+        peer.m_holepunch_sent = announcement;
+        peer.m_holepunch_sent_at = now;
+        peer.m_holepunch_acked = false;
+    } else if (!peer.m_holepunch_acked && now - peer.m_holepunch_sent_at > holepunch::BOARD_ACK) {
+        // The board did not store our element, usually because it saw another endpoint (R-5.3).
+        LogDebug(BCLog::HOLEPUNCH, "board did not acknowledge our element, %s", node.DisconnectMsg());
+        m_connman.HolePunchBoardFailed(family);
+        node.fDisconnect = true;
+    }
+}
+
+void PeerManagerImpl::ProcessBoardElements(CNode& pfrom, Peer& peer, const std::vector<CAddress>& elements)
+{
+    AssertLockHeld(g_msgproc_mutex);
+    const auto now{NodeClock::now()};
+    const bool allow_local{m_connman.GetHolePunchOptions().allow_local};
+    if (now - peer.m_punchkey_hour >= std::chrono::hours{1}) {
+        peer.m_punchkey_hour = now;
+        peer.m_punchkey_count = 0;
+    }
+    for (const CAddress& element : elements) {
+        if (!element.IsPunchKey()) {
+            LogDebug(BCLog::HOLEPUNCH, "element that is not PUNCHKEY on a board connection, %s", pfrom.DisconnectMsg());
+            pfrom.fDisconnect = true;
+            return;
+        }
+        // Every element counts towards the rate, accepted or not (R-5.10).
+        if (++peer.m_punchkey_count > holepunch::PUNCHKEY_PER_HOUR) continue;
+        const auto key{holepunch::PunchKey::FromAddress(element, allow_local)};
+        if (!key) continue; // rejected by R-5.1
+        // Our own entry served back is the board's acknowledgement (R-5.3).
+        if (pfrom.IsHolePunchBoardConn() && peer.m_holepunch_sent && peer.m_holepunch_sent->endpoint == key->endpoint && peer.m_holepunch_sent->pubkey == key->pubkey) {
+            if (!peer.m_holepunch_acked) {
+                peer.m_holepunch_acked = true;
+                m_connman.HolePunchBoardSucceeded(key->endpoint.IsIPv4() ? NET_IPV4 : NET_IPV6);
+                LogDebug(BCLog::HOLEPUNCH, "board peer=%d acknowledged our element", pfrom.GetId());
+            }
+            continue;
+        }
+        if (IsOwnHolePunchEntry(*key)) continue;
+        if (!pfrom.IsHolePunchBoardConn()) continue; // a board stores nothing in its table
+        const Network family{key->endpoint.IsIPv4() ? NET_IPV4 : NET_IPV6};
+        const auto secret{WITH_LOCK(m_holepunch_mutex, return HolePunchKey(family, now)).ECDHX(key->pubkey)};
+        if (!secret) continue; // the point at infinity (R-4.4)
+        if (m_holepunch_table.Add(m_connman.GetHolePunchGroup(pfrom), *key, *secret, now, allow_local)) {
+            LogDebug(BCLog::HOLEPUNCH, "stored entry %s with key %s from board peer=%d", key->endpoint.ToStringAddrPort(), HexStr(key->pubkey), pfrom.GetId());
+        }
+    }
+}
+
+HolePunchInfo PeerManagerImpl::GetHolePunchInfo() const
+{
+    HolePunchInfo info;
+    {
+        LOCK(m_holepunch_mutex);
+        for (const Network net : {NET_IPV4, NET_IPV6}) {
+            HolePunchInfo::Family family{.net = net, .pubkey = std::nullopt, .key_rotates_at = {}, .announced = std::nullopt};
+            const auto it{m_holepunch_families.find(net)};
+            if (it != m_holepunch_families.end() && it->second.key.IsValid()) {
+                family.pubkey = it->second.key.GetPubKey();
+                family.key_rotates_at = it->second.rotate_at;
+                family.announced = it->second.announced;
+            }
+            info.families.push_back(family);
+        }
+    }
+    info.table_entries = m_holepunch_table.Size();
+    info.table_by_source = m_holepunch_table.SizeBySource();
+    return info;
+}
+
 bool PeerManagerImpl::RejectIncomingTxs(const CNode& peer) const
 {
     // block-relay-only peers may never send txs to us
@@ -6097,6 +6257,13 @@ void PeerManagerImpl::ProcessAddrs(std::string_view msg_type, CNode& pfrom, Peer
 
     if (!SetupAddressRelay(pfrom, peer)) {
         LogDebug(BCLog::NET, "ignoring %s message from %s peer=%d\n", msg_type, pfrom.ConnectionTypeAsString(), pfrom.GetId());
+        return;
+    }
+
+    // Hole punching elements travel on board connections only (R-3.6).
+    if (std::any_of(vAddr.begin(), vAddr.end(), [](const CAddress& a) { return a.IsPunchKey(); })) {
+        LogDebug(BCLog::HOLEPUNCH, "PUNCHKEY element on an ordinary connection, %s", pfrom.DisconnectMsg());
+        pfrom.fDisconnect = true;
         return;
     }
 
@@ -6225,7 +6392,10 @@ bool PeerManagerImpl::SendMessages(CNode& node)
 
     // A board connection carries nothing of what follows: no address relay,
     // no headers, no block or transaction announcements (R-3.5).
-    if (IsBoardConnection(node, peer)) return true;
+    if (IsBoardConnection(node, peer)) {
+        if (node.IsHolePunchBoardConn()) MaybeAnnounceToBoard(node, peer, now);
+        return true;
+    }
 
     MaybeSendAddr(node, peer, current_time);
 
