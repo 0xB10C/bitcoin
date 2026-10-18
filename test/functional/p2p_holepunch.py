@@ -2,14 +2,56 @@
 # Copyright (c) 2026 The Bitcoin Core developers
 # Distributed under the MIT software license, see the accompanying
 # file COPYING or http://www.opensource.org/licenses/mit-license.php.
-"""Test TCP hole punching through boards: options and board connections."""
+"""Test TCP hole punching through boards: options, board connections and the feature exchange."""
 
+from test_framework.messages import msg_feature
 from test_framework.p2p import P2PInterface
 from test_framework.test_framework import BitcoinTestFramework
 from test_framework.util import (
     assert_equal,
     holepunch_port,
 )
+
+HOLEPUNCH_FEATURE_ID = "https://delvingbitcoin.org/t/2497/22"
+FLAG_BOARD = 1 << 0
+FLAG_VISITOR = 1 << 1
+
+
+def feature_data(flags, version=0):
+    return version.to_bytes(1, "little") + flags.to_bytes(4, "little")
+
+
+class HolePunchPeer(P2PInterface):
+    """A test peer that sends the hole punching feature with `flags` before verack, or nothing if None.
+    `data` replaces the feature payload, to send a malformed one."""
+
+    def __init__(self, flags=None, data=None):
+        super().__init__()
+        self.flags = flags
+        self.data = data
+        self.features = []
+
+    def on_feature(self, message):
+        self.features.append(message)
+
+    def on_version(self, message):
+        # Our version has to go out before the feature. P2PInterface sends it in
+        # on_version for accepted connections; doing it here first makes its own
+        # call a no-op.
+        if not self.p2p_connected_to_node:
+            self.send_version()
+        if self.data is not None:
+            self.send_without_ping(msg_feature(HOLEPUNCH_FEATURE_ID, self.data))
+        elif self.flags is not None:
+            self.send_without_ping(msg_feature(HOLEPUNCH_FEATURE_ID, feature_data(self.flags)))
+        super().on_version(message)
+
+    def holepunch_flags(self):
+        """The flags the node sent in its hole punching feature, None if it sent none."""
+        for m in self.features:
+            if m.feature_id == HOLEPUNCH_FEATURE_ID:
+                return int.from_bytes(m.feature_data[1:5], "little")
+        return None
 
 
 class HolePunchTest(BitcoinTestFramework):
@@ -57,7 +99,7 @@ class HolePunchTest(BitcoinTestFramework):
         # For a connection accepted by a test peer, dstport is the node's source port as
         # the peer sees it: the port that version.addr_recv will report back.
         self.log.info("Board connections are made from the punch port")
-        board = node.add_outbound_p2p_connection(P2PInterface(), p2p_idx=0, connection_type="holepunch-board")
+        board = node.add_outbound_p2p_connection(HolePunchPeer(flags=FLAG_BOARD), p2p_idx=0, connection_type="holepunch-board")
         assert_equal(board.dstport, punch_port)
         peers = node.getpeerinfo()
         assert_equal(len(peers), 1)
@@ -69,15 +111,49 @@ class HolePunchTest(BitcoinTestFramework):
         assert full.dstport != punch_port
 
         self.log.info("Several board connections share the punch port")
-        board2 = node.add_outbound_p2p_connection(P2PInterface(), p2p_idx=2, connection_type="holepunch-board")
+        board2 = node.add_outbound_p2p_connection(HolePunchPeer(flags=FLAG_BOARD), p2p_idx=2, connection_type="holepunch-board")
         assert_equal(board2.dstport, punch_port)
         assert_equal(len([p for p in node.getpeerinfo() if p["connection_type"] == "holepunch-board"]), 2)
 
         node.disconnect_p2ps()
 
+    def test_feature_exchange(self):
+        visitor, board = self.nodes
+
+        self.log.info("A visitor sends VISITOR on a board connection and keeps it when the board answers BOARD")
+        peer = visitor.add_outbound_p2p_connection(HolePunchPeer(flags=FLAG_BOARD), p2p_idx=0, connection_type="holepunch-board")
+        assert_equal(peer.holepunch_flags(), FLAG_VISITOR)
+        assert_equal(visitor.getpeerinfo()[0]["holepunch_flags"], ["BOARD"])
+        visitor.disconnect_p2ps()
+
+        self.log.info("A visitor closes a board connection whose peer does not answer BOARD")
+        for flags in [None, 0, FLAG_VISITOR]:
+            peer = visitor.add_outbound_p2p_connection(HolePunchPeer(flags=flags), p2p_idx=0, connection_type="holepunch-board", wait_for_disconnect=True)
+            assert_equal(peer.holepunch_flags(), FLAG_VISITOR)
+
+        self.log.info("A visitor sends no feature on an ordinary outbound connection")
+        peer = visitor.add_outbound_p2p_connection(HolePunchPeer(flags=FLAG_BOARD), p2p_idx=0)
+        assert_equal(peer.holepunch_flags(), None)
+        assert_equal(visitor.getpeerinfo()[0]["holepunch_flags"], ["BOARD"])
+        visitor.disconnect_p2ps()
+
+        self.log.info("A board answers BOARD to a visitor, and sends it on every other connection too")
+        peer = board.add_p2p_connection(HolePunchPeer(flags=FLAG_VISITOR))
+        assert_equal(peer.holepunch_flags(), FLAG_BOARD)
+        assert_equal(board.getpeerinfo()[0]["holepunch_flags"], ["VISITOR"])
+        peer2 = board.add_p2p_connection(HolePunchPeer(flags=None))
+        assert_equal(peer2.holepunch_flags(), FLAG_BOARD)
+        assert_equal(board.getpeerinfo()[1]["holepunch_flags"], [])
+        board.disconnect_p2ps()
+
+        self.log.info("Malformed feature data disconnects")
+        peer = board.add_p2p_connection(HolePunchPeer(data=b"\x00\x01"), wait_for_verack=False)
+        peer.wait_for_disconnect()
+
     def run_test(self):
         self.test_options()
         self.test_board_connection_port()
+        self.test_feature_exchange()
 
 
 if __name__ == '__main__':

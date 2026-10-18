@@ -315,6 +315,8 @@ inline constexpr size_t MAX_FEATUREDATA_LENGTH{512};
 
 namespace NetMsgFeature {
 //inline constexpr std::string_view FOO{"BIP-FOO"};
+/** TCP hole punching through boards; the discussion thread until a BIP number is assigned. */
+inline constexpr std::string_view HOLEPUNCH{"https://delvingbitcoin.org/t/2497/22"};
 }
 
 /** nServices flags */

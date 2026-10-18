@@ -21,6 +21,7 @@
 #include <deploymentstatus.h>
 #include <flatfile.h>
 #include <headerssync.h>
+#include <holepunch.h>
 #include <index/blockfilterindex.h>
 #include <kernel/types.h>
 #include <logging.h>
@@ -59,6 +60,7 @@
 #include <util/check.h>
 #include <util/hasher.h>
 #include <util/strencodings.h>
+#include <util/string.h>
 #include <util/time.h>
 #include <util/tokenbucket.h>
 #include <util/trace.h>
@@ -285,6 +287,11 @@ struct Peer {
 
     /** Whether this peer relays txs via wtxid */
     std::atomic<bool> m_wtxid_relay{false};
+
+    /** Hole punching feature flags we sent to this peer, 0 if we sent none. */
+    std::atomic<uint32_t> m_holepunch_flags_sent{0};
+    /** Hole punching feature flags this peer sent us, 0 if none. */
+    std::atomic<uint32_t> m_holepunch_flags_received{0};
     /** The feerate in the most recent BIP133 `feefilter` message sent to the peer.
      *  It is *not* a p2p protocol violation for the peer to send us
      *  transactions with a lower fee rate than this. See BIP133. */
@@ -882,6 +889,21 @@ private:
     const Options m_opts;
 
     bool RejectIncomingTxs(const CNode& peer) const;
+
+    /**
+     * Send the hole punching feature to a peer if we have something to say
+     * on this connection: VISITOR on a board connection we opened, BOARD
+     * when we act as a board (R-3.1). Nothing is sent on connections that
+     * close right after the handshake (R-3.4).
+     */
+    void MaybePushHolePunchFeature(CNode& node, Peer& peer) const;
+
+    /**
+     * Whether this is a board connection (R-3.5): we opened it as one and
+     * sent VISITOR and the peer sent BOARD, or the peer connected to us as
+     * a board and sent VISITOR while we sent BOARD.
+     */
+    bool IsBoardConnection(const CNode& node, const Peer& peer) const;
 
     /** Whether we've completed initial sync yet, for determining when to turn
       * on extra block-relay-only peers. */
@@ -1952,6 +1974,7 @@ bool PeerManagerImpl::GetNodeStateStats(NodeId nodeid, CNodeStateStats& stats) c
     stats.m_addr_processed = peer->m_addr_processed.load();
     stats.m_addr_rate_limited = peer->m_addr_rate_limited.load();
     stats.m_addr_relay_enabled = peer->m_addr_relay_enabled.load();
+    stats.m_holepunch_flags = peer->m_holepunch_flags_received.load();
     {
         LOCK(peer->m_headers_sync_mutex);
         if (peer->m_headers_sync) {
@@ -3997,6 +4020,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         if (greatest_common_version >= FEATURE_VERSION) {
             // announce supported features
             // MakeAndPushFeature(pfrom, NetMsgFeature::FOO, uint32_t{1});
+            MaybePushHolePunchFeature(pfrom, peer);
         }
 
         // If we have too many tx-relaying inbound peers, attempt to evict an existing one.
@@ -4155,6 +4179,12 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         }
 
         pfrom.fSuccessfullyConnected = true;
+
+        // A board connection is of no use unless the board said it is one (R-3.5).
+        if (pfrom.IsHolePunchBoardConn() && !IsBoardConnection(pfrom, peer)) {
+            LogDebug(BCLog::HOLEPUNCH, "peer did not act as a board, %s", pfrom.DisconnectMsg());
+            pfrom.fDisconnect = true;
+        }
         return;
     }
 
@@ -4256,6 +4286,24 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
         //     ...
         //     return;
         // }
+
+        if (feature_id == NetMsgFeature::HOLEPUNCH) {
+            holepunch::FeatureData data;
+            try {
+                feature_data >> data;
+            } catch (const std::exception&) {
+                feature_data.clear();
+                feature_data << uint8_t{0}; // use leftover data as error indicator
+            }
+            if (!feature_data.empty()) {
+                LogDebug(BCLog::HOLEPUNCH, "invalid hole punching feature data, %s", pfrom.DisconnectMsg());
+                pfrom.fDisconnect = true;
+                return;
+            }
+            peer.m_holepunch_flags_received = data.flags;
+            LogDebug(BCLog::HOLEPUNCH, "peer=%d supports hole punching version %d, flags %s", pfrom.GetId(), data.version, util::Join(holepunch::FeatureFlagNames(data.flags), ","));
+            return;
+        }
 
         // ignore unknown feature_id
         LogDebug(BCLog::NET, "unknown feature advertised: %s", SanitizeString(feature_id));
@@ -5870,6 +5918,27 @@ void PeerManagerImpl::MaybeSendFeefilter(CNode& pto, Peer& peer, std::chrono::mi
                 (currentFilter < 3 * peer.m_fee_filter_sent / 4 || currentFilter > 4 * peer.m_fee_filter_sent / 3)) {
         peer.m_next_send_feefilter = current_time + m_rng.randrange<std::chrono::microseconds>(MAX_FEEFILTER_CHANGE_DELAY);
     }
+}
+
+void PeerManagerImpl::MaybePushHolePunchFeature(CNode& node, Peer& peer) const
+{
+    if (node.IsFeelerConn() || node.IsAddrFetchConn() || node.IsPrivateBroadcastConn()) return;
+    uint32_t flags{0};
+    if (node.IsHolePunchBoardConn()) flags |= holepunch::FeatureData::FLAG_VISITOR;
+    if (m_connman.GetHolePunchOptions().board) flags |= holepunch::FeatureData::FLAG_BOARD;
+    if (flags == 0) return;
+    peer.m_holepunch_flags_sent = flags;
+    MakeAndPushFeature(node, NetMsgFeature::HOLEPUNCH, holepunch::FeatureData{.flags = flags});
+}
+
+bool PeerManagerImpl::IsBoardConnection(const CNode& node, const Peer& peer) const
+{
+    const uint32_t sent{peer.m_holepunch_flags_sent.load()};
+    const uint32_t received{peer.m_holepunch_flags_received.load()};
+    if (node.IsHolePunchBoardConn()) {
+        return (sent & holepunch::FeatureData::FLAG_VISITOR) && (received & holepunch::FeatureData::FLAG_BOARD);
+    }
+    return node.IsInboundConn() && (sent & holepunch::FeatureData::FLAG_BOARD) && (received & holepunch::FeatureData::FLAG_VISITOR);
 }
 
 bool PeerManagerImpl::RejectIncomingTxs(const CNode& peer) const

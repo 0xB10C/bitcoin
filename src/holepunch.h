@@ -7,11 +7,13 @@
 
 #include <netaddress.h>
 #include <random.h>
+#include <serialize.h>
 #include <sync.h>
 
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <string>
 #include <vector>
 
 /**
@@ -43,6 +45,27 @@ struct Options {
      * addresses (R-2.5). */
     bool allow_local{false};
 };
+
+/** Payload of the BIP 434 feature message for hole punching (R-3.1). */
+struct FeatureData {
+    /** The sender acts as a board. */
+    static constexpr uint32_t FLAG_BOARD{1 << 0};
+    /** The sender opened this connection as a board connection and will announce on it. */
+    static constexpr uint32_t FLAG_VISITOR{1 << 1};
+
+    /** The highest version the sender supports; the lower of the two is used (R-3.2). */
+    uint8_t version{0};
+    /** Flags; unknown bits are ignored. */
+    uint32_t flags{0};
+
+    SERIALIZE_METHODS(FeatureData, obj)
+    {
+        READWRITE(obj.version, obj.flags);
+    }
+};
+
+/** Names of the set feature flags, for logs and RPC. */
+std::vector<std::string> FeatureFlagNames(uint32_t flags);
 
 /** The wildcard address of `family` (NET_IPV4 or NET_IPV6) with `port`. */
 CService WildcardAddress(Network family, uint16_t port);

@@ -20,6 +20,14 @@ static Network Family(const CNetAddr& addr)
     return NET_UNROUTABLE;
 }
 
+std::vector<std::string> FeatureFlagNames(uint32_t flags)
+{
+    std::vector<std::string> names;
+    if (flags & FeatureData::FLAG_BOARD) names.push_back("BOARD");
+    if (flags & FeatureData::FLAG_VISITOR) names.push_back("VISITOR");
+    return names;
+}
+
 CService WildcardAddress(Network family, uint16_t port)
 {
     if (family == NET_IPV4) {

@@ -66,6 +66,8 @@ struct CNodeStateStats {
     uint64_t m_addr_processed = 0;
     uint64_t m_addr_rate_limited = 0;
     bool m_addr_relay_enabled{false};
+    /** Hole punching feature flags the peer sent, 0 if none. */
+    uint32_t m_holepunch_flags{0};
     ServiceFlags their_services;
     int64_t presync_height{-1};
     std::chrono::seconds time_offset{0};

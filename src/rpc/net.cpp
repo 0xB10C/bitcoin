@@ -19,6 +19,7 @@
 #include <netaddress.h>
 #include <netbase.h>
 #include <netgroup.h>
+#include <holepunch.h>
 #include <node/connection_types.h>
 #include <node/context.h>
 #include <node/protocol_version.h>
@@ -197,6 +198,10 @@ static RPCMethod getpeerinfo()
                         {RPCResult::Type::NUM, "n", "The heights of blocks we're currently asking from this peer"},
                     }},
                     {RPCResult::Type::BOOL, "addr_relay_enabled", "Whether we participate in address relay with this peer"},
+                    {RPCResult::Type::ARR, "holepunch_flags", "The hole punching feature flags the peer sent (BOARD, VISITOR)",
+                    {
+                        {RPCResult::Type::STR, "flag", ""},
+                    }},
                     {RPCResult::Type::NUM, "addr_processed", "The total number of addresses processed, excluding those dropped due to rate limiting"},
                     {RPCResult::Type::NUM, "addr_rate_limited", "The total number of addresses dropped due to rate limiting"},
                     {RPCResult::Type::ARR, "permissions", "Any special permissions that have been granted to this peer",
@@ -305,6 +310,9 @@ static RPCMethod getpeerinfo()
         }
         obj.pushKV("inflight", std::move(heights));
         obj.pushKV("addr_relay_enabled", statestats.m_addr_relay_enabled);
+        UniValue holepunch_flags(UniValue::VARR);
+        for (const auto& name : holepunch::FeatureFlagNames(statestats.m_holepunch_flags)) holepunch_flags.push_back(name);
+        obj.pushKV("holepunch_flags", std::move(holepunch_flags));
         obj.pushKV("addr_processed", statestats.m_addr_processed);
         obj.pushKV("addr_rate_limited", statestats.m_addr_rate_limited);
         UniValue permissions(UniValue::VARR);

@@ -159,6 +159,7 @@ class NetTest(BitcoinTestFramework):
                 "bytesrecv_per_msg": {},
                 "bytessent_per_msg": {},
                 "connection_type": "inbound",
+                "holepunch_flags": [],
                 "conntime": no_version_peer_conntime,
                 "id": no_version_peer_id,
                 "inbound": True,
