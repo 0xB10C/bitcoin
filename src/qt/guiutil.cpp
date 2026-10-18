@@ -694,6 +694,7 @@ QString NetworkToQString(Network net)
     //: Name of CJDNS network in peer info
     case NET_CJDNS: return QObject::tr("CJDNS", "network name");
     case NET_INTERNAL: return "Internal";  // should never actually happen
+    case NET_PUNCHKEY: return "PunchKey";  // should never actually happen
     case NET_MAX: assert(false);
     } // no default case, so the compiler can warn about missing cases
     assert(false);

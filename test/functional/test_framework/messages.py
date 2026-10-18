@@ -302,13 +302,16 @@ class CAddress:
     NET_TORV3 = 4
     NET_I2P = 5
     NET_CJDNS = 6
+    # A hole punching announcement; `ip` holds the raw 38 or 50 address bytes.
+    NET_PUNCHKEY = 9
 
     ADDRV2_NET_NAME = {
         NET_IPV4: "IPv4",
         NET_IPV6: "IPv6",
         NET_TORV3: "TorV3",
         NET_I2P: "I2P",
-        NET_CJDNS: "CJDNS"
+        NET_CJDNS: "CJDNS",
+        NET_PUNCHKEY: "PunchKey",
     }
 
     ADDRV2_ADDRESS_LENGTH = {
@@ -366,10 +369,15 @@ class CAddress:
         assert self.net in self.ADDRV2_NET_NAME
 
         address_length = deser_compact_size(f)
-        assert_equal(address_length, self.ADDRV2_ADDRESS_LENGTH[self.net])
+        if self.net == self.NET_PUNCHKEY:
+            assert address_length in (38, 50)
+        else:
+            assert_equal(address_length, self.ADDRV2_ADDRESS_LENGTH[self.net])
 
         addr_bytes = f.read(address_length)
-        if self.net == self.NET_IPV4:
+        if self.net == self.NET_PUNCHKEY:
+            self.ip = addr_bytes
+        elif self.net == self.NET_IPV4:
             self.ip = socket.inet_ntoa(addr_bytes)
         elif self.net == self.NET_IPV6:
             self.ip = socket.inet_ntop(socket.AF_INET6, addr_bytes)
@@ -394,8 +402,14 @@ class CAddress:
         r += self.time.to_bytes(4, "little")
         r += ser_compact_size(self.nServices)
         r += self.net.to_bytes(1, "little")
-        r += ser_compact_size(self.ADDRV2_ADDRESS_LENGTH[self.net])
-        if self.net == self.NET_IPV4:
+        if self.net == self.NET_PUNCHKEY:
+            r += ser_compact_size(len(self.ip))
+            r += self.ip
+        else:
+            r += ser_compact_size(self.ADDRV2_ADDRESS_LENGTH[self.net])
+        if self.net == self.NET_PUNCHKEY:
+            pass
+        elif self.net == self.NET_IPV4:
             r += socket.inet_aton(self.ip)
         elif self.net == self.NET_IPV6:
             r += socket.inet_pton(socket.AF_INET6, self.ip)

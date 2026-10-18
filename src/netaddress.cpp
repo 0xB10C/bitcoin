@@ -37,6 +37,8 @@ CNetAddr::BIP155Network CNetAddr::GetBIP155Network() const
         return BIP155Network::I2P;
     case NET_CJDNS:
         return BIP155Network::CJDNS;
+    case NET_PUNCHKEY:
+        return BIP155Network::PUNCHKEY;
     case NET_INTERNAL:   // should have been handled before calling this function
     case NET_UNROUTABLE: // m_net is never and should not be set to NET_UNROUTABLE
     case NET_MAX:        // m_net is never and should not be set to NET_MAX
@@ -89,6 +91,14 @@ bool CNetAddr::SetNetFromBIP155Network(uint8_t possible_bip155_net, size_t addre
         throw std::ios_base::failure(
             strprintf("BIP155 CJDNS address with length %u (should be %u)", address_size,
                       ADDR_CJDNS_SIZE));
+    case BIP155Network::PUNCHKEY:
+        if (address_size == ADDR_PUNCHKEY_IPV4_SIZE || address_size == ADDR_PUNCHKEY_IPV6_SIZE) {
+            m_net = NET_PUNCHKEY;
+            return true;
+        }
+        // An element of another length is dropped on its own, like one with an
+        // unknown network id, without failing the message it came in.
+        break;
     }
 
     // Don't throw on addresses with unknown network ids (maybe from the future).
@@ -125,6 +135,9 @@ void CNetAddr::SetIP(const CNetAddr& ipIn)
         break;
     case NET_INTERNAL:
         assert(ipIn.m_addr.size() == ADDR_INTERNAL_SIZE);
+        break;
+    case NET_PUNCHKEY:
+        assert(ipIn.m_addr.size() == ADDR_PUNCHKEY_IPV4_SIZE || ipIn.m_addr.size() == ADDR_PUNCHKEY_IPV6_SIZE);
         break;
     case NET_UNROUTABLE:
     case NET_MAX:
@@ -446,6 +459,10 @@ bool CNetAddr::IsValid() const
     if (IsInternal())
         return false;
 
+    // Not an address on any network.
+    if (IsPunchKey())
+        return false;
+
     if (IsIPv4()) {
         const uint32_t addr = ReadBE32(m_addr.data());
         if (addr == INADDR_ANY || addr == INADDR_NONE) {
@@ -490,6 +507,7 @@ bool CNetAddr::IsAddrV1Compatible() const
     case NET_ONION:
     case NET_I2P:
     case NET_CJDNS:
+    case NET_PUNCHKEY:
         return false;
     case NET_UNROUTABLE: // m_net is never and should not be set to NET_UNROUTABLE
     case NET_MAX:        // m_net is never and should not be set to NET_MAX
@@ -498,6 +516,16 @@ bool CNetAddr::IsAddrV1Compatible() const
 
     assert(false);
 }
+
+CNetAddr CNetAddr::PunchKey(std::span<const uint8_t> bytes)
+{
+    assert(bytes.size() == ADDR_PUNCHKEY_IPV4_SIZE || bytes.size() == ADDR_PUNCHKEY_IPV6_SIZE);
+    CNetAddr addr;
+    addr.m_net = NET_PUNCHKEY;
+    addr.m_addr.assign(bytes.begin(), bytes.end());
+    return addr;
+}
+
 
 enum Network CNetAddr::GetNetwork() const
 {
@@ -583,6 +611,17 @@ std::string OnionToString(std::span<const uint8_t> addr)
     return EncodeBase32(address) + ".onion";
 }
 
+//! A PUNCHKEY element as "<address>/<pubkey hex>".
+static std::string PunchKeyToString(std::span<const uint8_t> a)
+{
+    const std::span<const uint8_t> addr{a.subspan(1, a.size() - 1 - 33)};
+    const std::span<const uint8_t> pubkey{a.subspan(a.size() - 33)};
+    const std::string addr_str{addr.size() == ADDR_IPV4_SIZE ? IPv4ToString(addr) :
+                               addr.size() == ADDR_IPV6_SIZE ? IPv6ToString(addr, 0) :
+                               HexStr(addr)};
+    return strprintf("%s/%s", addr_str, HexStr(pubkey));
+}
+
 std::string CNetAddr::ToStringAddr() const
 {
     switch (m_net) {
@@ -598,6 +637,8 @@ std::string CNetAddr::ToStringAddr() const
         return IPv6ToString(m_addr, 0);
     case NET_INTERNAL:
         return EncodeBase32(m_addr) + ".internal";
+    case NET_PUNCHKEY:
+        return PunchKeyToString(m_addr);
     case NET_UNROUTABLE: // m_net is never and should not be set to NET_UNROUTABLE
     case NET_MAX:        // m_net is never and should not be set to NET_MAX
         assert(false);
@@ -1010,6 +1051,7 @@ CSubNet::CSubNet(const CNetAddr& addr) : CSubNet()
         valid = true;
         break;
     case NET_INTERNAL:
+    case NET_PUNCHKEY:
     case NET_UNROUTABLE:
     case NET_MAX:
         return;
@@ -1036,6 +1078,7 @@ bool CSubNet::Match(const CNetAddr &addr) const
     case NET_CJDNS:
     case NET_INTERNAL:
         return addr == network;
+    case NET_PUNCHKEY:
     case NET_UNROUTABLE:
     case NET_MAX:
         return false;
@@ -1075,6 +1118,7 @@ std::string CSubNet::ToString() const
     case NET_I2P:
     case NET_CJDNS:
     case NET_INTERNAL:
+    case NET_PUNCHKEY:
     case NET_UNROUTABLE:
     case NET_MAX:
         break;

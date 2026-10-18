@@ -121,6 +121,7 @@ std::string GetNetworkName(enum Network net)
     case NET_I2P: return "i2p";
     case NET_CJDNS: return "cjdns";
     case NET_INTERNAL: return "internal";
+    case NET_PUNCHKEY: return "punchkey";
     case NET_MAX: assert(false);
     } // no default case, so the compiler can warn about missing cases
 
@@ -132,7 +133,7 @@ std::vector<std::string> GetNetworkNames(bool append_unroutable)
     std::vector<std::string> names;
     for (int n = 0; n < NET_MAX; ++n) {
         const enum Network network{static_cast<Network>(n)};
-        if (network == NET_UNROUTABLE || network == NET_INTERNAL) continue;
+        if (network == NET_UNROUTABLE || network == NET_INTERNAL || network == NET_PUNCHKEY) continue;
         names.emplace_back(GetNetworkName(network));
     }
     if (append_unroutable) {

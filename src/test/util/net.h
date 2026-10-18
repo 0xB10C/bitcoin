@@ -160,6 +160,7 @@ inline constexpr auto ALL_NETWORKS = std::array{
     Network::NET_I2P,
     Network::NET_CJDNS,
     Network::NET_INTERNAL,
+    Network::NET_PUNCHKEY,
 };
 
 /**

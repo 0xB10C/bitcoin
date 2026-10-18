@@ -53,6 +53,11 @@ enum Network {
     /// them in AddrMan to keep track of which DNS seeds were used.
     NET_INTERNAL,
 
+    /// A hole punching announcement: an IPv4 or IPv6 endpoint with the
+    /// announcer's public key (draft BIP "Coordinator-less TCP Hole
+    /// Punching"). Not an address on any network; never valid or routable.
+    NET_PUNCHKEY,
+
     /// Dummy value to indicate the number of NET_* constants.
     NET_MAX,
 };
@@ -101,6 +106,11 @@ inline constexpr size_t ADDR_CJDNS_SIZE = 16;
 /// Size of "internal" (NET_INTERNAL) address (in bytes).
 inline constexpr size_t ADDR_INTERNAL_SIZE = 10;
 
+/// Sizes of a PUNCHKEY element's address (in bytes): a network id byte, an
+/// IPv4 or IPv6 address and a 33-byte compressed public key.
+inline constexpr size_t ADDR_PUNCHKEY_IPV4_SIZE = 1 + ADDR_IPV4_SIZE + 33;
+inline constexpr size_t ADDR_PUNCHKEY_IPV6_SIZE = 1 + ADDR_IPV6_SIZE + 33;
+
 /// SAM 3.1 and earlier do not support specifying ports and force the port to 0.
 inline constexpr uint16_t I2P_SAM31_PORT{0};
 
@@ -145,6 +155,13 @@ public:
     bool SetInternal(const std::string& name);
 
     /**
+     * A PUNCHKEY element from its address bytes: a network id byte, an IPv4
+     * or IPv6 address and a compressed public key (ADDR_PUNCHKEY_IPV4_SIZE
+     * or ADDR_PUNCHKEY_IPV6_SIZE bytes in total).
+     */
+    static CNetAddr PunchKey(std::span<const uint8_t> bytes);
+
+    /**
      * Parse a Tor or I2P address and set this object to it.
      * @param[in] addr Address to parse, for example
      * pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion or
@@ -176,6 +193,7 @@ public:
     [[nodiscard]] bool IsTor() const { return m_net == NET_ONION; }
     [[nodiscard]] bool IsI2P() const { return m_net == NET_I2P; }
     [[nodiscard]] bool IsCJDNS() const { return m_net == NET_CJDNS; }
+    [[nodiscard]] bool IsPunchKey() const { return m_net == NET_PUNCHKEY; }
     [[nodiscard]] bool HasCJDNSPrefix() const { return m_addr[0] == CJDNS_PREFIX; }
     bool IsLocal() const;
     bool IsRoutable() const;
@@ -268,6 +286,7 @@ public:
         TORV3 = 4,
         I2P = 5,
         CJDNS = 6,
+        PUNCHKEY = 9,
     };
 
     friend class CSubNet;
@@ -346,13 +365,14 @@ private:
         case NET_ONION:
         case NET_I2P:
         case NET_CJDNS:
+        case NET_PUNCHKEY:
             break;
         case NET_UNROUTABLE:
         case NET_MAX:
             assert(false);
         } // no default case, so the compiler can warn about missing cases
 
-        // Serialize ONION, I2P and CJDNS as all-zeros.
+        // Serialize ONION, I2P, CJDNS and PUNCHKEY as all-zeros.
         memset(arr, 0x0, V1_SERIALIZATION_SIZE);
     }
 
