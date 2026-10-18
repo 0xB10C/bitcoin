@@ -31,6 +31,13 @@ class HolePunchPeer(P2PInterface):
         self.data = data
         self.features = []
 
+    def peer_connect_send_version(self, services):
+        super().peer_connect_send_version(services)
+        # A visitor's version has transaction relay disabled (R-3.5). The other test
+        # peers do the same, so that the cap on tx-relaying inbound peers stays out
+        # of the way when inbound slots are counted.
+        self.on_connection_send_msg.relay = 0
+
     def on_feature(self, message):
         self.features.append(message)
 
@@ -150,10 +157,28 @@ class HolePunchTest(BitcoinTestFramework):
         peer = board.add_p2p_connection(HolePunchPeer(data=b"\x00\x01"), wait_for_verack=False)
         peer.wait_for_disconnect()
 
+    def test_visitors_outside_inbound_limit(self):
+        board = self.nodes[1]
+        self.log.info("Visitors do not take inbound slots at a board")
+        # Room for two inbound connections next to the automatic outbound ones.
+        self.restart_node(1, extra_args=self.extra_args[1] + ["-maxconnections=13"])
+        for _ in range(2):
+            board.add_p2p_connection(HolePunchPeer(flags=FLAG_VISITOR))
+        for _ in range(2):
+            board.add_p2p_connection(HolePunchPeer(flags=None))
+        assert_equal(len(board.getpeerinfo()), 4)
+        # The inbound slots are full now: the next ordinary connection is dropped,
+        # and the visitors are not evicted to make room.
+        board.add_p2p_connection(HolePunchPeer(flags=None), wait_for_verack=False, expect_success=False)
+        assert_equal(len(board.getpeerinfo()), 4)
+        assert_equal(len([p for p in board.getpeerinfo() if p["holepunch_flags"] == ["VISITOR"]]), 2)
+        board.disconnect_p2ps()
+
     def run_test(self):
         self.test_options()
         self.test_board_connection_port()
         self.test_feature_exchange()
+        self.test_visitors_outside_inbound_limit()
 
 
 if __name__ == '__main__':

@@ -1720,6 +1720,9 @@ bool CConnman::AttemptToEvictConnection(bool evict_tx_relay_peer_only, std::opti
             if (evict_tx_relay_peer_only && !node->m_relays_txs) {
                 continue;
             }
+            if (node->m_board_visitor) {
+                continue;
+            }
             NodeEvictionCandidate candidate{
                 .id = node->GetId(),
                 .m_connected = node->m_connected,
@@ -1808,7 +1811,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
     {
         LOCK(m_nodes_mutex);
         for (const CNode* pnode : m_nodes) {
-            if (pnode->IsInboundConn()) nInbound++;
+            if (pnode->IsInboundConn() && !pnode->m_board_visitor) nInbound++;
         }
     }
 

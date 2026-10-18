@@ -905,6 +905,12 @@ public:
      *  eviction logic. */
     std::atomic_bool m_bloom_filter_loaded{false};
 
+    /** Whether this inbound connection is a board connection from a hole
+     *  punching visitor. Set by net_processing once the visitor's feature
+     *  is accepted. Such a connection is kept apart from the inbound limit
+     *  and is never an eviction candidate (R-5.5 of the draft). */
+    std::atomic_bool m_board_visitor{false};
+
     /// UNIX epoch time of the last block received from this peer that we had
     /// not yet seen (e.g. not already received from another peer), that passed
     /// preliminary validity checks and was saved to disk, even if we don't

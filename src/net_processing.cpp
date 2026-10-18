@@ -4302,6 +4302,10 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             }
             peer.m_holepunch_flags_received = data.flags;
             LogDebug(BCLog::HOLEPUNCH, "peer=%d supports hole punching version %d, flags %s", pfrom.GetId(), data.version, util::Join(holepunch::FeatureFlagNames(data.flags), ","));
+            if (pfrom.IsInboundConn() && IsBoardConnection(pfrom, peer)) {
+                // A visitor's connection leaves the inbound limit from here on.
+                pfrom.m_board_visitor = true;
+            }
             return;
         }
 
