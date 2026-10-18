@@ -6084,6 +6084,9 @@ CKey PeerManagerImpl::HolePunchKey(Network family, NodeClock::time_point now)
         fam.rotate_at = rng.rand_uniform_delay(now + holepunch::KEY_ROTATE / 2, holepunch::KEY_ROTATE / 2);
         fam.announced.reset();
         LogDebug(BCLog::HOLEPUNCH, "new %s key %s, rotating by %s", GetNetworkName(family), HexStr(fam.key.GetPubKey()), FormatISO8601DateTime(TicksSinceEpoch<std::chrono::seconds>(fam.rotate_at)));
+        // The entries' peers will pair on the new key as soon as the announcement
+        // reaches them, so the stored secrets have to follow it (R-4.3).
+        m_holepunch_table.Rekey(family, fam.key);
     }
     return fam.key;
 }

@@ -181,6 +181,21 @@ void Table::Remove(const CService& endpoint, const CPubKey& pubkey)
     std::erase_if(m_entries, [&](const Entry& e) { return e.key.endpoint == endpoint && e.key.pubkey == pubkey; });
 }
 
+void Table::Rekey(Network family, const CKey& key)
+{
+    LOCK(m_mutex);
+    size_t rekeyed{0};
+    std::erase_if(m_entries, [&](Entry& entry) {
+        if (Family(entry.key.endpoint) != family) return false;
+        const auto secret{key.ECDHX(entry.key.pubkey)};
+        if (!secret) return true;
+        entry.secret = *secret;
+        ++rekeyed;
+        return false;
+    });
+    if (rekeyed > 0) LogDebug(BCLog::HOLEPUNCH, "recomputed the shared secret of %d %s entries for the new key\n", rekeyed, GetNetworkName(family));
+}
+
 void Table::Expire(NodeClock::time_point now)
 {
     LOCK(m_mutex);

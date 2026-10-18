@@ -186,6 +186,16 @@ public:
     /** Remove an entry, as a pick does (R-6.5). */
     void Remove(const CService& endpoint, const CPubKey& pubkey) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 
+    /**
+     * Recompute the shared secret of every entry of `family` with `key`, which
+     * the node MUST do when it replaces that family's key (R-4.3): the entry's
+     * peer will compute with the new public key as soon as the announcement
+     * reaches it, and a secret left over from the old key would make the two
+     * sides disagree on every pair value. An entry whose product is the point
+     * at infinity is dropped (R-4.4). `received_at` is kept.
+     */
+    void Rekey(Network family, const CKey& key) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
     /** Drop expired entries (R-6.4). */
     void Expire(NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
 

@@ -505,6 +505,48 @@ BOOST_AUTO_TEST_CASE(table_refresh_and_replace)
     BOOST_CHECK_EQUAL(table.Size(), 0);
 }
 
+BOOST_AUTO_TEST_CASE(table_rekey)
+{
+    using namespace std::chrono_literals;
+    Table table;
+    const NodeClock::time_point t0{NodeClock::now()};
+    CKey old_key{KeyOf(PARTY_A)};
+    CKey new_key;
+    new_key.MakeNewKey(true);
+
+    const PunchKey ipv4{MakeKey("203.0.113.1:50001")};
+    const PunchKey ipv6{.endpoint = LookupNumeric("[2001:db8::1]:50002", 0), .pubkey = PubKeyOf(PARTY_B), .services = ENTRY_SERVICES};
+    BOOST_CHECK(table.Add(BOARD_1, ipv4, *old_key.ECDHX(ipv4.pubkey), t0, /*allow_local=*/true));
+    BOOST_CHECK(table.Add(BOARD_1, ipv6, *old_key.ECDHX(ipv6.pubkey), t0, /*allow_local=*/true));
+
+    // Replacing the IPv4 key recomputes that family's secrets and leaves IPv6 alone (R-4.3).
+    table.Rekey(NET_IPV4, new_key);
+    const auto entries{table.Eligible(t0 + 1min, t0 + 1min)};
+    BOOST_REQUIRE_EQUAL(entries.size(), 2);
+    for (const Entry& entry : entries) {
+        const bool is_ipv4{entry.key.endpoint.IsIPv4()};
+        const CKey& expected{is_ipv4 ? new_key : old_key};
+        BOOST_CHECK(entry.secret == *expected.ECDHX(entry.key.pubkey));
+        // The entry keeps its place in the queue for rounds.
+        BOOST_CHECK(entry.received_at == t0);
+    }
+
+    // An entry with no product is dropped (R-4.4). A stored entry always carries a
+    // valid key, since R-5.1 rejects anything else, so this only happens to an
+    // entry whose key is not a point at all.
+    PunchKey broken{ipv4};
+    broken.endpoint = LookupNumeric("203.0.113.9:50009", 0);
+    broken.pubkey = CPubKey{ParseHex<unsigned char>("020000000000000000000000000000000000000000000000000000000000000005")};
+    BOOST_CHECK(!broken.pubkey.IsFullyValid());
+    BOOST_CHECK(table.Add(BOARD_1, broken, uint256::ZERO, t0, /*allow_local=*/true));
+    BOOST_CHECK_EQUAL(table.Size(), 3);
+    table.Rekey(NET_IPV4, old_key);
+    BOOST_CHECK_EQUAL(table.Size(), 2);
+    for (const Entry& entry : table.Eligible(t0 + 1min, t0 + 1min)) {
+        BOOST_CHECK(entry.key.pubkey.IsFullyValid());
+    }
+}
+
 BOOST_AUTO_TEST_CASE(table_caps)
 {
     using namespace std::chrono_literals;
