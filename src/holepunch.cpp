@@ -5,9 +5,12 @@
 #include <holepunch.h>
 
 #include <compat/compat.h>
+#include <hash.h>
 #include <logging.h>
 #include <netbase.h>
+#include <streams.h>
 
+#include <algorithm>
 #include <set>
 
 namespace holepunch {
@@ -18,6 +21,182 @@ static Network Family(const CNetAddr& addr)
     if (addr.IsIPv4()) return NET_IPV4;
     if (addr.IsIPv6()) return NET_IPV6;
     return NET_UNROUTABLE;
+}
+
+std::string RoleName(Role role)
+{
+    return role == Role::INITIATOR ? "initiator" : "responder";
+}
+
+std::optional<PunchKey> PunchKey::FromAddress(const CAddress& addr, bool allow_local)
+{
+    if (!addr.IsPunchKey()) return std::nullopt;
+    const std::vector<unsigned char> bytes{addr.GetAddrBytes()};
+    if (bytes.size() != ADDR_PUNCHKEY_IPV4_SIZE && bytes.size() != ADDR_PUNCHKEY_IPV6_SIZE) return std::nullopt;
+    const std::span<const unsigned char> address{bytes.data() + 1, bytes.size() - 1 - CPubKey::COMPRESSED_SIZE};
+    const std::span<const unsigned char> pubkey_bytes{bytes.data() + bytes.size() - CPubKey::COMPRESSED_SIZE, CPubKey::COMPRESSED_SIZE};
+
+    CNetAddr net_addr;
+    if (bytes[0] == CNetAddr::BIP155Network::IPV4 && address.size() == ADDR_IPV4_SIZE) {
+        in_addr ipv4;
+        memcpy(&ipv4, address.data(), sizeof(ipv4));
+        net_addr = CNetAddr{ipv4};
+    } else if (bytes[0] == CNetAddr::BIP155Network::IPV6 && address.size() == ADDR_IPV6_SIZE) {
+        in6_addr ipv6;
+        memcpy(&ipv6, address.data(), sizeof(ipv6));
+        net_addr = CNetAddr{ipv6};
+        // An IPv4-mapped address is not an IPv6 endpoint (R-1.4).
+        if (!net_addr.IsIPv6()) return std::nullopt;
+    } else {
+        return std::nullopt;
+    }
+
+    PunchKey key{.endpoint = CService{net_addr, addr.GetPort()}, .pubkey = CPubKey{pubkey_bytes}, .services = addr.nServices};
+    if (!IsWellFormedEndpoint(key.endpoint)) return std::nullopt;
+    if (!allow_local && !key.endpoint.IsRoutable()) return std::nullopt;
+    if (!key.pubkey.IsCompressed() || !key.pubkey.IsFullyValid()) return std::nullopt;
+    if (!(key.services & NODE_P2P_V2)) return std::nullopt;
+    return key;
+}
+
+CAddress PunchKey::ToAddress(NodeSeconds time) const
+{
+    std::vector<uint8_t> bytes;
+    if (endpoint.IsIPv4()) {
+        in_addr ipv4;
+        const bool ok{endpoint.GetInAddr(&ipv4)};
+        assert(ok);
+        bytes.push_back(CNetAddr::BIP155Network::IPV4);
+        bytes.insert(bytes.end(), reinterpret_cast<const uint8_t*>(&ipv4), reinterpret_cast<const uint8_t*>(&ipv4) + sizeof(ipv4));
+    } else {
+        in6_addr ipv6;
+        const bool ok{endpoint.GetIn6Addr(&ipv6)};
+        assert(ok);
+        bytes.push_back(CNetAddr::BIP155Network::IPV6);
+        bytes.insert(bytes.end(), reinterpret_cast<const uint8_t*>(&ipv6), reinterpret_cast<const uint8_t*>(&ipv6) + sizeof(ipv6));
+    }
+    bytes.insert(bytes.end(), pubkey.begin(), pubkey.end());
+    return CAddress{CService{CNetAddr::PunchKey(bytes), endpoint.GetPort()}, services, time};
+}
+
+std::vector<uint8_t> EncodeEndpoint(const CService& endpoint)
+{
+    DataStream ss;
+    ss << CNetAddr::V2(endpoint);
+    return {UCharCast(ss.data()), UCharCast(ss.data()) + ss.size()};
+}
+
+uint256 PairValue(const uint256& x, const uint256& block_hash, const CService& ep_a, const CService& ep_b)
+{
+    std::vector<uint8_t> first{EncodeEndpoint(ep_a)};
+    std::vector<uint8_t> second{EncodeEndpoint(ep_b)};
+    if (second < first) std::swap(first, second);
+    HashWriter writer{TaggedHash("tcp-holepunch/pair")};
+    writer << x << block_hash;
+    writer.write(MakeByteSpan(first));
+    writer.write(MakeByteSpan(second));
+    return writer.GetSHA256();
+}
+
+Role RoleFor(const uint256& pair, const CPubKey& own, const CPubKey& other)
+{
+    const bool smaller_key_initiates{(pair.data()[31] & 1) == 0};
+    const bool own_is_smaller{own < other};
+    return own_is_smaller == smaller_key_initiates ? Role::INITIATOR : Role::RESPONDER;
+}
+
+//! Whether two endpoints name the same host: the same address, or with `by_endpoint` the same address and port.
+static bool SameAddress(const CService& a, const CService& b, bool by_endpoint)
+{
+    return by_endpoint ? a == b : static_cast<const CNetAddr&>(a) == static_cast<const CNetAddr&>(b);
+}
+
+size_t Table::CountSource(const std::vector<unsigned char>& source) const
+{
+    return std::count_if(m_entries.begin(), m_entries.end(), [&](const Entry& e) { return e.source == source; });
+}
+
+template <typename Pred>
+void Table::EvictOne(NodeClock::time_point now, Pred pred)
+{
+    std::vector<size_t> candidates;
+    for (size_t i = 0; i < m_entries.size(); ++i) {
+        if (!pred(m_entries[i])) continue;
+        if (m_entries[i].Expired(now)) {
+            m_entries.erase(m_entries.begin() + i);
+            return;
+        }
+        candidates.push_back(i);
+    }
+    assert(!candidates.empty());
+    m_entries.erase(m_entries.begin() + candidates[m_rng.randrange(candidates.size())]);
+}
+
+bool Table::Add(const std::vector<unsigned char>& source, const PunchKey& key, const uint256& secret, NodeClock::time_point now, bool allow_local)
+{
+    LOCK(m_mutex);
+    for (Entry& entry : m_entries) {
+        if (entry.key.endpoint == key.endpoint && entry.key.pubkey == key.pubkey) {
+            // A refresh: last_seen moves, received_at stays (R-6.1).
+            entry.key.services = key.services;
+            entry.last_seen = now;
+            return false;
+        }
+    }
+    // The same board's entry for the same address under another key is replaced (R-6.1).
+    std::erase_if(m_entries, [&](const Entry& e) { return e.source == source && SameAddress(e.key.endpoint, key.endpoint, allow_local); });
+
+    if (CountSource(source) >= SOURCE_CAP) {
+        EvictOne(now, [&](const Entry& e) { return e.source == source; });
+    } else if (m_entries.size() >= TABLE_MAX) {
+        std::map<std::vector<unsigned char>, size_t> sizes;
+        for (const Entry& e : m_entries) ++sizes[e.source];
+        const auto largest{std::max_element(sizes.begin(), sizes.end(), [](const auto& a, const auto& b) { return a.second < b.second; })->first};
+        // An expired entry anywhere goes first, else a random one of the largest group.
+        if (std::any_of(m_entries.begin(), m_entries.end(), [&](const Entry& e) { return e.Expired(now); })) {
+            EvictOne(now, [](const Entry&) { return true; });
+        } else {
+            EvictOne(now, [&](const Entry& e) { return e.source == largest; });
+        }
+    }
+    m_entries.push_back(Entry{.key = key, .secret = secret, .source = source, .received_at = now, .last_seen = now});
+    return true;
+}
+
+std::vector<Entry> Table::Eligible(NodeClock::time_point now, NodeClock::time_point parent_time) const
+{
+    LOCK(m_mutex);
+    std::vector<Entry> out;
+    for (const Entry& e : m_entries) {
+        if (!e.Expired(now) && e.received_at < parent_time) out.push_back(e);
+    }
+    return out;
+}
+
+void Table::Remove(const CService& endpoint, const CPubKey& pubkey)
+{
+    LOCK(m_mutex);
+    std::erase_if(m_entries, [&](const Entry& e) { return e.key.endpoint == endpoint && e.key.pubkey == pubkey; });
+}
+
+void Table::Expire(NodeClock::time_point now)
+{
+    LOCK(m_mutex);
+    std::erase_if(m_entries, [&](const Entry& e) { return e.Expired(now); });
+}
+
+size_t Table::Size() const
+{
+    LOCK(m_mutex);
+    return m_entries.size();
+}
+
+std::map<std::vector<unsigned char>, size_t> Table::SizeBySource() const
+{
+    LOCK(m_mutex);
+    std::map<std::vector<unsigned char>, size_t> sizes;
+    for (const Entry& e : m_entries) ++sizes[e.source];
+    return sizes;
 }
 
 std::vector<std::string> FeatureFlagNames(uint32_t flags)

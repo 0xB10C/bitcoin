@@ -5,11 +5,17 @@
 #ifndef BITCOIN_HOLEPUNCH_H
 #define BITCOIN_HOLEPUNCH_H
 
+#include <key.h>
 #include <netaddress.h>
+#include <protocol.h>
+#include <pubkey.h>
 #include <random.h>
 #include <serialize.h>
 #include <sync.h>
+#include <uint256.h>
+#include <util/time.h>
 
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -38,6 +44,115 @@ inline constexpr size_t BOARD_VISITORS_MAX{32};
 inline constexpr size_t BOARD_PER_GROUP{4};
 /** Visitors from one address a board holds at most. */
 inline constexpr size_t BOARD_IP_CAP{1};
+
+// Limits of the table (section 6 of the draft).
+/** Entries kept per source group at most (R-6.2). */
+inline constexpr size_t SOURCE_CAP{64};
+/** Entries kept in total at most (R-6.3). */
+inline constexpr size_t TABLE_MAX{1024};
+/** An entry expires this long after it was last seen (R-6.4). */
+inline constexpr auto ENTRY_TTL{std::chrono::hours{1}};
+/** A family's key is replaced at least this often (R-4.3). */
+inline constexpr auto KEY_ROTATE{std::chrono::hours{24}};
+
+/** Role of a node in a session (R-4.7). The initiator sends the first bytes. */
+enum class Role : uint8_t {
+    RESPONDER = 0,
+    INITIATOR = 1,
+};
+std::string RoleName(Role role);
+
+/** The content of a PUNCHKEY element (section 5 of the draft). */
+struct PunchKey {
+    /** The announcer's external address and port. */
+    CService endpoint;
+    /** The announcer's current key for the endpoint's family. */
+    CPubKey pubkey;
+    /** The announcer's services. */
+    ServiceFlags services{NODE_NONE};
+
+    /**
+     * Parse an element, applying R-5.1: an IPv4 or IPv6 endpoint that is
+     * routable (or anything with `allow_local`) with a port, a valid
+     * compressed key, and services with NODE_P2P_V2. Nullopt if rejected.
+     */
+    static std::optional<PunchKey> FromAddress(const CAddress& addr, bool allow_local);
+    /** The element to send. `time` carries no meaning for receivers (R-5.3). */
+    CAddress ToAddress(NodeSeconds time) const;
+};
+
+/**
+ * The encoding of an endpoint in the pair value (Terminology): a BIP 155
+ * element without time and services.
+ */
+std::vector<uint8_t> EncodeEndpoint(const CService& endpoint);
+
+/**
+ * The pair value (R-4.5) of two nodes with the shared secret `x` for the
+ * block with `block_hash`; the same from both sides, since the endpoints
+ * are sorted. Ranked as 256-bit integers, lower first (R-4.6).
+ */
+uint256 PairValue(const uint256& x, const uint256& block_hash, const CService& ep_a, const CService& ep_b);
+
+/** The role of the node with key `own` towards the node with key `other` for a pair value (R-4.7). */
+Role RoleFor(const uint256& pair, const CPubKey& own, const CPubKey& other);
+
+/** A stored announcement (section 6 of the draft). */
+struct Entry {
+    PunchKey key;
+    /** The shared secret with the announcer (R-4.4), computed once when stored. */
+    uint256 secret;
+    /** The network group of the board that served the entry (R-5.4). */
+    std::vector<unsigned char> source;
+    /** When the entry was first received; a refresh keeps it (R-6.1). */
+    NodeClock::time_point received_at;
+    /** When an element for the entry was last received (R-6.4). */
+    NodeClock::time_point last_seen;
+
+    bool Expired(NodeClock::time_point now) const { return now >= last_seen + ENTRY_TTL; }
+};
+
+/**
+ * The entries a node has learned from its boards, keyed by (endpoint,
+ * pubkey) and organised by the board they came from (section 6).
+ */
+class Table
+{
+public:
+    /**
+     * Store an element from the board in source group `source`, or refresh
+     * the entry it matches, or replace the same board's entry for the same
+     * address with another key (R-6.1), evicting within the limits (R-6.2,
+     * R-6.3). With `allow_local`, addresses are compared with their port.
+     * @return true if a new entry was stored.
+     */
+    bool Add(const std::vector<unsigned char>& source, const PunchKey& key, const uint256& secret, NodeClock::time_point now, bool allow_local)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** The unexpired entries that take part in a round whose parent the tip reached at `parent_time` (R-7.2). */
+    std::vector<Entry> Eligible(NodeClock::time_point now, NodeClock::time_point parent_time) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Remove an entry, as a pick does (R-6.5). */
+    void Remove(const CService& endpoint, const CPubKey& pubkey) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Drop expired entries (R-6.4). */
+    void Expire(NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    size_t Size() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Entries per source group, for RPC. */
+    std::map<std::vector<unsigned char>, size_t> SizeBySource() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+private:
+    mutable Mutex m_mutex;
+    std::vector<Entry> m_entries GUARDED_BY(m_mutex);
+    FastRandomContext m_rng GUARDED_BY(m_mutex);
+
+    size_t CountSource(const std::vector<unsigned char>& source) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+    /** Evict an expired entry among those with `pred`, else a random one. */
+    template <typename Pred>
+    void EvictOne(NodeClock::time_point now, Pred pred) EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+};
 
 /** Settings, filled in from the command line options. */
 struct Options {
