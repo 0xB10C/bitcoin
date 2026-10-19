@@ -59,12 +59,12 @@ inline constexpr auto BOARD_BACKOFF{std::chrono::hours{1}};
 /** How long a visitor waits for the board's answer to its element (R-5.3). */
 inline constexpr auto BOARD_ACK{std::chrono::seconds{60}};
 /** Elements processed from one peer per hour at most (R-5.10). */
-inline constexpr uint32_t PUNCHKEY_PER_HOUR{240};
+inline constexpr uint32_t PUNCHKEY_PER_HOUR{480};
 
 /** An entry at a board lives this long after its connection closed (R-5.7). */
 inline constexpr auto BOARD_GRACE{std::chrono::minutes{10}};
 /** A board sends every live entry to every visitor again this often (R-5.8). */
-inline constexpr auto BOARD_REFRESH{std::chrono::minutes{30}};
+inline constexpr auto BOARD_REFRESH{std::chrono::minutes{10}};
 
 // Limits of the board pool (section 5 of the draft, R-5.5).
 /** Visitors a board holds at most. */
