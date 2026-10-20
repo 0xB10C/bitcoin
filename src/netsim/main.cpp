@@ -47,12 +47,13 @@ struct Args {
     uint32_t nodes{100};
     uint32_t listeners{20};
     uint32_t minutes{30};
-    uint32_t bootstrap{4};
+    uint32_t bootstrap{16};
     bool blocks_only{false};
     uint8_t seed{1};
     bool csv{false};
     bool header{false};
     std::string export_prefix;
+    uint32_t service_ms{1000};
 };
 
 void PrintUsage()
@@ -62,12 +63,14 @@ void PrintUsage()
                  "  --nodes=N        population size (default 100)\n"
                  "  --listeners=N    how many of them accept inbound (default 20)\n"
                  "  --minutes=N      simulated minutes to run (default 30)\n"
-                 "  --bootstrap=N    seed addresses per node's AddrMan (default 4)\n"
+                 "  --bootstrap=N    seed addresses per node's AddrMan (default 16; lower\n"
+                 "                   values are dramatically slower, see network.h)\n"
                  "  --blocksonly     advertise fRelay=false, which avoids the\n"
                  "                   527 KiB per-peer tx inventory filter\n"
                  "  --seed=N         RNG seed byte (default 1)\n"
                  "  --csv            one machine-readable line instead of a report\n"
                  "  --csv-header     print the CSV column names and exit\n"
+                 "  --service-ms=N   how often each node flushes queued sends (default 1000)\n"
                  "  --export=PREFIX  write PREFIX-nodes.csv and PREFIX-edges.csv,\n"
                  "                   readable directly by networkx or igraph\n");
 }
@@ -100,6 +103,8 @@ bool ParseArgs(int argc, char* argv[], Args& args)
             args.bootstrap = value;
         } else if (arg.starts_with("--seed=") && ParseUint(arg.substr(7), value) && value <= 255) {
             args.seed = static_cast<uint8_t>(value);
+        } else if (arg.starts_with("--service-ms=") && ParseUint(arg.substr(13), value) && value > 0) {
+            args.service_ms = value;
         } else if (arg.starts_with("--export=") && arg.size() > 9) {
             args.export_prefix = std::string{arg.substr(9)};
         } else {
@@ -170,6 +175,7 @@ int main(int argc, char* argv[])
     opts.bootstrap_addrs = args.bootstrap;
     opts.blocks_only = args.blocks_only;
     opts.rng_seed = uint256{args.seed};
+    opts.service_interval = std::chrono::duration_cast<netsim::SimTime>(std::chrono::milliseconds{args.service_ms});
 
     netsim::Network net{opts, shared};
     {

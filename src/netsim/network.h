@@ -105,8 +105,19 @@ public:
         /** Listener addresses pre-loaded into each node's AddrMan.
          *
          * Stands in for hardcoded seeds. Zero leaves every AddrMan empty, in
-         * which case no node can ever connect to anything. */
-        uint32_t bootstrap_addrs{4};
+         * which case no node can ever connect to anything.
+         *
+         * Sixteen rather than a handful, and the reason is performance rather
+         * than realism. `AddrMan::Select()` picks a random slot out of 81,920
+         * and retries until it finds an occupied one, so its cost scales
+         * inversely with how full the table is. With four addresses a single
+         * selection probes tens of thousands of slots, and
+         * `TryPickOutboundAddress` makes up to a hundred selections per
+         * attempt. Measured at 1000 nodes forming their topology: four
+         * bootstrap addresses cost 147 seconds of wall clock, sixteen cost 5,
+         * for the same resulting topology. Sparse-table selection was 97% of
+         * the run. */
+        uint32_t bootstrap_addrs{16};
         /** Advertise fRelay=false, as -blocksonly does. See MakeNode(). */
         bool blocks_only{false};
         /** Each node's connection budget, as -maxconnections sets it.

@@ -510,7 +510,57 @@ whether transaction relay is advertised, and the address tables are what grows
 during the run.** Instrument `A` and watch it rather than trusting a figure
 taken at the start.
 
-### 5.2 A CPU trap worth more than the memory numbers
+### 5.2 CPU, and the one optimisation that mattered
+
+The optimisation list in §9 had the wrong target at the top. Measured, the cost
+was almost entirely `AddrMan::Select()` probing a nearly-empty table, and the
+fix was a configuration default rather than a code change.
+
+`Select()` picks a random slot out of 81,920 and retries until it finds an
+occupied one, so its cost scales inversely with table occupancy, and
+`TryPickOutboundAddress` makes up to a hundred selections per attempt. Seeding
+each node with 4 bootstrap addresses instead of 16 therefore dominated
+everything else. At 1000 nodes forming their topology:
+
+| Bootstrap addresses | Wall clock | Connections | Saturated |
+|---|---|---|---|
+| 4 | 147 s | 10,769 | 1000 of 1000 |
+| 16 | 5 s | 10,969 | 1000 of 1000 |
+| 64 | 6 s | 10,974 | 1000 of 1000 |
+
+Same topology, 29 times faster. Sparse-table selection was 97% of the run. The
+default is now 16.
+
+Two wrong guesses are worth recording, because both were plausible and both
+were cheap to test. Quadrupling the per-node service interval from 1 s to 4 s
+changed the wall clock by 3%, so the periodic flush was not the cost. And
+holding the population fixed while varying simulated time showed 2 minutes
+costing 148 s against 15 minutes costing 166 s, which is what pointed at
+topology formation rather than steady-state traffic.
+
+With the fix in place, scaling is close to linear in connections:
+
+| Nodes | Listeners | Wall clock | Connections | Memory | Saturated |
+|---|---|---|---|---|---|
+| 1,000 | 200 | 25 s | 17,431 | 1.20 GB | 1000 of 1000 |
+| 2,000 | 400 | 59 s | 34,798 | 2.45 GB | 2000 of 2000 |
+| 5,000 | 1,000 | 180 s | 87,315 | 6.38 GB | 5000 of 5000 |
+| 10,000 | 2,000 | 389 s | 174,867 | 13.34 GB | 10,000 of 10,000 |
+
+Fifteen simulated minutes, blocks-only, nothing isolated at any size. Cost per
+connection drifts from 1.43 ms to 2.22 ms across that range, mildly
+superlinear, most likely the growing address tables and cache pressure.
+
+Extrapolating to 100k nodes: topology formation alone is around an hour of wall
+clock, and steady-state running costs roughly two and a half days of wall clock
+per simulated day, single-threaded. Formation is a one-off; the simulated-day
+figure is what limits long-horizon address-relay work.
+
+Further profiling needs a real profiler. `perf` is not in the bix flake and
+`gdb` cannot attach here, so the measurements above come from varying one knob
+at a time, which located the dominant cost but will not resolve what is left.
+
+### 5.3 A CPU trap worth more than the memory numbers
 
 A node that cannot fill its outbound slots costs about a hundred times more to
 simulate than one that can. Each attempt runs up to 100 `AddrMan::Select()`
