@@ -59,6 +59,37 @@ The graph export lands in `<prefix>-nodes.csv` and `<prefix>-edges.csv` via
 are kept, marked `live=0`, because a feeler exists only for a moment and when
 short-lived connections happened is the interesting part.
 
+### The 1000-node rung
+
+1000 nodes, 200 listening, 15 simulated minutes, deliberately inside the
+20-minute window of §8. Blocks-only cost 1.26 GB and 168 seconds of wall clock;
+the default configuration cost 9.71 GB and 181 seconds, which says the
+transaction inventory filter is a memory cost and not a CPU one.
+
+Checked against the exported graph:
+
+| | |
+|---|---|
+| Connections opened | 17,233 |
+| Outbound full-relay | 8,000, which is 8 for every node |
+| Block-relay-only | 2,000, which is 2 for every node |
+| Feelers | 7,233, of which 7,228 had already closed |
+| Nodes with all 10 persistent slots filled | 1000 of 1000 |
+| Nodes left isolated | 0 |
+| Outbound pairs sharing a netgroup | 0 of 10,000 |
+| Listener inbound degree | min 22, mean 50, max 83 |
+| Addresses held | 86,896, or 87 per node |
+| Circulating addresses pointing nowhere | 0 |
+
+The zero duplicate-netgroup pairs across ten thousand persistent connections is
+the strongest single check available that the simulator is exercising Core's
+selection rather than approximating it.
+
+The inbound spread is the first genuine result rather than a self-check. Load
+across listeners varies by nearly a factor of four around a mean of 50, so
+AddrMan selection is visibly not uniform across equally reachable listeners.
+That is the sort of question the simulator exists to answer.
+
 Still to do: churn and the extra networks in §12, the 20-minute chain-sync
 timeout in §8, and the further production-fidelity steps in §11.
 
