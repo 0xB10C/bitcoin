@@ -19,6 +19,7 @@
 #include <net.h>
 #include <netgroup.h>
 #include <netsim/clock.h>
+#include <netsim/export.h>
 #include <netsim/latency.h>
 #include <netsim/metrics.h>
 #include <netsim/network.h>
@@ -28,6 +29,7 @@
 #include <test/util/validation.h>
 #include <uint256.h>
 #include <util/chaintype.h>
+#include <util/fs.h>
 
 #include <charconv>
 #include <chrono>
@@ -50,6 +52,7 @@ struct Args {
     uint8_t seed{1};
     bool csv{false};
     bool header{false};
+    std::string export_prefix;
 };
 
 void PrintUsage()
@@ -64,7 +67,9 @@ void PrintUsage()
                  "                   527 KiB per-peer tx inventory filter\n"
                  "  --seed=N         RNG seed byte (default 1)\n"
                  "  --csv            one machine-readable line instead of a report\n"
-                 "  --csv-header     print the CSV column names and exit\n");
+                 "  --csv-header     print the CSV column names and exit\n"
+                 "  --export=PREFIX  write PREFIX-nodes.csv and PREFIX-edges.csv,\n"
+                 "                   readable directly by networkx or igraph\n");
 }
 
 bool ParseUint(std::string_view text, uint32_t& out)
@@ -95,6 +100,8 @@ bool ParseArgs(int argc, char* argv[], Args& args)
             args.bootstrap = value;
         } else if (arg.starts_with("--seed=") && ParseUint(arg.substr(7), value) && value <= 255) {
             args.seed = static_cast<uint8_t>(value);
+        } else if (arg.starts_with("--export=") && arg.size() > 9) {
+            args.export_prefix = std::string{arg.substr(9)};
         } else {
             std::fprintf(stderr, "unrecognised argument: %s\n\n", argv[i]);
             return false;
@@ -168,6 +175,16 @@ int main(int argc, char* argv[])
     {
         LOCK(NetEventsInterface::g_msgproc_mutex);
         net.RunFor(std::chrono::duration_cast<netsim::SimTime>(std::chrono::minutes{args.minutes}));
+    }
+
+    // Before the memory reading, so the graph reflects the state that was
+    // measured, and after the run so closed connections are in it.
+    if (!args.export_prefix.empty()) {
+        if (!netsim::WriteGraph(net, fs::PathFromString(args.export_prefix))) {
+            std::fprintf(stderr, "failed to write the graph to %s-nodes.csv / -edges.csv\n",
+                         args.export_prefix.c_str());
+            return EXIT_FAILURE;
+        }
     }
 
     const uint64_t rss_after{netsim::ResidentSetBytes().value_or(0)};

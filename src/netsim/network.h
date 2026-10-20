@@ -38,6 +38,16 @@ struct Link {
     CNode* out_side{nullptr};
     CNode* in_side{nullptr};
 
+    /** What the initiator opened this as. Kept on the link because the CNode
+     *  that knew is deleted when the connection closes, and a closed feeler is
+     *  exactly the thing an analysis wants to count. */
+    ConnectionType conn_type{ConnectionType::OUTBOUND_FULL_RELAY};
+    SimTime opened_at{};
+    /** Zero while the link is still up. */
+    SimTime closed_at{};
+    uint64_t bytes_to_acceptor{0};
+    uint64_t bytes_to_initiator{0};
+
     /** Latest arrival already scheduled in each direction.
      *
      * TCP does not reorder, but jitter would: a later send drawing less jitter
@@ -120,6 +130,11 @@ public:
     SimClock& Clock() { return m_clock; }
     EventQueue& Queue() { return m_queue; }
     const AddressUniverse& Addresses() const { return m_universe; }
+    const SharedContext& Context() const { return m_ctx; }
+    const RegionLatency& Latency() const { return m_latency; }
+    const Options& GetOptions() const { return m_opts; }
+    /** The instant the run began, so exported timestamps can be made relative. */
+    SimTime StartTime() const { return m_opts.start; }
 
     /** The node listening on `addr`, if any. */
     std::optional<uint32_t> ListenerAt(const CService& addr) const;

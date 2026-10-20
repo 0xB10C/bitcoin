@@ -169,7 +169,16 @@ bool Network::Connect(uint32_t from, uint32_t to, ConnectionType conn_type)
     ++m_opened_by_type[conn_type];
 
     const size_t index{m_links.size()};
-    m_links.push_back(Link{from, to, pair.out_side, pair.in_side, m_clock.Now(), m_clock.Now()});
+    Link link;
+    link.initiator = from;
+    link.acceptor = to;
+    link.out_side = pair.out_side;
+    link.in_side = pair.in_side;
+    link.conn_type = conn_type;
+    link.opened_at = m_clock.Now();
+    link.next_free_to_acceptor = m_clock.Now();
+    link.next_free_to_initiator = m_clock.Now();
+    m_links.push_back(link);
     m_links_by_node[from].push_back(index);
     m_links_by_node[to].push_back(index);
 
@@ -208,6 +217,11 @@ void Network::ScheduleDelivery(size_t link_index, Direction outgoing, std::vecto
     const SimTime arrival{std::max(m_clock.Now() + delay, watermark + SimTime{1})};
     watermark = arrival;
     m_bytes_transferred += wire.size();
+    if (to_acceptor) {
+        link.bytes_to_acceptor += wire.size();
+    } else {
+        link.bytes_to_initiator += wire.size();
+    }
 
     m_queue.Post(arrival, [this, link_index, outgoing, bytes = std::move(wire)] {
         DeliverNow(link_index, outgoing, bytes);
@@ -283,6 +297,7 @@ void Network::ReapNode(uint32_t id)
         Link& link{m_links[index]};
         if (!link.closed && link.out_side == nullptr && link.in_side == nullptr) {
             link.closed = true;
+            link.closed_at = m_clock.Now();
             ++m_closed_links;
         }
     }

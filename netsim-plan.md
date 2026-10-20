@@ -54,8 +54,13 @@ address from the `addr_recv` field of its peer's VERSION, so the peer-reported
 substitution path in `GetLocalAddrForPeer` produces the right answer as long
 as the address universe uses `GetListenPort()`.
 
-Still to do: churn, the graph export and the extra networks in §12, and the
-further production-fidelity steps in §11.
+The graph export lands in `<prefix>-nodes.csv` and `<prefix>-edges.csv` via
+`--export=PREFIX`, readable directly by networkx or igraph. Closed connections
+are kept, marked `live=0`, because a feeler exists only for a moment and when
+short-lived connections happened is the interesting part.
+
+Still to do: churn and the extra networks in §12, the 20-minute chain-sync
+timeout in §8, and the further production-fidelity steps in §11.
 
 ---
 
@@ -806,6 +811,28 @@ behind the same interface.
 
 Roughly in order of how likely they are to cost a day.
 
+**Runs stop being valid at 20 simulated minutes, and the graph export is what
+revealed it.** Outbound full-relay peers start getting disconnected in a wave
+at about minute 22. The cause is `ConsiderEviction`
+(`src/net_processing.cpp:5514`): an outbound peer that has not announced a
+block with as much work as our tip within `CHAIN_SYNC_TIMEOUT`, which is 20
+minutes, gets one `getheaders` and then a disconnect. Every node here sits on a
+genesis-only chain and never announces anything, so every unprotected outbound
+peer times out together.
+
+This is Core behaving correctly given a static chain, not a simulator bug, but
+it is an artefact of block relay being out of scope and it corrupts any
+long-horizon measurement: at 30 simulated minutes, 91 of 875 full-relay
+connections had been shed and reopened for this reason alone.
+
+Until it is addressed, keep runs under 20 simulated minutes, or read anything
+past that point knowing a disconnection wave is mixed into it. The fix belongs
+with block relay: either give the shared chainstate a tip the nodes actually
+announce to each other, or keep headers sync from starting so `fSyncStarted`
+stays false and `ConsiderEviction` returns immediately. The first is more
+faithful; the second is a one-line gate and enough for topology and address
+work.
+
 **Per-node self-address state.** Covered in §3.2. It is the one blocker that
 cannot be worked around, because self-announcement is the only thing that
 propagates multi-hop (§4). Until `mapLocalHost` and `fListen` are per-node,
@@ -1030,13 +1057,12 @@ change than the simulator.
 
 ## 12. Requested follow-ups
 
-**Export the network graph when a run finishes.** Wanted for later, not for the
-MVP. The data already exists in `Network::Links()`, which holds the initiator,
-the acceptor and both `CNode` ends of every connection. What is missing is a
-serialiser: an edge list plus per-node attributes (listening, region, netgroup,
-AddrMan size, inbound and outbound degree) in a format igraph or networkx can
-read directly. Worth emitting the AddrMan contents alongside it, since several
-topology questions are really questions about what each node knew.
+**Export the network graph when a run finishes.** *(done)* `--export=PREFIX`
+writes `PREFIX-nodes.csv` and `PREFIX-edges.csv`. Node rows carry the address,
+whether it listens, its region, its netgroup, the size of its AddrMan and its
+tried table, and its live degree split by connection kind. Edge rows carry the
+initiator, the acceptor, the connection type, whether it is still up, when it
+opened and closed, and the bytes moved in each direction.
 
 **Support Tor, I2P and IPv6.** The address universe is IPv4-only today, and
 `NetGroupManager::NoAsmap()` groups IPv4 by /16. Three separate pieces of work:

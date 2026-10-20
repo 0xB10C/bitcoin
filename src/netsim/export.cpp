@@ -1,0 +1,122 @@
+// Copyright (c) 2026-present The Bitcoin Core developers
+// Distributed under the MIT software license, see the accompanying
+// file COPYING or http://www.opensource.org/licenses/mit-license.php.
+
+#include <netsim/export.h>
+
+#include <net.h>
+#include <netgroup.h>
+#include <netsim/network.h>
+#include <netsim/node.h>
+#include <node/connection_types.h>
+#include <util/strencodings.h>
+
+#include <cstdint>
+#include <fstream>
+#include <string>
+
+namespace netsim {
+
+namespace {
+/** Live degree of one node, split by connection kind. */
+struct Degree {
+    size_t full_relay{0};
+    size_t block_relay{0};
+    size_t feeler{0};
+    size_t inbound{0};
+};
+
+Degree LiveDegree(const SimNode& node)
+{
+    Degree degree;
+    for (const CNode* peer : node.connman->TestNodes()) {
+        if (peer->IsInboundConn()) {
+            ++degree.inbound;
+        } else if (peer->IsBlockOnlyConn()) {
+            ++degree.block_relay;
+        } else if (peer->IsFeelerConn()) {
+            ++degree.feeler;
+        } else {
+            ++degree.full_relay;
+        }
+    }
+    return degree;
+}
+
+int64_t RelativeMicros(SimTime when, SimTime start)
+{
+    if (when == SimTime::zero()) return -1; // "never", for a connection still up
+    return (when - start).count();
+}
+} // namespace
+
+std::string NodeColumns()
+{
+    return "id,address,listening,region,netgroup,addrman_total,addrman_tried,"
+           "out_full_relay,out_block_relay,out_feeler,inbound";
+}
+
+std::string EdgeColumns()
+{
+    return "initiator,acceptor,conn_type,live,opened_us,closed_us,"
+           "bytes_to_acceptor,bytes_to_initiator";
+}
+
+bool WriteGraph(const Network& net, const fs::path& prefix)
+{
+    const fs::path nodes_path{fs::PathFromString(fs::PathToString(prefix) + "-nodes.csv")};
+    const fs::path edges_path{fs::PathFromString(fs::PathToString(prefix) + "-edges.csv")};
+    const SimTime start{net.StartTime()};
+
+    {
+        std::ofstream out{nodes_path.std_path()};
+        if (!out.is_open()) return false;
+        out << NodeColumns() << "\n";
+
+        for (uint32_t id{0}; id < net.NumNodes(); ++id) {
+            const SimNode& node{net.At(id)};
+            const Degree degree{LiveDegree(node)};
+            // The netgroup as Core computes it, hex-encoded. Grouping by this
+            // column is how an analysis asks whether outbound diversity
+            // actually held.
+            const std::string netgroup{HexStr(net.Context().netgroupman.GetGroup(node.self))};
+
+            out << id << ','
+                << node.self.ToStringAddrPort() << ','
+                << (node.listening ? 1 : 0) << ','
+                << net.Latency().Region(id) << ','
+                << netgroup << ','
+                << node.addrman->Size() << ','
+                << node.addrman->Size(/*net=*/std::nullopt, /*in_new=*/false) << ','
+                << degree.full_relay << ','
+                << degree.block_relay << ','
+                << degree.feeler << ','
+                << degree.inbound << '\n';
+        }
+        out.flush();
+        if (!out.good()) return false;
+    }
+
+    {
+        std::ofstream out{edges_path.std_path()};
+        if (!out.is_open()) return false;
+        out << EdgeColumns() << "\n";
+
+        for (const Link& link : net.Links()) {
+            out << link.initiator << ','
+                << link.acceptor << ','
+                << ConnectionTypeAsString(link.conn_type) << ','
+                << (link.closed ? 0 : 1) << ','
+                << RelativeMicros(link.opened_at, start) << ','
+                << RelativeMicros(link.closed_at, start) << ','
+                << link.bytes_to_acceptor << ','
+                << link.bytes_to_initiator << '\n';
+        }
+        out.flush();
+        if (!out.good()) return false;
+    }
+
+    return true;
+}
+
+} // namespace netsim

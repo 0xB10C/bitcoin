@@ -9,6 +9,7 @@ add_library(bitcoin_netsim STATIC EXCLUDE_FROM_ALL
   addresses.cpp
   clock.cpp
   eventqueue.cpp
+  export.cpp
   latency.cpp
   metrics.cpp
   network.cpp

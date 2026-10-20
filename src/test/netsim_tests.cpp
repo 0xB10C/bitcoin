@@ -9,6 +9,7 @@
 #include <netsim/addresses.h>
 #include <netsim/clock.h>
 #include <netsim/eventqueue.h>
+#include <netsim/export.h>
 #include <netsim/latency.h>
 #include <netsim/metrics.h>
 #include <netsim/network.h>
@@ -21,12 +22,16 @@
 #include <test/util/setup_common.h>
 #include <test/util/validation.h>
 #include <uint256.h>
+#include <util/fs.h>
+#include <util/string.h>
 #include <util/time.h>
 
 #include <boost/test/unit_test.hpp>
 
 #include <algorithm>
 #include <chrono>
+#include <fstream>
+#include <sstream>
 #include <memory>
 #include <set>
 #include <utility>
@@ -715,6 +720,86 @@ BOOST_FIXTURE_TEST_CASE(netsim_inbound_eviction, SimTestingSetup)
     BOOST_CHECK_EQUAL(over_cap, 0U);
     BOOST_CHECK_GT(total_inbound, opts.num_listening * INBOUND_CAP / 2);
     BOOST_CHECK_GT(net.Evictions(), 0U);
+}
+
+/** The graph export has to be readable and has to agree with the live state. */
+BOOST_FIXTURE_TEST_CASE(netsim_graph_export, SimTestingSetup)
+{
+    netsim::Network::Options opts;
+    opts.num_nodes = 30;
+    opts.num_listening = 12;
+    opts.bootstrap_addrs = 6;
+    opts.blocks_only = true;
+    netsim::Network net{opts, ctx};
+
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        // Short enough to stay clear of the chain-sync timeout described in §8
+        // of the plan, which starts shedding outbound peers at 20 minutes.
+        net.RunFor(std::chrono::duration_cast<SimTime>(5min));
+    }
+
+    const fs::path prefix{m_path_root / "graph"};
+    BOOST_REQUIRE(netsim::WriteGraph(net, prefix));
+
+    const auto read_lines{[](const fs::path& path) {
+        std::ifstream in{path.std_path()};
+        BOOST_REQUIRE(in.is_open());
+        std::vector<std::string> lines;
+        std::string line;
+        while (std::getline(in, line)) {
+            if (!line.empty()) lines.push_back(line);
+        }
+        return lines;
+    }};
+
+    const auto nodes{read_lines(fs::PathFromString(fs::PathToString(prefix) + "-nodes.csv"))};
+    const auto edges{read_lines(fs::PathFromString(fs::PathToString(prefix) + "-edges.csv"))};
+
+    // Header plus one row per node, and header plus one row per connection ever
+    // opened. Closed connections stay in the file: a feeler exists only for a
+    // moment, and when short-lived connections happened is the interesting part.
+    BOOST_REQUIRE_EQUAL(nodes.size(), opts.num_nodes + 1);
+    BOOST_REQUIRE_EQUAL(edges.size(), net.LinkCount() + 1);
+    BOOST_CHECK_EQUAL(nodes[0], netsim::NodeColumns());
+    BOOST_CHECK_EQUAL(edges[0], netsim::EdgeColumns());
+
+    const auto fields{[](const std::string& line) {
+        std::vector<std::string> out;
+        std::string field;
+        std::istringstream stream{line};
+        while (std::getline(stream, field, ',')) out.push_back(field);
+        return out;
+    }};
+
+    // Every node row names itself, and the inbound degrees in the file add up
+    // to the number of connections still open.
+    size_t inbound_sum{0};
+    for (size_t i{1}; i < nodes.size(); ++i) {
+        const auto row{fields(nodes[i])};
+        BOOST_REQUIRE_EQUAL(row.size(), 11U);
+        BOOST_CHECK_EQUAL(row[0], util::ToString(i - 1));
+        BOOST_CHECK_EQUAL(row[1], net.At(static_cast<uint32_t>(i - 1)).self.ToStringAddrPort());
+        inbound_sum += static_cast<size_t>(std::stoul(row[10]));
+    }
+
+    size_t live_edges{0};
+    for (size_t i{1}; i < edges.size(); ++i) {
+        const auto row{fields(edges[i])};
+        BOOST_REQUIRE_EQUAL(row.size(), 8U);
+        // An initiator is never its own acceptor.
+        BOOST_CHECK(row[0] != row[1]);
+        if (row[3] == "1") {
+            ++live_edges;
+            // A live connection has no close time.
+            BOOST_CHECK_EQUAL(row[5], "-1");
+        } else {
+            BOOST_CHECK(row[5] != "-1");
+        }
+    }
+
+    BOOST_CHECK_EQUAL(live_edges, net.LinkCount() - net.ClosedLinks());
+    BOOST_CHECK_EQUAL(inbound_sum, live_edges);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
