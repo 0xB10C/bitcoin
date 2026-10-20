@@ -10,6 +10,7 @@
 #include <netsim/clock.h>
 #include <netsim/eventqueue.h>
 #include <netsim/latency.h>
+#include <netsim/network.h>
 #include <netsim/node.h>
 #include <netsim/pump.h>
 #include <node/protocol_version.h>
@@ -27,6 +28,7 @@
 #include <chrono>
 #include <memory>
 #include <set>
+#include <utility>
 #include <vector>
 
 using namespace std::chrono_literals;
@@ -401,6 +403,105 @@ BOOST_FIXTURE_TEST_CASE(netsim_getaddr_populates_addrman, SimTestingSetup)
     conn.in_side->CopyStats(stats);
     const auto& sent{stats.mapSendBytesPerMsgType};
     BOOST_CHECK(sent.count(NetMsgType::ADDRV2) > 0 || sent.count(NetMsgType::ADDR) > 0);
+}
+
+/** The same handshake, but driven entirely by the event queue and the clock. */
+BOOST_FIXTURE_TEST_CASE(netsim_network_handshake_over_event_queue, SimTestingSetup)
+{
+    netsim::Network::Options opts;
+    opts.num_nodes = 4;
+    opts.num_listening = 2;
+    netsim::Network net{opts, ctx};
+
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    // Node 2 does not listen; node 0 does.
+    BOOST_REQUIRE(net.Connect(2, 0));
+    BOOST_CHECK_EQUAL(net.LinkCount(), 1U);
+
+    // Refused: the target does not listen, the target is the dialer, and the
+    // pair is already connected.
+    BOOST_CHECK(!net.Connect(3, 2));
+    BOOST_CHECK(!net.Connect(2, 2));
+    BOOST_CHECK(!net.Connect(2, 0));
+    BOOST_CHECK_EQUAL(net.LinkCount(), 1U);
+
+    net.RunFor(std::chrono::duration_cast<SimTime>(5s));
+
+    const netsim::Link& link{net.Links().at(0)};
+    BOOST_CHECK(link.out_side->fSuccessfullyConnected);
+    BOOST_CHECK(link.in_side->fSuccessfullyConnected);
+    BOOST_CHECK_EQUAL(net.At(2).connman->GetNodeCount(ConnectionDirection::Out), 1U);
+    BOOST_CHECK_EQUAL(net.At(0).connman->GetNodeCount(ConnectionDirection::In), 1U);
+    BOOST_CHECK_GT(net.BytesTransferred(), 0U);
+    BOOST_CHECK_EQUAL(net.InboundRefusals(), 0U);
+}
+
+/** Latency has to be real, not decorative. */
+BOOST_FIXTURE_TEST_CASE(netsim_network_latency_delays_handshake, SimTestingSetup)
+{
+    netsim::Network::Options opts;
+    opts.num_nodes = 2;
+    opts.num_listening = 1;
+    // One second each way, no jitter, so the handshake cannot possibly finish
+    // before three one-way delays have elapsed.
+    opts.latency.intra_region = 1s;
+    opts.latency.inter_region = 1s;
+    opts.latency.jitter_fraction = 0.0;
+    netsim::Network net{opts, ctx};
+
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    BOOST_REQUIRE(net.Connect(1, 0));
+    const netsim::Link& link{net.Links().at(0)};
+
+    // VERSION is in flight and nothing has arrived yet.
+    net.RunFor(std::chrono::duration_cast<SimTime>(500ms));
+    BOOST_CHECK_EQUAL(link.in_side->nVersion.load(), 0);
+    BOOST_CHECK(!link.out_side->fSuccessfullyConnected);
+
+    // After one hop the acceptor has the VERSION, but the dialer has not yet
+    // had the reply, so neither side is finished.
+    net.RunFor(std::chrono::duration_cast<SimTime>(1s));
+    BOOST_CHECK_EQUAL(link.in_side->nVersion.load(), PROTOCOL_VERSION);
+    BOOST_CHECK(!link.out_side->fSuccessfullyConnected);
+
+    // Given enough hops it completes.
+    net.RunFor(std::chrono::duration_cast<SimTime>(10s));
+    BOOST_CHECK(link.out_side->fSuccessfullyConnected);
+    BOOST_CHECK(link.in_side->fSuccessfullyConnected);
+}
+
+/** A run must be replayable, or no measurement taken from it means anything. */
+BOOST_FIXTURE_TEST_CASE(netsim_network_is_reproducible, SimTestingSetup)
+{
+    const auto run{[&](uint8_t seed_byte) {
+        netsim::Network::Options opts;
+        opts.num_nodes = 8;
+        opts.num_listening = 4;
+        opts.rng_seed = uint256{seed_byte};
+        netsim::Network net{opts, ctx};
+
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        for (uint32_t dialer{4}; dialer < 8; ++dialer) {
+            BOOST_REQUIRE(net.Connect(dialer, dialer - 4));
+        }
+        net.RunFor(std::chrono::duration_cast<SimTime>(120s));
+
+        // Arrival watermarks fingerprint the timing of the run, which the byte
+        // count alone does not: jitter moves when things arrive without
+        // changing how much arrives.
+        uint64_t timing{0};
+        for (const netsim::Link& link : net.Links()) {
+            timing += static_cast<uint64_t>(link.next_free_to_acceptor.count());
+            timing += static_cast<uint64_t>(link.next_free_to_initiator.count());
+        }
+        return std::pair<uint64_t, uint64_t>{net.BytesTransferred(), timing};
+    }};
+
+    BOOST_CHECK(run(1) == run(1));
+    // The seed has to matter, or the equality above is vacuous. It shifts the
+    // jitter draws, so the timing moves even though the same bytes flow.
+    BOOST_CHECK(run(1).second != run(2).second);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -10,6 +10,7 @@ add_library(bitcoin_netsim STATIC EXCLUDE_FROM_ALL
   clock.cpp
   eventqueue.cpp
   latency.cpp
+  network.cpp
   node.cpp
   pump.cpp
 )
