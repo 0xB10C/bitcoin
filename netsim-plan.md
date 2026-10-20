@@ -421,12 +421,22 @@ watch it rather than trusting a single up-front number.
 The estimate above is wrong in one important way, and it is wrong because of an
 instruction to ignore bloom filters: the dominant term *is* a bloom filter.
 
-`bitcoin-netsim` reports its own resident set, one fresh process per point:
+`bitcoin-netsim` reports its own resident set, one fresh process per point, 30
+simulated minutes, listeners at a fifth of the population but never below 12:
 
-| Nodes | Default | Blocks-only |
-|---|---|---|
-| 25 | 8.4 MB/node | 1.17 MB/node |
-| 50 | 8.3 MB/node | 1.17 MB/node |
+| Nodes | Default | Blocks-only | Ratio |
+|---|---|---|---|
+| 25 | 8.39 MB/node | 1.17 MB/node | 7.2x |
+| 50 | 8.32 MB/node | 1.17 MB/node | 7.1x |
+| 100 | 9.74 MB/node | 1.26 MB/node | 7.7x |
+| 200 | 9.95 MB/node | 1.29 MB/node | 7.7x |
+| 400 | 9.95 MB/node | 1.30 MB/node | 7.7x |
+| 800 | 9.96 MB/node | 1.31 MB/node | 7.6x |
+
+In absolute terms, 800 nodes costs 7.78 GB by default and 1.02 GB
+blocks-only. The figure is flat from 200 nodes upward; the lower numbers at 25
+and 50 are simply a lower average degree, since 12 listeners cannot absorb
+8 outbound connections from every node.
 
 The gap is `Peer::TxRelay::m_tx_inventory_known_filter`, a 527 KiB rolling
 bloom allocated eagerly for every peer that offers transaction relay. No
@@ -448,9 +458,21 @@ default against 8.3 to 9.9 measured. So the figure moves with the average
 degree, which moves with the listener ratio, and quoting one number per node
 without saying how many peers it has is meaningless.
 
-Extrapolated to 100k nodes at 16 peers each: roughly **1 TB** with default
-arguments, roughly **125 GB** blocks-only, plus the `250 B * A` term which
-only matters once the listener count reaches the thousands.
+The `250 B * A` term is the one that is not flat. Addresses held per node runs
+at roughly half the listener count after 30 simulated minutes (71 per node at
+160 listeners, 39 at 80, 22 at 40), and it keeps climbing with run length
+toward the listener count itself. So extrapolation needs two figures:
+
+| 100k nodes, 20k listening | Default | Blocks-only |
+|---|---|---|
+| Flat part, from the table | 1.0 TB | 131 GB |
+| Plus `A` at half the listeners | 1.2 TB | 360 GB |
+| Plus `A` fully converged | 1.5 TB | 630 GB |
+
+Which is to say: **a 100k-node run is a 256 GB to 1 TB machine depending on
+whether transaction relay is advertised, and the address tables are what grows
+during the run.** Instrument `A` and watch it rather than trusting a figure
+taken at the start.
 
 ### 5.2 A CPU trap worth more than the memory numbers
 
