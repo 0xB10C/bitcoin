@@ -553,11 +553,10 @@ BOOST_FIXTURE_TEST_CASE(netsim_hundred_node_topology, SimTestingSetup)
         if (inbound > 0) ++listeners_with_inbound;
     }
 
-    // Where do the addresses the nodes hold actually point? Reachable ones are
-    // listeners; the rest are the non-listening majority, which self-announce
-    // because fListen is a process global that cannot be set per node. That is
-    // the artefact described in the plan as the remaining blocker, and the
-    // reason most outbound attempts fail.
+    // Where do the addresses the nodes hold actually point? All of them should
+    // be listeners. A non-zero stranger count means non-listening nodes are
+    // advertising themselves, which is what happens when the listen flag is
+    // read from the process-wide fListen instead of per node.
     size_t known_listeners{0};
     size_t known_strangers{0};
     for (uint32_t id{0}; id < NODES; ++id) {
@@ -571,8 +570,14 @@ BOOST_FIXTURE_TEST_CASE(netsim_hundred_node_topology, SimTestingSetup)
     }
     BOOST_TEST_MESSAGE("known_listeners=" << known_listeners << " known_strangers=" << known_strangers);
 
-    // Addresses reached nodes that were never seeded with them, so relay works.
+    // Addresses reached nodes that were never seeded with them, so relay works,
+    // and nothing unreachable is circulating.
     BOOST_CHECK_GT(known_listeners, 0U);
+    BOOST_CHECK_EQUAL(known_strangers, 0U);
+
+    // With only reachable addresses in circulation, no outbound attempt should
+    // be aimed at a dead one.
+    BOOST_CHECK_EQUAL(net.FailedAttempts(), 0U);
 
     BOOST_TEST_MESSAGE("links=" << net.LinkCount() << " outbound=" << total_outbound << " inbound=" << total_inbound
                                 << " saturated=" << saturated << " isolated=" << isolated
@@ -586,6 +591,11 @@ BOOST_FIXTURE_TEST_CASE(netsim_hundred_node_topology, SimTestingSetup)
     // Nobody is stranded, and the listeners are all carrying traffic.
     BOOST_CHECK_EQUAL(isolated, 0U);
     BOOST_CHECK_EQUAL(listeners_with_inbound, LISTENERS);
+
+    // Most of the population fills all eight slots. It cannot be all of them:
+    // a node needs eight listeners in distinct netgroups that it is not already
+    // connected to, and there are only twenty listeners in total.
+    BOOST_CHECK_GT(saturated, NODES * 4 / 5);
 
     // Addresses spread past the seed set: four seeds each would be 400 in
     // total, so a materially larger figure means GETADDR responses landed.

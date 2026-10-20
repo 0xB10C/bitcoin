@@ -1107,6 +1107,13 @@ public:
         /// True if the user did not specify -bind= or -whitebind= and thus
         /// we should bind on `0.0.0.0` (IPv4) and `::` (IPv6).
         bool bind_on_any;
+        /** Whether this instance accepts inbound connections, and therefore
+         *  whether it advertises its own address.
+         *
+         * Unset means "use the process-wide fListen", which is what a real node
+         * does. An explicit value is for running several instances in one
+         * process with different answers, which one global cannot express. */
+        std::optional<bool> m_listen;
         bool m_use_addrman_outgoing = true;
         std::vector<std::string> m_specified_outgoing;
         std::vector<std::string> m_added_nodes;
@@ -1127,6 +1134,7 @@ public:
         m_max_automatic_outbound = m_max_outbound_full_relay + m_max_outbound_block_relay + m_max_feeler;
         m_max_inbound = std::max(0, m_max_automatic_connections - m_max_automatic_outbound);
         m_max_inbound_full_relay = std::max(0, static_cast<int>(connOptions.m_full_relay_inbound_percent / 100.0 * m_max_inbound));
+        m_listen = connOptions.m_listen.value_or(fListen);
         m_use_addrman_outgoing = connOptions.m_use_addrman_outgoing;
         m_client_interface = connOptions.uiInterface;
         m_banman = connOptions.m_banman;
@@ -1353,6 +1361,10 @@ public:
 
     // This allows temporarily exceeding m_max_outbound_full_relay, with the goal of finding
     // a peer that is better than all our current peers.
+    /** Whether this instance accepts inbound connections, and so whether it has
+     *  an address worth advertising. See Options::m_listen. */
+    bool IsListening() const { return m_listen; }
+
     void SetTryNewOutboundPeer(bool flag);
     bool GetTryNewOutboundPeer() const;
 
@@ -1759,6 +1771,7 @@ private:
     int m_max_inbound;
     int m_max_inbound_full_relay;
 
+    bool m_listen{true};
     bool m_use_addrman_outgoing;
     CClientUIInterface* m_client_interface;
     NetEventsInterface* m_msgproc;

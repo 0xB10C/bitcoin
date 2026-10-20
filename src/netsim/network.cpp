@@ -256,21 +256,32 @@ void Network::TryOpenOutbound(uint32_t id)
         return;
     }
 
-    const std::optional<uint32_t> target{ListenerAt(*picked)};
-    if (!target) {
-        // Nothing is listening there. A real node finds out by timing out.
-        // Recording the attempt is what lets nAttempts and GetChance evolve
-        // over a run rather than staying frozen at their initial values.
-        ++m_failed_attempts;
-        node.addrman->Attempt(*picked, /*fCountFailure=*/true);
-        return;
-    }
-    if (!Connect(id, *target)) {
+    // OpenNetworkConnection refuses an address we are already connected to
+    // before attempting anything, so AddrMan records no attempt. This happens
+    // routinely: an inbound peer does not reserve its netgroup, so the
+    // selection loop will happily offer a peer we already have inbound.
+    if (node.connman->AlreadyConnectedToAddressPublic(*picked)) {
         ++m_rejected_attempts;
-        node.addrman->Attempt(*picked, /*fCountFailure=*/true);
         return;
     }
-    node.addrman->Good(*picked);
+
+    // From here a connect is genuinely attempted, and AddrMan records that
+    // whether or not it succeeds. The count_failures rule is
+    // ThreadOpenConnections': only start counting failures once the node has a
+    // couple of distinct-netgroup outbound peers to lose.
+    const bool count_failures{used_netgroups.size() >= std::min<size_t>(DEFAULT_MAX_PEER_CONNECTIONS - 1, 2)};
+    node.addrman->Attempt(*picked, count_failures);
+
+    const std::optional<uint32_t> target{ListenerAt(*picked)};
+    if (!target || !Connect(id, *target)) {
+        // Nothing listening there, or the acceptor had no room. A real node
+        // learns this from a refused or timed-out connect.
+        ++m_failed_attempts;
+        return;
+    }
+    // Good() is deliberately not called here. The VERSION handler in
+    // net_processing already does it for every non-inbound peer, and our nodes
+    // run the real handler.
 }
 
 void Network::ArmServiceTick(uint32_t id, SimTime at)

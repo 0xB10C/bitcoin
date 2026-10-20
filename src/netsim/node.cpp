@@ -107,6 +107,10 @@ std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const C
     // GetDesirableServiceFlags() always demands NODE_NETWORK and NODE_WITNESS,
     // and an outbound peer offering less is disconnected during the handshake.
     conn_opts.m_local_services = ServiceFlags(NODE_NETWORK | NODE_WITNESS);
+    // Per-node, rather than the process-global fListen. Without this every node
+    // self-announces, including the ones nobody can reach, and most of the
+    // addresses in circulation end up pointing nowhere.
+    conn_opts.m_listen = listening;
     conn_opts.nSendBufferMaxSize = SEND_BUFFER_BYTES;
     conn_opts.nReceiveFloodSize = RECV_FLOOD_BYTES;
     // Init(), never Start(): Start() spawns four threads unconditionally, which
