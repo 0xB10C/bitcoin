@@ -19,6 +19,7 @@ namespace {
 //! Domain separators, so that the several values derived per node are independent.
 const std::string SEED_ADDRMAN{"netsim/addrman"};
 const std::string SEED_CONNMAN{"netsim/connman"};
+const std::string SEED_PEERMAN{"netsim/peerman"};
 const std::string SEED_NONCE{"netsim/nonce"};
 const std::string SEED_NETWORK_KEY{"netsim/networkkey"};
 
@@ -90,6 +91,11 @@ std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const C
 
     PeerManager::Options peerman_opts;
     peerman_opts.max_extra_txs = 0;
+    // Its own stream, for the same reason AddrMan gets one. m_rng drives the
+    // Poisson address-send and inventory timers, so a shared stream would put
+    // every node on the same schedule and an OS-seeded one would make the run
+    // unrepeatable.
+    peerman_opts.rng_seed = DeriveHash(SEED_PEERMAN, id);
     // banman is null on purpose: a per-node BanMan would cost 539 KiB for its
     // discouragement filter, and nothing here misbehaves.
     node->peerman = PeerManager::make(*node->connman, *node->addrman, /*banman=*/nullptr,

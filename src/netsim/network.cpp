@@ -9,8 +9,10 @@
 #include <sync.h>
 #include <threadsafety.h>
 #include <util/check.h>
+#include <util/time.h>
 
 #include <algorithm>
+#include <set>
 #include <utility>
 
 namespace netsim {
@@ -35,13 +37,21 @@ Direction Opposite(Direction d)
 }
 } // namespace
 
-Network::Network(Options opts, const SharedContext& ctx)
-    : m_opts{opts},
+namespace {
+Network::Options ResolveOptions(Network::Options opts)
+{
+    if (opts.port == 0) opts.port = GetListenPort();
+    return opts;
+}
+} // namespace
+
+Network::Network(Options opts_in, const SharedContext& ctx)
+    : m_opts{ResolveOptions(opts_in)},
       m_ctx{ctx},
-      m_universe{opts.num_nodes, opts.port},
-      m_clock{opts.start},
-      m_latency{opts.latency},
-      m_rng{opts.rng_seed}
+      m_universe{m_opts.num_nodes, m_opts.port},
+      m_clock{m_opts.start},
+      m_latency{m_opts.latency},
+      m_rng{m_opts.rng_seed}
 {
     Assert(m_opts.num_listening <= m_opts.num_nodes);
 
@@ -53,13 +63,44 @@ Network::Network(Options opts, const SharedContext& ctx)
         m_nodes.push_back(MakeNode(m_ctx, id, m_universe.At(id), listening));
         if (listening) m_listeners.emplace(m_universe.At(id), id);
 
-        // Stagger the first service tick across the interval. Without this
-        // every node flushes on the same instant forever, which turns a
-        // Poisson send schedule into a synchronised one.
-        const auto offset{SimTime{m_opts.service_interval.count() > 0
-                                      ? static_cast<int64_t>(id) % m_opts.service_interval.count()
-                                      : 0}};
-        ArmServiceTick(id, m_clock.Now() + offset + m_opts.service_interval);
+        // Stagger the first tick of each kind across its interval. Without
+        // this every node acts on the same instants forever, which turns a
+        // Poisson send schedule into a synchronised one and makes every node
+        // race for the same addresses.
+        const auto stagger{[&](SimTime interval) {
+            return interval.count() > 0 ? SimTime{static_cast<int64_t>(id) % interval.count()} : SimTime::zero();
+        }};
+        ArmServiceTick(id, m_clock.Now() + stagger(m_opts.service_interval) + m_opts.service_interval);
+        ArmOpenConnTick(id, m_clock.Now() + stagger(m_opts.open_conn_interval) + m_opts.open_conn_interval);
+    }
+
+    Bootstrap();
+}
+
+void Network::Bootstrap()
+{
+    if (m_opts.bootstrap_addrs == 0 || m_opts.num_listening == 0) return;
+
+    constexpr auto SERVICES{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
+    const auto now{Now<NodeSeconds>()};
+
+    for (uint32_t id{0}; id < m_opts.num_nodes; ++id) {
+        std::vector<CAddress> seeds;
+        seeds.reserve(m_opts.bootstrap_addrs);
+        for (uint32_t k{0}; k < m_opts.bootstrap_addrs; ++k) {
+            const auto pick{static_cast<uint32_t>(m_rng.randrange(m_opts.num_listening))};
+            if (pick == id) continue;
+            // Backdate like ConvertSeeds does, so these do not all look
+            // freshly announced and the selection is not dominated by
+            // identical timestamps.
+            CAddress addr{m_universe.At(pick), SERVICES};
+            addr.nTime = now - std::chrono::seconds{m_rng.randrange(7 * 24 * 60 * 60)};
+            seeds.push_back(addr);
+        }
+        // The node's own address as the source, so that different nodes bucket
+        // the same seed differently, as they would learning from different
+        // places.
+        if (!seeds.empty()) At(id).addrman->Add(seeds, CNetAddr{m_universe.At(id)});
     }
 }
 
@@ -180,12 +221,73 @@ void Network::ServiceNode(uint32_t id)
     }
 }
 
+void Network::TryOpenOutbound(uint32_t id)
+{
+    AssertLockHeld(NetEventsInterface::g_msgproc_mutex);
+    SimNode& node{At(id)};
+
+    if (node.connman->GetFullOutboundConnCount() >= MAX_OUTBOUND_FULL_RELAY_CONNECTIONS) return;
+
+    // The same accounting ThreadOpenConnections does before selecting. Only
+    // persistent outbound connections reserve a netgroup; inbound, feeler and
+    // addr-fetch connections deliberately do not.
+    std::set<std::vector<unsigned char>> used_netgroups;
+    for (const CNode* peer : node.connman->TestNodes()) {
+        if (peer->IsManualOrFullOutboundConn() || peer->IsBlockOnlyConn()) {
+            used_netgroups.insert(m_ctx.netgroupman.GetGroup(peer->addr));
+        }
+    }
+
+    const std::optional<CAddress> picked{node.connman->TryPickOutboundAddress(
+        /*anchor=*/false,
+        ConnectionType::OUTBOUND_FULL_RELAY,
+        /*fFeeler=*/false,
+        used_netgroups,
+        /*preferred_net=*/std::nullopt)};
+    if (!picked) return;
+
+    // Core would have discarded its own address inside the selection loop, via
+    // IsLocal(). That reads the process-global mapLocalHost, which cannot hold
+    // a per-node view, so the nodes here do not recognise themselves and the
+    // simulator has to do it for them. Not counted as a failure, because in a
+    // correctly configured node the address would never have been offered.
+    if (static_cast<const CService&>(*picked) == node.self) {
+        ++m_self_picks;
+        return;
+    }
+
+    const std::optional<uint32_t> target{ListenerAt(*picked)};
+    if (!target) {
+        // Nothing is listening there. A real node finds out by timing out.
+        // Recording the attempt is what lets nAttempts and GetChance evolve
+        // over a run rather than staying frozen at their initial values.
+        ++m_failed_attempts;
+        node.addrman->Attempt(*picked, /*fCountFailure=*/true);
+        return;
+    }
+    if (!Connect(id, *target)) {
+        ++m_rejected_attempts;
+        node.addrman->Attempt(*picked, /*fCountFailure=*/true);
+        return;
+    }
+    node.addrman->Good(*picked);
+}
+
 void Network::ArmServiceTick(uint32_t id, SimTime at)
 {
     if (m_opts.service_interval <= SimTime::zero()) return;
     m_queue.Post(at, [this, id, at] {
         ServiceNode(id);
         ArmServiceTick(id, at + m_opts.service_interval);
+    });
+}
+
+void Network::ArmOpenConnTick(uint32_t id, SimTime at)
+{
+    if (m_opts.open_conn_interval <= SimTime::zero()) return;
+    m_queue.Post(at, [this, id, at] {
+        TryOpenOutbound(id);
+        ArmOpenConnTick(id, at + m_opts.open_conn_interval);
     });
 }
 

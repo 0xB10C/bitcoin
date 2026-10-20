@@ -847,3 +847,15 @@ expected behaviour: `p2p_addr_relay.py`, `p2p_addr_selfannouncement.py`,
 7. **Non-listening nodes.** Model them purely as absent from the listener map,
    or also give some of them onion addresses so the privacy-network paths get
    exercised?
+
+---
+
+## 11. Requested follow-ups
+
+**Export the network graph when a run finishes.** Wanted for later, not for the
+MVP. The data already exists in `Network::Links()`, which holds the initiator,
+the acceptor and both `CNode` ends of every connection. What is missing is a
+serialiser: an edge list plus per-node attributes (listening, region, netgroup,
+AddrMan size, inbound and outbound degree) in a format igraph or networkx can
+read directly. Worth emitting the AddrMan contents alongside it, since several
+topology questions are really questions about what each node knew.

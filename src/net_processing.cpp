@@ -2132,10 +2132,22 @@ std::unique_ptr<PeerManager> PeerManager::make(CConnman& connman, AddrMan& addrm
     return std::make_unique<PeerManagerImpl>(connman, addrman, banman, chainman, pool, warnings, opts);
 }
 
+/** Build the RNG backing one PeerManager.
+ *
+ * An explicit seed wins over `deterministic_rng`: it yields a stream that is
+ * both reproducible and distinct per seed. `deterministic_rng` keeps its
+ * historical meaning of a zero-keyed stream, identical in every instance.
+ */
+static FastRandomContext MakePeerManagerRng(const PeerManager::Options& opts)
+{
+    if (opts.rng_seed) return FastRandomContext{*opts.rng_seed};
+    return FastRandomContext{opts.deterministic_rng};
+}
+
 PeerManagerImpl::PeerManagerImpl(CConnman& connman, AddrMan& addrman,
                                  BanMan* banman, ChainstateManager& chainman,
                                  CTxMemPool& pool, node::Warnings& warnings, Options opts)
-    : m_rng{opts.deterministic_rng},
+    : m_rng{MakePeerManagerRng(opts)},
       m_fee_filter_rounder{CFeeRate{DEFAULT_MIN_RELAY_TX_FEE}, m_rng},
       m_chainparams(chainman.GetParams()),
       m_connman(connman),

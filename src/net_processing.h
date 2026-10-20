@@ -101,8 +101,15 @@ public:
         //! Whether all P2P messages are captured to disk
         bool capture_messages{false};
         //! Whether or not the internal RNG behaves deterministically (this is
-        //! a test-only option).
+        //! a test-only option). Every instance built this way shares one
+        //! zero-keyed stream, so they are interchangeable.
         bool deterministic_rng{false};
+        //! Seed for the internal RNG, giving this instance its own reproducible
+        //! stream. Takes precedence over `deterministic_rng`. Intended for
+        //! simulations that run many non-identical PeerManagers in one process,
+        //! where a shared stream would make every node's Poisson send schedule
+        //! identical and an OS-seeded one would make the run unrepeatable.
+        std::optional<uint256> rng_seed{};
         //! Number of headers sent in one getheaders message result (this is
         //! a test-only option).
         uint32_t max_headers_result{MAX_HEADERS_RESULTS};

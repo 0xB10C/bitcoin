@@ -63,13 +63,31 @@ public:
         uint32_t num_nodes{100};
         /** The first `num_listening` nodes accept inbound connections. */
         uint32_t num_listening{20};
-        uint16_t port{8333};
+        /** Port every node's address carries. Zero means GetListenPort().
+         *
+         * Aligning with GetListenPort() is not cosmetic. When a node is told
+         * its own address by a peer, GetLocalAddrForPeer rebuilds it as "the
+         * IP the peer reported, on the port I believe I listen on", and
+         * announces that. A universe on a different port therefore floods
+         * every AddrMan with addresses nobody is reachable on. */
+        uint16_t port{0};
         SimTime start{std::chrono::duration_cast<SimTime>(std::chrono::seconds{1'700'000'000})};
         /** How often each node is given a chance to flush queued sends.
          *
          * One second matches the resolution of what the nodes can observe, so
          * a finer tick would only burn events. */
         SimTime service_interval{std::chrono::seconds{1}};
+        /** How often a node attempts one outbound connection.
+         *
+         * Mirrors the hard 500 ms sleep in ThreadOpenConnections, which is why
+         * filling ten outbound slots takes a node at least five simulated
+         * seconds no matter how fast the machine is. */
+        SimTime open_conn_interval{std::chrono::milliseconds{500}};
+        /** Listener addresses pre-loaded into each node's AddrMan.
+         *
+         * Stands in for hardcoded seeds. Zero leaves every AddrMan empty, in
+         * which case no node can ever connect to anything. */
+        uint32_t bootstrap_addrs{4};
         RegionLatency::Options latency{};
         uint256 rng_seed{uint256{1}};
     };
@@ -107,6 +125,17 @@ public:
     uint64_t InboundRefusals() const { return m_inbound_refusals; }
     /** Total bytes handed to the latency model, across every link. */
     uint64_t BytesTransferred() const { return m_bytes_transferred; }
+    /** Outbound attempts whose chosen address had nobody listening on it. */
+    uint64_t FailedAttempts() const { return m_failed_attempts; }
+    /** Outbound attempts the node aimed at its own address.
+     *
+     * Core suppresses these with IsLocal(), which reads the process-global
+     * mapLocalHost. One global table cannot express a per-node view of "my
+     * own addresses", so the simulator filters them instead and counts them
+     * here. A non-zero figure is expected, not a bug. */
+    uint64_t SelfPicks() const { return m_self_picks; }
+    /** Outbound attempts the acceptor turned away. */
+    uint64_t RejectedAttempts() const { return m_rejected_attempts; }
 
 private:
     void ServiceEndpoint(size_t link_index, Direction outgoing)
@@ -119,8 +148,12 @@ private:
     void DeliverNow(size_t link_index, Direction outgoing, const std::vector<uint8_t>& wire)
         NO_THREAD_SAFETY_ANALYSIS;
     void ServiceNode(uint32_t id) NO_THREAD_SAFETY_ANALYSIS;
+    /** One outbound attempt, using Core's own selection logic. */
+    void TryOpenOutbound(uint32_t id) NO_THREAD_SAFETY_ANALYSIS;
 
+    void Bootstrap();
     void ArmServiceTick(uint32_t id, SimTime at);
+    void ArmOpenConnTick(uint32_t id, SimTime at);
 
     const Options m_opts;
     const SharedContext m_ctx;
@@ -139,6 +172,9 @@ private:
     NodeId m_next_node_id{0};
     uint64_t m_inbound_refusals{0};
     uint64_t m_bytes_transferred{0};
+    uint64_t m_failed_attempts{0};
+    uint64_t m_self_picks{0};
+    uint64_t m_rejected_attempts{0};
 };
 
 } // namespace netsim

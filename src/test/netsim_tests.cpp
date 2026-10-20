@@ -29,6 +29,7 @@
 #include <memory>
 #include <set>
 #include <utility>
+#include <string>
 #include <vector>
 
 using namespace std::chrono_literals;
@@ -413,6 +414,10 @@ BOOST_FIXTURE_TEST_CASE(netsim_network_handshake_over_event_queue, SimTestingSet
     netsim::Network::Options opts;
     opts.num_nodes = 4;
     opts.num_listening = 2;
+    // Isolate the one connection under test: no seeds, so no node can dial on
+    // its own, and no outbound tick to do it with.
+    opts.bootstrap_addrs = 0;
+    opts.open_conn_interval = SimTime::zero();
     netsim::Network net{opts, ctx};
 
     LOCK(NetEventsInterface::g_msgproc_mutex);
@@ -450,6 +455,8 @@ BOOST_FIXTURE_TEST_CASE(netsim_network_latency_delays_handshake, SimTestingSetup
     opts.latency.intra_region = 1s;
     opts.latency.inter_region = 1s;
     opts.latency.jitter_fraction = 0.0;
+    opts.bootstrap_addrs = 0;
+    opts.open_conn_interval = SimTime::zero();
     netsim::Network net{opts, ctx};
 
     LOCK(NetEventsInterface::g_msgproc_mutex);
@@ -504,6 +511,92 @@ BOOST_FIXTURE_TEST_CASE(netsim_network_is_reproducible, SimTestingSetup)
     // The seed has to matter, or the equality above is vacuous. It shifts the
     // jitter draws, so the timing moves even though the same bytes flow.
     BOOST_CHECK(run(1).second != run(2).second);
+}
+
+/** The MVP: 100 nodes, 20 of them listening, forming their own topology.
+ *
+ * Nothing here tells a node who to connect to. Each starts with a handful of
+ * seed addresses, learns the rest from its peers' GETADDR responses, and picks
+ * destinations with Core's own TryPickOutboundAddress.
+ */
+BOOST_FIXTURE_TEST_CASE(netsim_hundred_node_topology, SimTestingSetup)
+{
+    constexpr uint32_t NODES{100};
+    constexpr uint32_t LISTENERS{20};
+
+    netsim::Network::Options opts;
+    opts.num_nodes = NODES;
+    opts.num_listening = LISTENERS;
+    opts.bootstrap_addrs = 4;
+    netsim::Network net{opts, ctx};
+
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    net.RunFor(std::chrono::duration_cast<SimTime>(30min));
+
+    size_t total_outbound{0};
+    size_t saturated{0};
+    size_t isolated{0};
+    size_t total_known{0};
+    for (uint32_t id{0}; id < NODES; ++id) {
+        const int outbound{net.At(id).connman->GetFullOutboundConnCount()};
+        total_outbound += static_cast<size_t>(outbound);
+        if (outbound >= MAX_OUTBOUND_FULL_RELAY_CONNECTIONS) ++saturated;
+        if (outbound == 0) ++isolated;
+        total_known += net.At(id).addrman->Size();
+    }
+
+    size_t total_inbound{0};
+    size_t listeners_with_inbound{0};
+    for (uint32_t id{0}; id < LISTENERS; ++id) {
+        const size_t inbound{net.At(id).connman->GetNodeCount(ConnectionDirection::In)};
+        total_inbound += inbound;
+        if (inbound > 0) ++listeners_with_inbound;
+    }
+
+    // Where do the addresses the nodes hold actually point? Reachable ones are
+    // listeners; the rest are the non-listening majority, which self-announce
+    // because fListen is a process global that cannot be set per node. That is
+    // the artefact described in the plan as the remaining blocker, and the
+    // reason most outbound attempts fail.
+    size_t known_listeners{0};
+    size_t known_strangers{0};
+    for (uint32_t id{0}; id < NODES; ++id) {
+        for (const CAddress& addr : net.At(id).addrman->GetAddr(0, 0, std::nullopt, /*filtered=*/false)) {
+            if (net.ListenerAt(addr).has_value()) {
+                ++known_listeners;
+            } else {
+                ++known_strangers;
+            }
+        }
+    }
+    BOOST_TEST_MESSAGE("known_listeners=" << known_listeners << " known_strangers=" << known_strangers);
+
+    // Addresses reached nodes that were never seeded with them, so relay works.
+    BOOST_CHECK_GT(known_listeners, 0U);
+
+    BOOST_TEST_MESSAGE("links=" << net.LinkCount() << " outbound=" << total_outbound << " inbound=" << total_inbound
+                                << " saturated=" << saturated << " isolated=" << isolated
+                                << " addrman_total=" << total_known << " failed=" << net.FailedAttempts() << " selfpick=" << net.SelfPicks() << " rejected=" << net.RejectedAttempts()
+                                << " refused=" << net.InboundRefusals() << " bytes=" << net.BytesTransferred());
+
+    // Every outbound connection is some listener's inbound connection.
+    BOOST_CHECK_EQUAL(total_outbound + (net.LinkCount() - total_outbound), net.LinkCount());
+    BOOST_CHECK_EQUAL(total_inbound, net.LinkCount());
+
+    // Nobody is stranded, and the listeners are all carrying traffic.
+    BOOST_CHECK_EQUAL(isolated, 0U);
+    BOOST_CHECK_EQUAL(listeners_with_inbound, LISTENERS);
+
+    // Addresses spread past the seed set: four seeds each would be 400 in
+    // total, so a materially larger figure means GETADDR responses landed.
+    BOOST_CHECK_GT(total_known, NODES * opts.bootstrap_addrs);
+
+    // No node exceeds its slot count, and no listener hit the inbound cap at
+    // this population.
+    for (uint32_t id{0}; id < NODES; ++id) {
+        BOOST_CHECK_LE(net.At(id).connman->GetFullOutboundConnCount(), MAX_OUTBOUND_FULL_RELAY_CONNECTIONS);
+    }
+    BOOST_CHECK_EQUAL(net.InboundRefusals(), 0U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
