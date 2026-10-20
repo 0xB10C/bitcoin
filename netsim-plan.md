@@ -416,6 +416,58 @@ Practical sizing: **10k nodes fits in 64–96 GB. 100k nodes wants 512 GB–1 TB
 and the run will grow into it as the tables fill, so instrument `A` and
 watch it rather than trusting a single up-front number.
 
+### 5.1 Measured, and one correction
+
+The estimate above is wrong in one important way, and it is wrong because of an
+instruction to ignore bloom filters: the dominant term *is* a bloom filter.
+
+`bitcoin-netsim` reports its own resident set, one fresh process per point:
+
+| Nodes | Default | Blocks-only |
+|---|---|---|
+| 25 | 8.4 MB/node | 1.17 MB/node |
+| 50 | 8.3 MB/node | 1.17 MB/node |
+
+The gap is `Peer::TxRelay::m_tx_inventory_known_filter`, a 527 KiB rolling
+bloom allocated eagerly for every peer that offers transaction relay. No
+transaction is ever relayed in these runs. Advertising `fRelay=false`, which is
+what `--blocksonly` does, stops the peer allocating it and costs nothing in
+fidelity for a study of topology or address relay.
+
+What actually predicts the measurement is peer count, not node count:
+
+```
+per node  ~=  700 KB                       fixed: AddrMan tables, connman, peerman
+            + peers * 27 KB                Peer::m_addr_known, per addr-relay peer
+            + peers * 513 KB               Peer::TxRelay, unless fRelay=false
+            + 250 B * A                    addresses held
+```
+
+At 16 peers that gives 1.13 MB blocks-only against 1.17 measured, and 9.3 MB
+default against 8.3 to 9.9 measured. So the figure moves with the average
+degree, which moves with the listener ratio, and quoting one number per node
+without saying how many peers it has is meaningless.
+
+Extrapolated to 100k nodes at 16 peers each: roughly **1 TB** with default
+arguments, roughly **125 GB** blocks-only, plus the `250 B * A` term which
+only matters once the listener count reaches the thousands.
+
+### 5.2 A CPU trap worth more than the memory numbers
+
+A node that cannot fill its outbound slots costs about a hundred times more to
+simulate than one that can. Each attempt runs up to 100 `AddrMan::Select()`
+calls, and `Select` on a sparse table is some 590 times dearer than on a full
+one: the bench pair `AddrManSelectFromAlmostEmpty` and `AddrManSelect` read
+38 µs against 65 ns, because selection probes random slots until it finds an
+occupied one.
+
+The practical consequence: a run with fewer than 8 listeners never finishes,
+because no node can ever fill 8 outbound slots and every node therefore probes
+forever. One listener with 100 nodes does not complete a single simulated
+minute in two hours of wall clock. Twenty listeners with 100 nodes completes 30
+simulated minutes in seconds. Keep the address universe rich enough that nodes
+saturate, and treat an unexpectedly slow run as a sign that they cannot.
+
 Two cheap reductions if they are ever wanted, neither needed up front:
 `nid_type` to `int32_t` halves the fixed tables and saves ~31 GiB at 100k
 nodes; making `mapRecvBytesPerMsgType` lazy saves ~5 GiB.
