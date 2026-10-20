@@ -18,6 +18,7 @@
 #include <test/util/time.h>
 #include <util/translation.h>
 
+#include <chrono>
 #include <cstdint>
 #include <vector>
 
@@ -88,6 +89,7 @@ FUZZ_TARGET(connman, .init = initialize_connman)
     const auto use_addrman_outgoing{fuzzed_data_provider.ConsumeBool()};
     options.m_use_addrman_outgoing = use_addrman_outgoing;
     options.m_max_automatic_connections = fuzzed_data_provider.ConsumeIntegralInRange<int>(0, 1000);
+    options.m_reconnect_check_local = fuzzed_data_provider.ConsumeBool();
 
     auto consume_whitelist = [&]() {
         std::vector<NetWhitelistPermissions> result(fuzzed_data_provider.ConsumeIntegralInRange<size_t>(0, 3));
@@ -125,6 +127,12 @@ FUZZ_TARGET(connman, .init = initialize_connman)
     LIMITED_WHILE (fuzzed_data_provider.ConsumeBool(), 10000) {
         CallOneOf(
             fuzzed_data_provider,
+            [&] {
+                // Without this, mock time never moves and the time-dependent
+                // parts of CConnman (inactivity checks, timeouts, ...) are
+                // never reached.
+                clock += std::chrono::seconds{fuzzed_data_provider.ConsumeIntegralInRange<int64_t>(0, 3 * 60 * 60)};
+            },
             [&] {
                 random_netaddr = ConsumeNetAddr(fuzzed_data_provider);
             },

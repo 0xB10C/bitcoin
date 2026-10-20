@@ -1779,6 +1779,59 @@ void CConnman::AcceptConnection(const ListenSocket& hListenSocket) {
     CreateNodeFromAcceptedSocket(std::move(sock), permission_flags, addr_bind, addr);
 }
 
+bool CConnman::RecordInboundAttempt(const CNetAddr& addr, NodeClock::time_point now)
+{
+    AssertLockNotHeld(m_recent_inbound_mutex);
+
+    std::vector<unsigned char> key{addr.GetAddrBytes()};
+    // Key IPv6 by /48: the entity this targets controls a whole /48 and could
+    // otherwise use a fresh /64 (or address) per attempt. Honest nodes that
+    // share a /48 are lumped together, which costs them little: it takes
+    // three attempts from the /48 within a window for one of them to be
+    // refused, and only while we are full. IPv4, Tor, I2P and CJDNS keep the
+    // full address.
+    if (addr.IsIPv6()) key.resize(6);
+
+    LOCK(m_recent_inbound_mutex);
+    const auto elapsed{now - m_recent_inbound_rotated};
+    if (elapsed >= 2 * INBOUND_RECONNECT_WINDOW) {
+        // No rotation for more than two windows: both filters are stale.
+        m_recent_inbound_cur.reset();
+        m_recent_inbound_prev.reset();
+        m_recent_inbound_rotated = now;
+    } else if (elapsed >= INBOUND_RECONNECT_WINDOW) {
+        std::swap(m_recent_inbound_cur, m_recent_inbound_prev);
+        m_recent_inbound_cur.reset();
+        // Advance by exactly one window instead of to `now`: rotating late
+        // must not extend the lifetime of the entries being rotated.
+        m_recent_inbound_rotated += INBOUND_RECONNECT_WINDOW;
+    }
+    // The filters can't count, so a key uses one entry per attempt it made in
+    // a window, up to the threshold: key+1 for its first attempt, key+2 for
+    // its second, and so on. Attempts are only ever recorded in the current
+    // window, so they age out with the window they were made in instead of
+    // being refreshed by later ones.
+    key.push_back(0);
+    const auto attempts_in{[&](const CRollingBloomFilter& filter) EXCLUSIVE_LOCKS_REQUIRED(m_recent_inbound_mutex) {
+        for (int n{INBOUND_RECONNECT_THRESHOLD}; n > 0; --n) {
+            key.back() = static_cast<unsigned char>(n);
+            if (filter.contains(key)) return n;
+        }
+        return 0;
+    }};
+    const int in_cur{attempts_in(m_recent_inbound_cur)};
+    const int in_prev{attempts_in(m_recent_inbound_prev)};
+    // Inserting only what the count advances to caps the inserts per key per
+    // window at the threshold: every insert counts towards the filter's own
+    // generation rollover, and an address that retries every second must not
+    // push the others out.
+    if (in_cur < INBOUND_RECONNECT_THRESHOLD) {
+        key.back() = static_cast<unsigned char>(in_cur + 1);
+        m_recent_inbound_cur.insert(key);
+    }
+    return in_cur + in_prev >= INBOUND_RECONNECT_THRESHOLD;
+}
+
 void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                                             NetPermissionFlags permission_flags,
                                             const CService& addr_bind,
@@ -1835,6 +1888,21 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
         return;
     }
 
+    // Remember the address and check whether it connected recently. Inbound
+    // Tor connections all come from the local Tor proxy, so skip them (same
+    // reasoning as for AddWhitelistPermissionFlags above) and local addresses
+    // in general. NoBan peers are never dropped by this check, so don't track
+    // them either.
+    const bool recent_reconnect{!inbound_onion &&
+                                (!addr.IsLocal() || m_reconnect_check_local) &&
+                                !NetPermissions::HasFlag(permission_flags, NetPermissionFlags::NoBan) &&
+                                RecordInboundAttempt(addr, NodeClock::now())};
+    if (recent_reconnect && nInbound >= m_max_inbound) {
+        LogDebug(BCLog::NET, "connection%s dropped (reconnected too soon, inbound slots full)\n",
+                 fLogIPs ? strprintf(" from %s", addr.ToStringAddrPort()) : "");
+        return;
+    }
+
     if (nInbound >= m_max_inbound)
     {
         if (!AttemptToEvictConnection(/*evict_tx_relay_peer_only=*/false)) {
@@ -1870,6 +1938,7 @@ void CConnman::CreateNodeFromAcceptedSocket(std::unique_ptr<Sock>&& sock,
                              CNodeOptions{
                                  .permission_flags = permission_flags,
                                  .prefer_evict = discouraged,
+                                 .recent_reconnect = recent_reconnect,
                                  .recv_flood_size = nReceiveFloodSize,
                                  .use_v2transport = use_v2transport,
                              });
@@ -2538,7 +2607,7 @@ int CConnman::GetExtraBlockRelayCount() const
     return std::max(block_relay_peers - m_max_outbound_block_relay, 0);
 }
 
-bool CConnman::EvictTxPeerIfFull(std::optional<NodeId> protect_peer)
+bool CConnman::InboundTxRelayFull() const
 {
     int tx_inbound_peers{0};
     {
@@ -2549,10 +2618,13 @@ bool CConnman::EvictTxPeerIfFull(std::optional<NodeId> protect_peer)
             }
         }
     }
-    if (tx_inbound_peers > m_max_inbound_full_relay) {
-        return AttemptToEvictConnection(/*evict_tx_relay_peer_only=*/true, protect_peer);
-    }
-    return true;
+    return tx_inbound_peers > m_max_inbound_full_relay;
+}
+
+bool CConnman::EvictTxPeerIfFull(std::optional<NodeId> protect_peer)
+{
+    if (!InboundTxRelayFull()) return true;
+    return AttemptToEvictConnection(/*evict_tx_relay_peer_only=*/true, protect_peer);
 }
 
 std::unordered_set<Network> CConnman::GetReachableEmptyNetworks() const
@@ -4131,6 +4203,7 @@ CNode::CNode(NodeId idIn,
       m_dest(addrNameIn),
       m_inbound_onion{inbound_onion},
       m_prefer_evict{node_opts.prefer_evict},
+      m_recent_reconnect{node_opts.recent_reconnect},
       nKeyedNetGroup{nKeyedNetGroupIn},
       m_network_key{network_key},
       m_conn_type{conn_type_in},
