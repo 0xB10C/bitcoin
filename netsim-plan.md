@@ -560,7 +560,52 @@ Further profiling needs a real profiler. `perf` is not in the bix flake and
 `gdb` cannot attach here, so the measurements above come from varying one knob
 at a time, which located the dominant cost but will not resolve what is left.
 
-### 5.3 A CPU trap worth more than the memory numbers
+### 5.3 Memory levers, measured
+
+Every figure below is a measured 1000-node blocks-only run, 15 simulated
+minutes, against a 1,261,084 KiB baseline.
+
+| Lever | Effect | Status |
+|---|---|---|
+| Advertise `fRelay=false` | 9.96 → 1.31 MB/node, 7.6x | **In use.** The single largest lever by far. |
+| One shared `ChainstateManager`, validation caches at zero | avoids 32.25 MiB per node | In use |
+| No per-node `BanMan` | avoids 539 KiB per node | In use |
+| V1 transport rather than V2 | avoids ~1 KiB plus buffers per node | In use |
+| jemalloc via `LD_PRELOAD` | **6% worse**: 1,336,000 KiB | **Tested and rejected** |
+| `nid_type` 64-bit → 32-bit | **25% better**: 940,396 KiB | **Reverted, see below** |
+| Drop the per-`CNode` message-type map prefill | ~4% | Not a one-liner, see below |
+
+**The 25% one is real but must not be taken.** Halving `nid_type` halves
+AddrMan's two fixed bucket tables from 640.5 KiB to 320 KiB per instance, which
+is 320 KB per node and would take 100k nodes from about 131 GB to 98 GB. It
+also reverts a security fix: the 64-bit width exists because the former `int`
+let an attacker overflow the counter by making a node add more than 2^31
+addresses, disclosed on 2024-07-31. A simulation bounded by its own address
+universe cannot reach that; a real node can. Since this branch also carries
+commits intended for upstream, the change is not left in the tree. Anyone who
+wants it should apply it locally and never ship it.
+
+**The 4% one is not free either.** `CNode`'s constructor pre-fills
+`mapRecvBytesPerMsgType` with 37 entries, about 2.7 KiB per `CNode`, whether or
+not a message ever arrives. Removing the prefill trips an assertion in
+`CNode::ReceiveMsgBytes`, which requires the key to be present, so it needs the
+accounting path changed to insert on demand rather than a deletion.
+
+Two further levers are untested and both carry a trade:
+
+- **Sparse AddrMan bucket tables.** At the occupancies these runs reach, around
+  100 addresses per node, the 81,920 slots are over 99% empty, so a sparse
+  representation would cut roughly 630 KB per node. But `Select()` already
+  probes random slots until it finds an occupied one, so the probe count would
+  not change while each probe became a hash lookup. That trades memory against
+  the CPU hot spot identified in §5.2.
+- **A smaller `Peer::m_addr_known`.** At 26.3 KiB per addr-relay peer this is
+  roughly 500 KB per node, the dominant per-peer cost once transaction relay is
+  off. It is safe to shrink for a pure topology run and not safe for an
+  address-relay run, because the filter's size is exactly what governs the
+  re-relay behaviour being measured.
+
+### 5.4 A CPU trap worth more than the memory numbers
 
 A node that cannot fill its outbound slots costs about a hundred times more to
 simulate than one that can. Each attempt runs up to 100 `AddrMan::Select()`
