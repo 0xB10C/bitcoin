@@ -10,6 +10,43 @@ from that tree.
 
 ---
 
+## 0. Status
+
+The 100-node MVP is built and running. Code in `src/netsim/`, regression tests
+in `src/test/netsim_tests.cpp`, driven by the `netsim_tests` suite.
+
+What works: real `AddrMan`, `CConnman` and `PeerManager` per node, no sockets
+and no threads, a microsecond event queue with a region latency model and
+ordered per-direction delivery, Core's own `TryPickOutboundAddress` choosing
+destinations, and reproducible runs.
+
+Measured over 100 nodes, 20 listening, 30 simulated minutes:
+
+| | |
+|---|---|
+| Connections formed | 785 |
+| Nodes filling all 8 outbound slots | 93 of 100 |
+| Nodes left isolated | 0 |
+| Addresses held, total | 1241 against 400 seeded |
+| Circulating addresses pointing nowhere | 0 |
+| Outbound attempts to a dead address | 0 |
+
+Both blockers from §3 are resolved. AddrMan takes a per-instance seed, and the
+listen flag is now per `CConnman` rather than the process-wide `fListen`;
+without the second, three quarters of all circulating addresses pointed at
+non-listening nodes.
+
+`mapLocalHost` is still global, but no longer blocking: a node learns its own
+address from the `addr_recv` field of its peer's VERSION, so the peer-reported
+substitution path in `GetLocalAddrForPeer` produces the right answer as long
+as the address universe uses `GetListenPort()`.
+
+Still to do: a standalone `bitcoin-netsim` binary (the library is ready for
+one), inbound eviction instead of refusal when a listener is full, feelers and
+block-relay-only connections, churn, and the graph export in §11.
+
+---
+
 ## 1. Verdict
 
 This is feasible, and most of the machinery already exists in the test
