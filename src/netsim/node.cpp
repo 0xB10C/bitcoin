@@ -8,7 +8,9 @@
 #include <hash.h>
 #include <netgroup.h>
 #include <protocol.h>
+#include <random.h>
 #include <uint256.h>
+#include <util/time.h>
 
 #include <string>
 #include <utility>
@@ -20,6 +22,7 @@ namespace {
 const std::string SEED_ADDRMAN{"netsim/addrman"};
 const std::string SEED_CONNMAN{"netsim/connman"};
 const std::string SEED_PEERMAN{"netsim/peerman"};
+const std::string SEED_SCHEDULER{"netsim/scheduler"};
 const std::string SEED_NONCE{"netsim/nonce"};
 const std::string SEED_NETWORK_KEY{"netsim/networkkey"};
 
@@ -66,7 +69,8 @@ SimNode::~SimNode()
     addrman.reset();
 }
 
-std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const CService& self, bool listening)
+std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const CService& self, bool listening,
+                                  bool blocks_only, int max_automatic_connections)
 {
     auto node{std::make_unique<SimNode>()};
     node->id = id;
@@ -91,6 +95,11 @@ std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const C
 
     PeerManager::Options peerman_opts;
     peerman_opts.max_extra_txs = 0;
+    // Advertising fRelay=false stops the peer allocating a Peer::TxRelay for
+    // us, and so stops its 527 KiB inventory bloom filter being allocated
+    // eagerly. At sixteen peers a node that is around 8.5 MB, which dominates
+    // everything else including AddrMan's 640 KiB.
+    peerman_opts.ignore_incoming_txs = blocks_only;
     // Its own stream, for the same reason AddrMan gets one. m_rng drives the
     // Poisson address-send and inventory timers, so a shared stream would put
     // every node on the same schedule and an OS-seeded one would make the run
@@ -111,16 +120,23 @@ std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const C
     // self-announces, including the ones nobody can reach, and most of the
     // addresses in circulation end up pointing nowhere.
     conn_opts.m_listen = listening;
+    conn_opts.m_max_automatic_connections = max_automatic_connections;
     conn_opts.nSendBufferMaxSize = SEND_BUFFER_BYTES;
     conn_opts.nReceiveFloodSize = RECV_FLOOD_BYTES;
     // Init(), never Start(): Start() spawns four threads unconditionally, which
     // at any interesting population size is the end of the experiment.
     node->connman->Init(conn_opts);
 
+    // Arm the connection-opening timers from the same clock ThreadOpenConnections
+    // uses, so comparisons against GetTime<microseconds>() line up.
+    node->rng = std::make_unique<FastRandomContext>(DeriveHash(SEED_SCHEDULER, id));
+    node->timers.Arm(GetTime<std::chrono::microseconds>(), *node->rng);
+
     return node;
 }
 
-ConnPair ConnectPair(const SharedContext& ctx, SimNode& from, SimNode& to, NodeId out_id, NodeId in_id)
+ConnPair ConnectPair(const SharedContext& ctx, SimNode& from, SimNode& to, ConnectionType conn_type, NodeId out_id,
+                     NodeId in_id)
 {
     constexpr auto SERVICES{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
 
@@ -145,7 +161,7 @@ ConnPair ConnectPair(const SharedContext& ctx, SimNode& from, SimNode& to, NodeI
         DeriveUint64(SEED_NONCE, from.id, static_cast<uint32_t>(out_id)),
         /*addrBindIn=*/from.self,
         /*addrNameIn=*/"",
-        ConnectionType::OUTBOUND_FULL_RELAY,
+        conn_type,
         /*inbound_onion=*/false,
         DeriveUint64(SEED_NETWORK_KEY, from.id),
         make_opts()}};
@@ -163,9 +179,16 @@ ConnPair ConnectPair(const SharedContext& ctx, SimNode& from, SimNode& to, NodeI
         DeriveUint64(SEED_NETWORK_KEY, to.id),
         make_opts()}};
 
+    // AddRef() for the reference m_nodes itself holds, exactly as
+    // CreateNodeFromAcceptedSocket and OpenNetworkConnection do.
+    // ConnmanTestMsg::AddTestNode skips it, which is fine only for tests that
+    // never disconnect: DisconnectNodes() releases that reference, and without
+    // it the count goes negative and CNode::GetRefCount asserts.
+    out_side->AddRef();
     from.peerman->InitializeNode(*out_side, SERVICES);
     from.connman->AddTestNode(*out_side);
 
+    in_side->AddRef();
     to.peerman->InitializeNode(*in_side, SERVICES);
     to.connman->AddTestNode(*in_side);
 

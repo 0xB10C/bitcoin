@@ -67,6 +67,31 @@ struct ConnmanTestMsg : public CConnman {
         if (node.IsManualOrFullOutboundConn()) ++m_network_conn_counts[node.addr.GetNetwork()];
     }
 
+    /** Run CConnman's own disconnect pass.
+     *
+     * Moves nodes flagged fDisconnect out of m_nodes and deletes them through
+     * PeerManager::FinalizeNode, which is what keeps the per-peer counters
+     * consistent. A driver with no socket thread has to call this itself, or
+     * self-disconnecting connections such as feelers accumulate forever.
+     */
+    void DisconnectNodesPublic() EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_reconnections_mutex)
+    {
+        DisconnectNodes();
+    }
+
+    /** Try to free an inbound slot by evicting an existing peer.
+     *
+     * Returns false when every candidate was protected. On success the chosen
+     * peer is only flagged, so the caller still has to run a disconnect pass
+     * before the slot actually frees up.
+     */
+    bool AttemptToEvictConnectionPublic(bool evict_tx_relay_peer_only = false,
+                                        std::optional<NodeId> protect_peer = std::nullopt)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex)
+    {
+        return AttemptToEvictConnection(evict_tx_relay_peer_only, protect_peer);
+    }
+
     void ClearTestNodes()
     {
         LOCK(m_nodes_mutex);

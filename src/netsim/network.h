@@ -46,6 +46,15 @@ struct Link {
      * every new arrival is clamped past. */
     SimTime next_free_to_acceptor{};
     SimTime next_free_to_initiator{};
+
+    /** Set once both CNode ends have been reaped.
+     *
+     * Connections do close on their own: a feeler hangs up during the VERSION
+     * handler, and an addr-fetch connection after its first useful response.
+     * A closed link keeps its slot in the vector so that event callbacks
+     * holding its index stay valid, and the pointers are nulled as each end is
+     * deleted. */
+    bool closed{false};
 };
 
 /** A population of simulated nodes, the links between them, and the loop that
@@ -88,6 +97,13 @@ public:
          * Stands in for hardcoded seeds. Zero leaves every AddrMan empty, in
          * which case no node can ever connect to anything. */
         uint32_t bootstrap_addrs{4};
+        /** Advertise fRelay=false, as -blocksonly does. See MakeNode(). */
+        bool blocks_only{false};
+        /** Each node's connection budget, as -maxconnections sets it.
+         *
+         * Lowering it is the cheap way to reach the inbound cap, and so to
+         * exercise eviction, without a population of hundreds. */
+        int max_automatic_connections{DEFAULT_MAX_PEER_CONNECTIONS};
         RegionLatency::Options latency{};
         uint256 rng_seed{uint256{1}};
     };
@@ -114,7 +130,8 @@ public:
      * `from` itself, is already connected to `from`, or has no inbound slot
      * left.
      */
-    bool Connect(uint32_t from, uint32_t to) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex);
+    bool Connect(uint32_t from, uint32_t to, ConnectionType conn_type = ConnectionType::OUTBOUND_FULL_RELAY)
+        EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex);
 
     /** Run until `duration` of simulated time has elapsed. */
     void RunFor(SimTime duration) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex);
@@ -136,6 +153,12 @@ public:
     uint64_t SelfPicks() const { return m_self_picks; }
     /** Outbound attempts the acceptor turned away. */
     uint64_t RejectedAttempts() const { return m_rejected_attempts; }
+    /** Links whose ends have both hung up, feelers included. */
+    uint64_t ClosedLinks() const { return m_closed_links; }
+    /** Inbound connections accepted by evicting an existing peer. */
+    uint64_t Evictions() const { return m_evictions; }
+    /** Connections opened, by connection type. */
+    uint64_t OpenedOfType(ConnectionType type) const;
 
 private:
     void ServiceEndpoint(size_t link_index, Direction outgoing)
@@ -150,6 +173,9 @@ private:
     void ServiceNode(uint32_t id) NO_THREAD_SAFETY_ANALYSIS;
     /** One outbound attempt, using Core's own selection logic. */
     void TryOpenOutbound(uint32_t id) NO_THREAD_SAFETY_ANALYSIS;
+
+    /** Close this node's links whose either end hung up, and delete its CNodes. */
+    void ReapNode(uint32_t id) NO_THREAD_SAFETY_ANALYSIS;
 
     void Bootstrap();
     void ArmServiceTick(uint32_t id, SimTime at);
@@ -175,6 +201,9 @@ private:
     uint64_t m_failed_attempts{0};
     uint64_t m_self_picks{0};
     uint64_t m_rejected_attempts{0};
+    uint64_t m_closed_links{0};
+    uint64_t m_evictions{0};
+    std::map<ConnectionType, uint64_t> m_opened_by_type;
 };
 
 } // namespace netsim

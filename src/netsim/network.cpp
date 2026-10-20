@@ -18,17 +18,16 @@
 namespace netsim {
 
 namespace {
-/** Inbound slots a default-configured node has.
+/** Inbound slots a node has, for a given connection budget.
  *
- * Mirrors CConnman::Init(): m_max_inbound is m_max_automatic_connections minus
- * the automatic outbound reservation of 8 full-relay, 2 block-relay and 1
- * feeler. Recomputed here because the member is private.
+ * Mirrors CConnman::Init(): m_max_inbound is the budget less the automatic
+ * outbound reservation. Recomputed here because the member is private.
  */
-constexpr int InboundCapacity()
+constexpr int InboundCapacity(int budget)
 {
-    const int automatic_outbound{MAX_OUTBOUND_FULL_RELAY_CONNECTIONS + MAX_BLOCK_RELAY_ONLY_CONNECTIONS +
-                                 MAX_FEELER_CONNECTIONS};
-    return std::max(0, static_cast<int>(DEFAULT_MAX_PEER_CONNECTIONS) - automatic_outbound);
+    const int full_relay{std::min(MAX_OUTBOUND_FULL_RELAY_CONNECTIONS, budget)};
+    const int block_relay{std::min(MAX_BLOCK_RELAY_ONLY_CONNECTIONS, budget - full_relay)};
+    return std::max(0, budget - (full_relay + block_relay + MAX_FEELER_CONNECTIONS));
 }
 
 Direction Opposite(Direction d)
@@ -60,7 +59,7 @@ Network::Network(Options opts_in, const SharedContext& ctx)
 
     for (uint32_t id{0}; id < m_opts.num_nodes; ++id) {
         const bool listening{id < m_opts.num_listening};
-        m_nodes.push_back(MakeNode(m_ctx, id, m_universe.At(id), listening));
+        m_nodes.push_back(MakeNode(m_ctx, id, m_universe.At(id), listening, m_opts.blocks_only, m_opts.max_automatic_connections));
         if (listening) m_listeners.emplace(m_universe.At(id), id);
 
         // Stagger the first tick of each kind across its interval. Without
@@ -125,7 +124,13 @@ std::optional<uint32_t> Network::ListenerAt(const CService& addr) const
     return it->second;
 }
 
-bool Network::Connect(uint32_t from, uint32_t to)
+uint64_t Network::OpenedOfType(ConnectionType type) const
+{
+    const auto it{m_opened_by_type.find(type)};
+    return it == m_opened_by_type.end() ? 0 : it->second;
+}
+
+bool Network::Connect(uint32_t from, uint32_t to, ConnectionType conn_type)
 {
     if (from == to) return false;
     if (to >= m_nodes.size() || from >= m_nodes.size()) return false;
@@ -138,18 +143,30 @@ bool Network::Connect(uint32_t from, uint32_t to)
     // to, so ask it rather than tracking that separately.
     if (dialer.connman->AlreadyConnectedToAddressPublic(acceptor.self)) return false;
 
-    if (acceptor.connman->GetNodeCount(ConnectionDirection::In) >= static_cast<size_t>(InboundCapacity())) {
-        // Production would try AttemptToEvictConnection here. That is private
-        // and not exposed by ConnmanTestMsg, so for now the connection is
-        // refused and counted; at the populations this is used for, the cap is
-        // never reached.
-        ++m_inbound_refusals;
-        return false;
+    const auto capacity{static_cast<size_t>(InboundCapacity(m_opts.max_automatic_connections))};
+    if (acceptor.connman->GetNodeCount(ConnectionDirection::In) >= capacity) {
+        // What CreateNodeFromAcceptedSocket does when the inbound slots are
+        // full: try to evict an existing peer, and drop the new connection only
+        // if every candidate was protected. The eviction logic is Core's own,
+        // so netgroup, ping, and recency protections all apply.
+        if (!acceptor.connman->AttemptToEvictConnectionPublic()) {
+            ++m_inbound_refusals;
+            return false;
+        }
+        // Eviction only flags the loser. The slot frees up when the disconnect
+        // pass actually deletes it.
+        ReapNode(to);
+        if (acceptor.connman->GetNodeCount(ConnectionDirection::In) >= capacity) {
+            ++m_inbound_refusals;
+            return false;
+        }
+        ++m_evictions;
     }
 
     const NodeId out_id{m_next_node_id++};
     const NodeId in_id{m_next_node_id++};
-    const ConnPair pair{ConnectPair(m_ctx, dialer, acceptor, out_id, in_id)};
+    const ConnPair pair{ConnectPair(m_ctx, dialer, acceptor, conn_type, out_id, in_id)};
+    ++m_opened_by_type[conn_type];
 
     const size_t index{m_links.size()};
     m_links.push_back(Link{from, to, pair.out_side, pair.in_side, m_clock.Now(), m_clock.Now()});
@@ -166,9 +183,11 @@ void Network::ServiceEndpoint(size_t link_index, Direction outgoing)
 {
     AssertLockHeld(NetEventsInterface::g_msgproc_mutex);
     Link& link{m_links[link_index]};
+    if (link.closed) return;
 
     const bool from_initiator{outgoing == Direction::ToAcceptor};
     CNode* source{from_initiator ? link.out_side : link.in_side};
+    if (source == nullptr) return; // this end has already been reaped
     SimNode& source_node{At(from_initiator ? link.initiator : link.acceptor)};
 
     Process(source_node, *source);
@@ -202,6 +221,9 @@ void Network::DeliverNow(size_t link_index, Direction outgoing, const std::vecto
 
     const bool to_acceptor{outgoing == Direction::ToAcceptor};
     CNode* destination{to_acceptor ? link.in_side : link.out_side};
+    // Bytes still in flight when the far end hung up are simply lost, which is
+    // what happens to a real socket that closes under them.
+    if (link.closed || destination == nullptr) return;
     SimNode& destination_node{At(to_acceptor ? link.acceptor : link.initiator)};
 
     Deliver(*destination_node.connman, *destination, wire);
@@ -217,7 +239,52 @@ void Network::ServiceNode(uint32_t id)
     // connection needs a periodic chance to flush.
     for (const size_t index : m_links_by_node[id]) {
         const Link& link{m_links[index]};
+        if (link.closed) continue;
         ServiceEndpoint(index, link.initiator == id ? Direction::ToAcceptor : Direction::ToInitiator);
+    }
+    ReapNode(id);
+}
+
+void Network::ReapNode(uint32_t id)
+{
+    AssertLockHeld(NetEventsInterface::g_msgproc_mutex);
+
+    // A connection goes down at both ends, so propagate the flag before
+    // anything is deleted. Feelers reach here routinely: they set fDisconnect
+    // from the VERSION handler, before verack.
+    bool any{false};
+    for (const size_t index : m_links_by_node[id]) {
+        Link& link{m_links[index]};
+        if (link.closed) continue;
+        const bool is_initiator{link.initiator == id};
+        CNode* mine{is_initiator ? link.out_side : link.in_side};
+        CNode* theirs{is_initiator ? link.in_side : link.out_side};
+        if (mine == nullptr) continue;
+        if (!mine->fDisconnect && (theirs == nullptr || !theirs->fDisconnect)) continue;
+        mine->fDisconnect = true;
+        if (theirs != nullptr) theirs->fDisconnect = true;
+        any = true;
+    }
+    if (!any) return;
+
+    // Forget our pointers before the disconnect pass deletes the objects. Only
+    // this node's own ends are at risk: the far ends belong to another CConnman
+    // and are reaped when that node's own tick runs.
+    for (const size_t index : m_links_by_node[id]) {
+        Link& link{m_links[index]};
+        if (link.closed) continue;
+        CNode*& mine{link.initiator == id ? link.out_side : link.in_side};
+        if (mine != nullptr && mine->fDisconnect) mine = nullptr;
+    }
+
+    At(id).connman->DisconnectNodesPublic();
+
+    for (const size_t index : m_links_by_node[id]) {
+        Link& link{m_links[index]};
+        if (!link.closed && link.out_side == nullptr && link.in_side == nullptr) {
+            link.closed = true;
+            ++m_closed_links;
+        }
     }
 }
 
@@ -226,24 +293,22 @@ void Network::TryOpenOutbound(uint32_t id)
     AssertLockHeld(NetEventsInterface::g_msgproc_mutex);
     SimNode& node{At(id)};
 
-    if (node.connman->GetFullOutboundConnCount() >= MAX_OUTBOUND_FULL_RELAY_CONNECTIONS) return;
+    // Ask Core what to open next rather than deciding here. This is the real
+    // priority ladder: anchors, then full-relay to capacity, then
+    // block-relay-only to capacity, then the stale-tip extra peer, the
+    // periodic extra block-relay peer, a feeler, and an extra peer on an
+    // unrepresented network. Reimplementing it alongside would mean measuring
+    // the reimplementation.
+    const CConnman::OutboundSlots slots{node.connman->CountOutboundSlots()};
+    const auto now{GetTime<std::chrono::microseconds>()};
+    const std::optional<CConnman::NextOutbound> next{
+        node.connman->DecideNextOutbound(slots, node.timers, now, *node.rng)};
+    if (!next) return;
 
-    // The same accounting ThreadOpenConnections does before selecting. Only
-    // persistent outbound connections reserve a netgroup; inbound, feeler and
-    // addr-fetch connections deliberately do not.
-    std::set<std::vector<unsigned char>> used_netgroups;
-    for (const CNode* peer : node.connman->TestNodes()) {
-        if (peer->IsManualOrFullOutboundConn() || peer->IsBlockOnlyConn()) {
-            used_netgroups.insert(m_ctx.netgroupman.GetGroup(peer->addr));
-        }
-    }
+    node.addrman->ResolveCollisions();
 
     const std::optional<CAddress> picked{node.connman->TryPickOutboundAddress(
-        /*anchor=*/false,
-        ConnectionType::OUTBOUND_FULL_RELAY,
-        /*fFeeler=*/false,
-        used_netgroups,
-        /*preferred_net=*/std::nullopt)};
+        next->anchor, next->conn_type, next->feeler, slots.netgroups, next->preferred_net)};
     if (!picked) return;
 
     // Core would have discarded its own address inside the selection loop, via
@@ -269,11 +334,12 @@ void Network::TryOpenOutbound(uint32_t id)
     // whether or not it succeeds. The count_failures rule is
     // ThreadOpenConnections': only start counting failures once the node has a
     // couple of distinct-netgroup outbound peers to lose.
-    const bool count_failures{used_netgroups.size() >= std::min<size_t>(DEFAULT_MAX_PEER_CONNECTIONS - 1, 2)};
+    const bool count_failures{static_cast<int>(slots.netgroups.size()) + slots.privacy_network_peers >=
+                              std::min<int>(DEFAULT_MAX_PEER_CONNECTIONS - 1, 2)};
     node.addrman->Attempt(*picked, count_failures);
 
     const std::optional<uint32_t> target{ListenerAt(*picked)};
-    if (!target || !Connect(id, *target)) {
+    if (!target || !Connect(id, *target, next->conn_type)) {
         // Nothing listening there, or the acceptor had no room. A real node
         // learns this from a refused or timed-out connect.
         ++m_failed_attempts;

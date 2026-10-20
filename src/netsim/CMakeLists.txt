@@ -10,6 +10,7 @@ add_library(bitcoin_netsim STATIC EXCLUDE_FROM_ALL
   clock.cpp
   eventqueue.cpp
   latency.cpp
+  metrics.cpp
   network.cpp
   node.cpp
   pump.cpp
@@ -24,4 +25,26 @@ target_link_libraries(bitcoin_netsim
     core_interface
   PUBLIC
     test_util
+)
+
+# Standalone driver. EXCLUDE_FROM_ALL because it links the whole node and a
+# normal build does not need it; build it with
+#   cmake --build build --target bitcoin-netsim
+add_executable(bitcoin-netsim EXCLUDE_FROM_ALL
+  main.cpp
+)
+
+target_link_libraries(bitcoin-netsim
+  core_interface
+  bitcoin_netsim
+  test_util
+  bitcoin_node
+  bitcoin_common
+  bitcoin_util
+  bitcoin_consensus
+  minisketch
+  leveldb
+  univalue
+  secp256k1
+  Boost::headers
 )

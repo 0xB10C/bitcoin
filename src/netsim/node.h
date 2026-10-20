@@ -50,6 +50,16 @@ struct SimNode {
     std::unique_ptr<PeerManager> peerman;
     std::unique_ptr<ConnmanTestMsg> connman;
 
+    /** The connection-opening timers this node carries between attempts.
+     *
+     * In production these are locals of ThreadOpenConnections. One per node
+     * here, because each node runs its own loop. */
+    CConnman::OutboundTimers timers;
+    /** This node's own RNG for connection scheduling, seeded per node so the
+     *  feeler and extra-peer timers do not march in lockstep. Held by pointer
+     *  because FastRandomContext is neither copyable nor movable. */
+    std::unique_ptr<FastRandomContext> rng;
+
     SimNode() = default;
     ~SimNode();
     SimNode(const SimNode&) = delete;
@@ -64,8 +74,18 @@ struct SharedContext {
     const NetGroupManager& netgroupman;
 };
 
-/** Build one node, with its own AddrMan keyspace and its own CConnman seeds. */
-std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const CService& self, bool listening);
+/** Build one node, with its own AddrMan keyspace and its own CConnman seeds.
+ *
+ * `blocks_only` advertises fRelay=false, as `-blocksonly` does. For a study of
+ * topology or address relay that costs nothing in fidelity and saves a great
+ * deal of memory: a peer offering transaction relay gets a `Peer::TxRelay`,
+ * whose inventory filter is a 527 KiB rolling bloom allocated eagerly, and at
+ * roughly sixteen peers per node that one structure is around 8.5 MB per node.
+ * It dominates every other per-node cost, including AddrMan.
+ */
+std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const CService& self, bool listening,
+                                  bool blocks_only = false,
+                                  int max_automatic_connections = DEFAULT_MAX_PEER_CONNECTIONS);
 
 /** The two CNode ends of one simulated connection.
  *
@@ -87,7 +107,8 @@ struct ConnPair {
  * The node ids only have to be unique within each node's own CConnman, but the
  * caller is expected to keep them globally unique so that logs can be read.
  */
-ConnPair ConnectPair(const SharedContext& ctx, SimNode& from, SimNode& to, NodeId out_id, NodeId in_id);
+ConnPair ConnectPair(const SharedContext& ctx, SimNode& from, SimNode& to, ConnectionType conn_type, NodeId out_id,
+                     NodeId in_id);
 
 } // namespace netsim
 

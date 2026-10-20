@@ -10,6 +10,7 @@
 #include <netsim/clock.h>
 #include <netsim/eventqueue.h>
 #include <netsim/latency.h>
+#include <netsim/metrics.h>
 #include <netsim/network.h>
 #include <netsim/node.h>
 #include <netsim/pump.h>
@@ -315,7 +316,7 @@ BOOST_FIXTURE_TEST_CASE(netsim_two_node_handshake, SimTestingSetup)
     // process-global mutex rather than one per CConnman.
     LOCK(NetEventsInterface::g_msgproc_mutex);
 
-    const auto conn{netsim::ConnectPair(ctx, *dialer, *listener, /*out_id=*/0, /*in_id=*/1)};
+    const auto conn{netsim::ConnectPair(ctx, *dialer, *listener, ConnectionType::OUTBOUND_FULL_RELAY, /*out_id=*/0, /*in_id=*/1)};
     BOOST_REQUIRE(conn.out_side != nullptr);
     BOOST_REQUIRE(conn.in_side != nullptr);
 
@@ -381,7 +382,7 @@ BOOST_FIXTURE_TEST_CASE(netsim_getaddr_populates_addrman, SimTestingSetup)
     BOOST_REQUIRE_EQUAL(dialer->addrman->Size(), 0U);
 
     LOCK(NetEventsInterface::g_msgproc_mutex);
-    const auto conn{netsim::ConnectPair(ctx, *dialer, *listener, /*out_id=*/0, /*in_id=*/1)};
+    const auto conn{netsim::ConnectPair(ctx, *dialer, *listener, ConnectionType::OUTBOUND_FULL_RELAY, /*out_id=*/0, /*in_id=*/1)};
 
     // The ADDR response is queued against the dialer's m_next_addr_send timer,
     // which is Poisson with a 30 s mean, so step the clock forward between
@@ -524,16 +525,33 @@ BOOST_FIXTURE_TEST_CASE(netsim_hundred_node_topology, SimTestingSetup)
     constexpr uint32_t NODES{100};
     constexpr uint32_t LISTENERS{20};
 
+    // Taken before the population exists, so the shared chainstate and the
+    // host process are excluded from the figure below.
+    const auto rss_before{netsim::ResidentSetBytes()};
+
     netsim::Network::Options opts;
     opts.num_nodes = NODES;
     opts.num_listening = LISTENERS;
     opts.bootstrap_addrs = 4;
     netsim::Network net{opts, ctx};
 
-    LOCK(NetEventsInterface::g_msgproc_mutex);
-    net.RunFor(std::chrono::duration_cast<SimTime>(30min));
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        net.RunFor(std::chrono::duration_cast<SimTime>(30min));
+    }
 
-    size_t total_outbound{0};
+    if (rss_before) {
+        const auto rss_after{netsim::ResidentSetBytes().value_or(*rss_before)};
+        const int64_t delta{static_cast<int64_t>(rss_after) - static_cast<int64_t>(*rss_before)};
+        BOOST_TEST_MESSAGE("rss_before_kb=" << *rss_before / 1024 << " rss_after_kb=" << rss_after / 1024
+                                            << " sim_delta_kb=" << delta / 1024
+                                            << " bytes_per_node=" << delta / static_cast<int64_t>(NODES)
+                                            << " peak_kb=" << netsim::PeakResidentSetBytes().value_or(0) / 1024);
+    }
+
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    [[maybe_unused]] size_t total_outbound{0};
     size_t saturated{0};
     size_t isolated{0};
     size_t total_known{0};
@@ -579,14 +597,50 @@ BOOST_FIXTURE_TEST_CASE(netsim_hundred_node_topology, SimTestingSetup)
     // be aimed at a dead one.
     BOOST_CHECK_EQUAL(net.FailedAttempts(), 0U);
 
-    BOOST_TEST_MESSAGE("links=" << net.LinkCount() << " outbound=" << total_outbound << " inbound=" << total_inbound
+    // Connections that are still up, as opposed to every connection ever made.
+    // Feelers close themselves, so the two figures diverge.
+    size_t live_links{0};
+    size_t live_block_relay{0};
+    for (const netsim::Link& link : net.Links()) {
+        if (!link.closed) ++live_links;
+    }
+    for (uint32_t id{0}; id < NODES; ++id) {
+        for (const CNode* peer : net.At(id).connman->TestNodes()) {
+            if (peer->IsBlockOnlyConn()) ++live_block_relay;
+        }
+    }
+
+    BOOST_TEST_MESSAGE("links=" << net.LinkCount() << " live=" << live_links << " closed=" << net.ClosedLinks()
+                                << " full_relay=" << net.OpenedOfType(ConnectionType::OUTBOUND_FULL_RELAY)
+                                << " block_relay=" << net.OpenedOfType(ConnectionType::BLOCK_RELAY)
+                                << " feeler=" << net.OpenedOfType(ConnectionType::FEELER)
+                                << " live_block_relay=" << live_block_relay << " inbound=" << total_inbound
                                 << " saturated=" << saturated << " isolated=" << isolated
-                                << " addrman_total=" << total_known << " failed=" << net.FailedAttempts() << " selfpick=" << net.SelfPicks() << " rejected=" << net.RejectedAttempts()
+                                << " addrman_total=" << total_known << " failed=" << net.FailedAttempts()
+                                << " rejected=" << net.RejectedAttempts() << " evicted=" << net.Evictions()
                                 << " refused=" << net.InboundRefusals() << " bytes=" << net.BytesTransferred());
 
-    // Every outbound connection is some listener's inbound connection.
-    BOOST_CHECK_EQUAL(total_outbound + (net.LinkCount() - total_outbound), net.LinkCount());
-    BOOST_CHECK_EQUAL(total_inbound, net.LinkCount());
+    // Every live connection is some listener's inbound connection.
+    BOOST_CHECK_EQUAL(total_inbound, live_links);
+    BOOST_CHECK_EQUAL(net.LinkCount() - net.ClosedLinks(), live_links);
+
+    // Core's ladder opened all three kinds without the simulator choosing any
+    // of them. Block-relay-only peers persist; feelers do not, because they
+    // hang up in the VERSION handler before verack.
+    BOOST_CHECK_GT(net.OpenedOfType(ConnectionType::OUTBOUND_FULL_RELAY), 0U);
+    BOOST_CHECK_GT(net.OpenedOfType(ConnectionType::BLOCK_RELAY), 0U);
+    BOOST_CHECK_GT(net.OpenedOfType(ConnectionType::FEELER), 0U);
+    BOOST_CHECK_GT(live_block_relay, 0U);
+    BOOST_CHECK_GE(net.ClosedLinks(), net.OpenedOfType(ConnectionType::FEELER));
+
+    // No node keeps more block-relay-only peers than its slot count.
+    for (uint32_t id{0}; id < NODES; ++id) {
+        size_t block_relay{0};
+        for (const CNode* peer : net.At(id).connman->TestNodes()) {
+            if (peer->IsBlockOnlyConn()) ++block_relay;
+        }
+        BOOST_CHECK_LE(block_relay, static_cast<size_t>(MAX_BLOCK_RELAY_ONLY_CONNECTIONS));
+    }
 
     // Nobody is stranded, and the listeners are all carrying traffic.
     BOOST_CHECK_EQUAL(isolated, 0U);
@@ -607,6 +661,60 @@ BOOST_FIXTURE_TEST_CASE(netsim_hundred_node_topology, SimTestingSetup)
         BOOST_CHECK_LE(net.At(id).connman->GetFullOutboundConnCount(), MAX_OUTBOUND_FULL_RELAY_CONNECTIONS);
     }
     BOOST_CHECK_EQUAL(net.InboundRefusals(), 0U);
+}
+
+/** Drive one listener past its inbound capacity and check Core evicts.
+ *
+ * The 100-node run never reaches the cap, so without a case like this the
+ * eviction path would be dead code that merely compiles.
+ */
+BOOST_FIXTURE_TEST_CASE(netsim_inbound_eviction, SimTestingSetup)
+{
+    netsim::Network::Options opts;
+    // Shrink the connection budget rather than inflating the population. A
+    // default node holds 189 inbound, which would need hundreds of dialers,
+    // and a population that cannot fill its outbound slots is expensive: every
+    // attempt costs up to a hundred AddrMan selections, and selection on a
+    // sparse table is some 590 times dearer than on a full one.
+    // The cap has to stay well clear of Core's protections, which shield up to
+    // 28 candidates outright (4 by netgroup, 8 by ping, 4 by tx time, 8 by
+    // block-relay time, 4 by block time) plus a further share by ratio. Below
+    // roughly 30 inbound every candidate is protected and Core correctly
+    // refuses rather than evicting, which is a different code path.
+    opts.max_automatic_connections = 51; // 8 + 2 + 1 outbound, so 40 inbound
+    opts.num_nodes = 50;
+    // Eight listeners is also eight netgroups, so a node can still fill all
+    // eight outbound slots and does not sit there probing a sparse AddrMan.
+    opts.num_listening = 8;
+    opts.bootstrap_addrs = 8;
+    opts.blocks_only = true;
+    netsim::Network net{opts, ctx};
+
+    // 8 listeners holding 40 inbound each is 320 slots against 50 nodes
+    // wanting 8 outbound apiece, so demand exceeds capacity by a quarter.
+    constexpr size_t INBOUND_CAP{40};
+
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    // Short on purpose. Sustained contention is expensive to simulate: each
+    // eviction costs a candidate sort plus a fresh handshake, and the loser
+    // retries half a second later.
+    net.RunFor(std::chrono::duration_cast<SimTime>(2min));
+
+    size_t over_cap{0};
+    size_t total_inbound{0};
+    for (uint32_t id{0}; id < opts.num_listening; ++id) {
+        const size_t inbound{net.At(id).connman->GetNodeCount(ConnectionDirection::In)};
+        total_inbound += inbound;
+        if (inbound > INBOUND_CAP) ++over_cap;
+    }
+    BOOST_TEST_MESSAGE("inbound_total=" << total_inbound << " cap=" << INBOUND_CAP << " over_cap=" << over_cap
+                                        << " evicted=" << net.Evictions() << " refused=" << net.InboundRefusals());
+
+    // No listener exceeds its cap, the caps were actually reached, and reaching
+    // them made Core evict rather than simply turn newcomers away.
+    BOOST_CHECK_EQUAL(over_cap, 0U);
+    BOOST_CHECK_GT(total_inbound, opts.num_listening * INBOUND_CAP / 2);
+    BOOST_CHECK_GT(net.Evictions(), 0U);
 }
 
 BOOST_AUTO_TEST_SUITE_END()
