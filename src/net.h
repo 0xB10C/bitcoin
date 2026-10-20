@@ -1338,6 +1338,61 @@ public:
      */
     std::vector<CAddress> GetAddresses(CNode& requestor, size_t max_addresses, size_t max_pct);
 
+    /** The automatic outbound slots currently in use.
+     *
+     * Inbound connections are deliberately left out of the netgroup set:
+     * they are free for a peer to make, so counting them would let an attacker
+     * steer our outbound selection. Short-lived outbound connections (feeler,
+     * addr-fetch, private broadcast) are left out for a different reason, that
+     * they should not influence which peers we keep.
+     */
+    struct OutboundSlots {
+        int full_relay{0};
+        int block_relay{0};
+        int privacy_network_peers{0};
+        std::set<std::vector<unsigned char>> netgroups;
+    };
+    OutboundSlots CountOutboundSlots() const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+
+    /** The timers ThreadOpenConnections carries between iterations.
+     *
+     * Held by the caller rather than the class because they describe one
+     * connection-opening loop, and a driver may want to run several.
+     */
+    struct OutboundTimers {
+        std::chrono::microseconds next_feeler{};
+        std::chrono::microseconds next_extra_block_relay{};
+        std::chrono::microseconds next_extra_network_peer{};
+
+        /** Arm all three, exponentially distributed, relative to `now`. */
+        void Arm(std::chrono::microseconds now, FastRandomContext& rng);
+    };
+
+    /** What sort of automatic outbound connection to open next. */
+    struct NextOutbound {
+        ConnectionType conn_type{ConnectionType::OUTBOUND_FULL_RELAY};
+        bool anchor{false};
+        bool feeler{false};
+        std::optional<Network> preferred_net{};
+    };
+
+    /**
+     * Decide which automatic outbound connection to open next, if any.
+     *
+     * The priority ladder of ThreadOpenConnections, extracted so it can be
+     * driven on its own: anchors first, then full-relay up to capacity, then
+     * block-relay up to capacity, then an extra full-relay peer if the tip is
+     * stale, then the periodic extra block-relay peer, then a feeler, then an
+     * extra peer on a network we have none on.
+     *
+     * Advances whichever timer it consumed. Returns std::nullopt when there is
+     * nothing to do right now, which the caller should treat as "wait and ask
+     * again".
+     */
+    std::optional<NextOutbound> DecideNextOutbound(const OutboundSlots& slots, OutboundTimers& timers,
+                                                   std::chrono::microseconds now, FastRandomContext& rng)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_anchors_mutex);
+
     /**
      * Pick the address for the next automatic outbound connection.
      *

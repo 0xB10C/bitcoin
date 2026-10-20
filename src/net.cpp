@@ -2592,6 +2592,134 @@ bool CConnman::MaybePickPreferredNetwork(std::optional<Network>& network)
     return false;
 }
 
+void CConnman::OutboundTimers::Arm(std::chrono::microseconds now, FastRandomContext& rng)
+{
+    next_feeler = now + rng.rand_exp_duration(FEELER_INTERVAL);
+    next_extra_block_relay = now + rng.rand_exp_duration(EXTRA_BLOCK_RELAY_ONLY_PEER_INTERVAL);
+    next_extra_network_peer = now + rng.rand_exp_duration(EXTRA_NETWORK_PEER_INTERVAL);
+}
+
+CConnman::OutboundSlots CConnman::CountOutboundSlots() const
+{
+    AssertLockNotHeld(m_nodes_mutex);
+    OutboundSlots slots;
+
+    LOCK(m_nodes_mutex);
+    for (const CNode* pnode : m_nodes) {
+        if (pnode->IsFullOutboundConn()) slots.full_relay++;
+        if (pnode->IsBlockOnlyConn()) slots.block_relay++;
+
+        // Make sure our persistent outbound slots to ipv4/ipv6 peers belong to different netgroups.
+        switch (pnode->m_conn_type) {
+            // We currently don't take inbound connections into account. Since they are
+            // free to make, an attacker could make them to prevent us from connecting to
+            // certain peers.
+            case ConnectionType::INBOUND:
+            // Short-lived outbound connections should not affect how we select outbound
+            // peers from addrman.
+            case ConnectionType::ADDR_FETCH:
+            case ConnectionType::FEELER:
+            case ConnectionType::PRIVATE_BROADCAST:
+                break;
+            case ConnectionType::MANUAL:
+            case ConnectionType::OUTBOUND_FULL_RELAY:
+            case ConnectionType::BLOCK_RELAY:
+                const CAddress address{pnode->addr};
+                if (address.IsTor() || address.IsI2P() || address.IsCJDNS()) {
+                    // Since our addrman-groups for these networks are
+                    // random, without relation to the route we
+                    // take to connect to these peers or to the
+                    // difficulty in obtaining addresses with diverse
+                    // groups, we don't worry about diversity with
+                    // respect to our addrman groups when connecting to
+                    // these networks.
+                    ++slots.privacy_network_peers;
+                } else {
+                    slots.netgroups.insert(m_netgroupman.GetGroup(address));
+                }
+        } // no default case, so the compiler can warn about missing cases
+    }
+    return slots;
+}
+
+std::optional<CConnman::NextOutbound> CConnman::DecideNextOutbound(const OutboundSlots& slots,
+                                                                   OutboundTimers& timers,
+                                                                   std::chrono::microseconds now,
+                                                                   FastRandomContext& rng)
+{
+    AssertLockNotHeld(m_nodes_mutex);
+    NextOutbound next;
+
+    // Determine what type of connection to open. Opening
+    // BLOCK_RELAY connections to addresses from anchors.dat gets the highest
+    // priority. Then we open OUTBOUND_FULL_RELAY priority until we
+    // meet our full-relay capacity. Then we open BLOCK_RELAY connection
+    // until we hit our block-relay-only peer limit.
+    // GetTryNewOutboundPeer() gets set when a stale tip is detected, so we
+    // try opening an additional OUTBOUND_FULL_RELAY connection. If none of
+    // these conditions are met, check to see if it's time to try an extra
+    // block-relay-only peer (to confirm our tip is current, see below) or the next_feeler
+    // timer to decide if we should open a FEELER.
+
+    // Only consume anchors while the network is active; otherwise they would be
+    // popped and then dropped by OpenNetworkConnection(), losing them for the
+    // next activation and for the dump at shutdown.
+    const bool have_anchors{fNetworkActive && WITH_LOCK(m_anchors_mutex, return !m_anchors.empty())};
+    if (have_anchors && (slots.block_relay < m_max_outbound_block_relay)) {
+        next.conn_type = ConnectionType::BLOCK_RELAY;
+        next.anchor = true;
+    } else if (slots.full_relay < m_max_outbound_full_relay) {
+        // OUTBOUND_FULL_RELAY
+    } else if (slots.block_relay < m_max_outbound_block_relay) {
+        next.conn_type = ConnectionType::BLOCK_RELAY;
+    } else if (GetTryNewOutboundPeer()) {
+        // OUTBOUND_FULL_RELAY
+    } else if (now > timers.next_extra_block_relay && m_start_extra_block_relay_peers) {
+        // Periodically connect to a peer (using regular outbound selection
+        // methodology from addrman) and stay connected long enough to sync
+        // headers, but not much else.
+        //
+        // Then disconnect the peer, if we haven't learned anything new.
+        //
+        // The idea is to make eclipse attacks very difficult to pull off,
+        // because every few minutes we're finding a new peer to learn headers
+        // from.
+        //
+        // This is similar to the logic for trying extra outbound (full-relay)
+        // peers, except:
+        // - we do this all the time on an exponential timer, rather than just when
+        //   our tip is stale
+        // - we potentially disconnect our next-youngest block-relay-only peer, if our
+        //   newest block-relay-only peer delivers a block more recently.
+        //   See the eviction logic in net_processing.cpp.
+        //
+        // Because we can promote these connections to block-relay-only
+        // connections, they do not get their own ConnectionType enum
+        // (similar to how we deal with extra outbound peers).
+        timers.next_extra_block_relay = now + rng.rand_exp_duration(EXTRA_BLOCK_RELAY_ONLY_PEER_INTERVAL);
+        next.conn_type = ConnectionType::BLOCK_RELAY;
+    } else if (now > timers.next_feeler) {
+        timers.next_feeler = now + rng.rand_exp_duration(FEELER_INTERVAL);
+        next.conn_type = ConnectionType::FEELER;
+        next.feeler = true;
+    } else if (slots.full_relay == m_max_outbound_full_relay &&
+               m_max_outbound_full_relay == MAX_OUTBOUND_FULL_RELAY_CONNECTIONS &&
+               now > timers.next_extra_network_peer &&
+               MaybePickPreferredNetwork(next.preferred_net)) {
+        // Full outbound connection management: Attempt to get at least one
+        // outbound peer from each reachable network by making extra connections
+        // and then protecting "only" peers from a network during outbound eviction.
+        // This is not attempted if the user changed -maxconnections to a value
+        // so low that less than MAX_OUTBOUND_FULL_RELAY_CONNECTIONS are made,
+        // to prevent interactions with otherwise protected outbound peers.
+        timers.next_extra_network_peer = now + rng.rand_exp_duration(EXTRA_NETWORK_PEER_INTERVAL);
+    } else {
+        return std::nullopt;
+    }
+
+    return next;
+}
+
 void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std::span<const std::string> seed_nodes)
 {
     AssertLockNotHeld(m_nodes_mutex);
@@ -2633,10 +2761,8 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
     // Initiate network connections
     auto start = GetTime<std::chrono::microseconds>();
 
-    // Minimum time before next feeler connection (in microseconds).
-    auto next_feeler = start + rng.rand_exp_duration(FEELER_INTERVAL);
-    auto next_extra_block_relay = start + rng.rand_exp_duration(EXTRA_BLOCK_RELAY_ONLY_PEER_INTERVAL);
-    auto next_extra_network_peer{start + rng.rand_exp_duration(EXTRA_NETWORK_PEER_INTERVAL)};
+    OutboundTimers timers;
+    timers.Arm(start, rng);
     const bool dnsseed = gArgs.GetBoolArg("-dnsseed", DEFAULT_DNSSEED);
     bool add_fixed_seeds = gArgs.GetBoolArg("-fixedseeds", DEFAULT_FIXEDSEEDS);
     const bool use_seednodes{!gArgs.GetArgs("-seednode").empty()};
@@ -2722,129 +2848,25 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
         CAddress addrConnect;
 
         // Only connect out to one peer per ipv4/ipv6 network group (/16 for IPv4).
-        int nOutboundFullRelay = 0;
-        int nOutboundBlockRelay = 0;
-        int outbound_privacy_network_peers = 0;
-        std::set<std::vector<unsigned char>> outbound_ipv46_peer_netgroups;
+        const OutboundSlots slots{CountOutboundSlots()};
 
-        {
-            LOCK(m_nodes_mutex);
-            for (const CNode* pnode : m_nodes) {
-                if (pnode->IsFullOutboundConn()) nOutboundFullRelay++;
-                if (pnode->IsBlockOnlyConn()) nOutboundBlockRelay++;
-
-                // Make sure our persistent outbound slots to ipv4/ipv6 peers belong to different netgroups.
-                switch (pnode->m_conn_type) {
-                    // We currently don't take inbound connections into account. Since they are
-                    // free to make, an attacker could make them to prevent us from connecting to
-                    // certain peers.
-                    case ConnectionType::INBOUND:
-                    // Short-lived outbound connections should not affect how we select outbound
-                    // peers from addrman.
-                    case ConnectionType::ADDR_FETCH:
-                    case ConnectionType::FEELER:
-                    case ConnectionType::PRIVATE_BROADCAST:
-                        break;
-                    case ConnectionType::MANUAL:
-                    case ConnectionType::OUTBOUND_FULL_RELAY:
-                    case ConnectionType::BLOCK_RELAY:
-                        const CAddress address{pnode->addr};
-                        if (address.IsTor() || address.IsI2P() || address.IsCJDNS()) {
-                            // Since our addrman-groups for these networks are
-                            // random, without relation to the route we
-                            // take to connect to these peers or to the
-                            // difficulty in obtaining addresses with diverse
-                            // groups, we don't worry about diversity with
-                            // respect to our addrman groups when connecting to
-                            // these networks.
-                            ++outbound_privacy_network_peers;
-                        } else {
-                            outbound_ipv46_peer_netgroups.insert(m_netgroupman.GetGroup(address));
-                        }
-                } // no default case, so the compiler can warn about missing cases
-            }
-        }
-
-        if (!seed_nodes.empty() && nOutboundFullRelay < SEED_OUTBOUND_CONNECTION_THRESHOLD) {
+        if (!seed_nodes.empty() && slots.full_relay < SEED_OUTBOUND_CONNECTION_THRESHOLD) {
             if (NodeClock::now() > seed_node_timer + ADD_NEXT_SEEDNODE) {
                 seed_node_timer = NodeClock::now();
                 add_addr_fetch = true;
             }
         }
 
-        ConnectionType conn_type = ConnectionType::OUTBOUND_FULL_RELAY;
-        auto now = GetTime<std::chrono::microseconds>();
-        bool anchor = false;
-        bool fFeeler = false;
-        std::optional<Network> preferred_net;
-
-        // Determine what type of connection to open. Opening
-        // BLOCK_RELAY connections to addresses from anchors.dat gets the highest
-        // priority. Then we open OUTBOUND_FULL_RELAY priority until we
-        // meet our full-relay capacity. Then we open BLOCK_RELAY connection
-        // until we hit our block-relay-only peer limit.
-        // GetTryNewOutboundPeer() gets set when a stale tip is detected, so we
-        // try opening an additional OUTBOUND_FULL_RELAY connection. If none of
-        // these conditions are met, check to see if it's time to try an extra
-        // block-relay-only peer (to confirm our tip is current, see below) or the next_feeler
-        // timer to decide if we should open a FEELER.
-
-        // Only consume anchors while the network is active; otherwise they would be
-        // popped and then dropped by OpenNetworkConnection(), losing them for the
-        // next activation and for the dump at shutdown.
-        const bool have_anchors{fNetworkActive && WITH_LOCK(m_anchors_mutex, return !m_anchors.empty())};
-        if (have_anchors && (nOutboundBlockRelay < m_max_outbound_block_relay)) {
-            conn_type = ConnectionType::BLOCK_RELAY;
-            anchor = true;
-        } else if (nOutboundFullRelay < m_max_outbound_full_relay) {
-            // OUTBOUND_FULL_RELAY
-        } else if (nOutboundBlockRelay < m_max_outbound_block_relay) {
-            conn_type = ConnectionType::BLOCK_RELAY;
-        } else if (GetTryNewOutboundPeer()) {
-            // OUTBOUND_FULL_RELAY
-        } else if (now > next_extra_block_relay && m_start_extra_block_relay_peers) {
-            // Periodically connect to a peer (using regular outbound selection
-            // methodology from addrman) and stay connected long enough to sync
-            // headers, but not much else.
-            //
-            // Then disconnect the peer, if we haven't learned anything new.
-            //
-            // The idea is to make eclipse attacks very difficult to pull off,
-            // because every few minutes we're finding a new peer to learn headers
-            // from.
-            //
-            // This is similar to the logic for trying extra outbound (full-relay)
-            // peers, except:
-            // - we do this all the time on an exponential timer, rather than just when
-            //   our tip is stale
-            // - we potentially disconnect our next-youngest block-relay-only peer, if our
-            //   newest block-relay-only peer delivers a block more recently.
-            //   See the eviction logic in net_processing.cpp.
-            //
-            // Because we can promote these connections to block-relay-only
-            // connections, they do not get their own ConnectionType enum
-            // (similar to how we deal with extra outbound peers).
-            next_extra_block_relay = now + rng.rand_exp_duration(EXTRA_BLOCK_RELAY_ONLY_PEER_INTERVAL);
-            conn_type = ConnectionType::BLOCK_RELAY;
-        } else if (now > next_feeler) {
-            next_feeler = now + rng.rand_exp_duration(FEELER_INTERVAL);
-            conn_type = ConnectionType::FEELER;
-            fFeeler = true;
-        } else if (nOutboundFullRelay == m_max_outbound_full_relay &&
-                   m_max_outbound_full_relay == MAX_OUTBOUND_FULL_RELAY_CONNECTIONS &&
-                   now > next_extra_network_peer &&
-                   MaybePickPreferredNetwork(preferred_net)) {
-            // Full outbound connection management: Attempt to get at least one
-            // outbound peer from each reachable network by making extra connections
-            // and then protecting "only" peers from a network during outbound eviction.
-            // This is not attempted if the user changed -maxconnections to a value
-            // so low that less than MAX_OUTBOUND_FULL_RELAY_CONNECTIONS are made,
-            // to prevent interactions with otherwise protected outbound peers.
-            next_extra_network_peer = now + rng.rand_exp_duration(EXTRA_NETWORK_PEER_INTERVAL);
-        } else {
-            // skip to next iteration of while loop
+        const auto now{GetTime<std::chrono::microseconds>()};
+        const std::optional<NextOutbound> next{DecideNextOutbound(slots, timers, now, rng)};
+        if (!next) {
+            // Nothing to open at this instant; the loop sleeps and asks again.
             continue;
         }
+        const ConnectionType conn_type{next->conn_type};
+        const bool anchor{next->anchor};
+        const bool fFeeler{next->feeler};
+        const std::optional<Network> preferred_net{next->preferred_net};
 
         addrman.get().ResolveCollisions();
 
@@ -2852,7 +2874,7 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
             anchor,
             conn_type,
             fFeeler,
-            outbound_ipv46_peer_netgroups,
+            slots.netgroups,
             preferred_net
         );
 
@@ -2878,8 +2900,8 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
             // Record addrman failure attempts when node has at least 2 persistent outbound connections to peers with
             // different netgroups in ipv4/ipv6 networks + all peers in Tor/I2P/CJDNS networks.
             // Don't record addrman failure attempts when node is offline. This can be identified since all local
-            // network connections (if any) belong in the same netgroup, and the size of `outbound_ipv46_peer_netgroups` would only be 1.
-            const bool count_failures{((int)outbound_ipv46_peer_netgroups.size() + outbound_privacy_network_peers) >= std::min(m_max_automatic_connections - 1, 2)};
+            // network connections (if any) belong in the same netgroup, and the size of `slots.netgroups` would only be 1.
+            const bool count_failures{((int)slots.netgroups.size() + slots.privacy_network_peers) >= std::min(m_max_automatic_connections - 1, 2)};
             // Use BIP324 transport when both us and them have NODE_V2_P2P set.
             const bool use_v2transport(addrConnect.nServices & GetLocalServices() & NODE_P2P_V2);
             OpenNetworkConnection(/*addrConnect=*/addrConnect,
