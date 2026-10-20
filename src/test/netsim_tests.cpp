@@ -2,14 +2,22 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include <net.h>
+#include <net_processing.h>
 #include <netaddress.h>
 #include <netgroup.h>
 #include <netsim/addresses.h>
 #include <netsim/clock.h>
 #include <netsim/eventqueue.h>
 #include <netsim/latency.h>
+#include <netsim/node.h>
+#include <netsim/pump.h>
+#include <node/protocol_version.h>
+#include <protocol.h>
 #include <random.h>
+#include <sync.h>
 #include <test/util/setup_common.h>
+#include <test/util/validation.h>
 #include <uint256.h>
 #include <util/time.h>
 
@@ -17,6 +25,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <memory>
 #include <set>
 #include <vector>
 
@@ -30,6 +39,64 @@ using netsim::SimTime;
 namespace {
 //! An arbitrary but positive starting instant. Mock time reads zero as "not mocked".
 const SimTime SIM_START{std::chrono::duration_cast<SimTime>(1'700'000'000s)};
+
+//! Options a simulation wants from TestingSetup, as opposed to what a test wants.
+TestOpts SimTestOpts()
+{
+    TestOpts opts;
+    // Every node builds its own CConnman and PeerManager, so the fixture's
+    // single set would just be dead weight.
+    opts.setup_net = false;
+    // Otherwise ValidationCache eagerly allocates and touches 32.25 MiB.
+    opts.min_validation_cache = true;
+    return opts;
+}
+
+/** TestingSetup plus the shared context a simulated node needs.
+ *
+ * The ChainstateManager and CTxMemPool here are shared by every node in the
+ * simulation. That is not only a memory decision: the address-relay path does
+ * touch the chainstate, through IsInitialBlockDownload() gating
+ * self-announcement and ActiveChain().Tip() in SendMessages, so the nodes need
+ * a real one even though no block is ever relayed.
+ */
+struct SimTestingSetup : public TestingSetup {
+    NetGroupManager netgroupman{NetGroupManager::NoAsmap()};
+    netsim::SharedContext ctx;
+
+    SimTestingSetup()
+        : TestingSetup{ChainType::REGTEST, SimTestOpts()},
+          ctx{*m_node.chainman, *m_node.mempool, *m_node.warnings, netgroupman}
+    {
+        // MaybeSendAddr() refuses to advertise a node's own address while the
+        // chainstate reports initial block download, and self-announcement is
+        // the only thing that propagates addresses more than one hop.
+        static_cast<TestChainstateManager&>(*m_node.chainman).JumpOutOfIbd();
+    }
+};
+
+/** Shuttle bytes between the two ends of one connection until both go quiet.
+ *
+ * Returns the number of rounds used. A round is one pass of "let both sides
+ * think, then move whatever they produced".
+ */
+int PumpUntilQuiet(netsim::SimNode& a, CNode& a_side, netsim::SimNode& b, CNode& b_side, int max_rounds = 32)
+    EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex)
+{
+    for (int round{1}; round <= max_rounds; ++round) {
+        netsim::Process(a, a_side);
+        netsim::Process(b, b_side);
+
+        // Drain both before delivering either, so one side cannot run ahead
+        // inside a single round.
+        const auto from_a{netsim::Drain(a_side)};
+        const auto from_b{netsim::Drain(b_side)};
+        if (from_a.empty() && from_b.empty()) return round;
+        if (!from_a.empty()) netsim::Deliver(*b.connman, b_side, from_a);
+        if (!from_b.empty()) netsim::Deliver(*a.connman, a_side, from_b);
+    }
+    return max_rounds;
+}
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(netsim_tests, BasicTestingSetup)
@@ -229,6 +296,111 @@ BOOST_AUTO_TEST_CASE(netsim_address_universe)
     // netgroup with an existing outbound peer, so a crowded universe would cap
     // every node's outbound count far below its slot count.
     BOOST_CHECK_EQUAL(netgroups.size(), NUM);
+}
+
+/** The load-bearing test: two real nodes complete a real handshake with no sockets. */
+BOOST_FIXTURE_TEST_CASE(netsim_two_node_handshake, SimTestingSetup)
+{
+    SimClock clock{SIM_START};
+    const AddressUniverse universe{2, 8333};
+
+    auto dialer{netsim::MakeNode(ctx, /*id=*/0, universe.At(0), /*listening=*/false)};
+    auto listener{netsim::MakeNode(ctx, /*id=*/1, universe.At(1), /*listening=*/true)};
+
+    // One lock for the whole run, as the fuzz driver does. Every
+    // ProcessMessages and SendMessages call requires it, and it is a single
+    // process-global mutex rather than one per CConnman.
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+
+    const auto conn{netsim::ConnectPair(ctx, *dialer, *listener, /*out_id=*/0, /*in_id=*/1)};
+    BOOST_REQUIRE(conn.out_side != nullptr);
+    BOOST_REQUIRE(conn.in_side != nullptr);
+
+    // Nothing has been exchanged yet: InitializeNode does not send VERSION.
+    BOOST_CHECK_EQUAL(conn.out_side->nVersion.load(), 0);
+    BOOST_CHECK(!conn.out_side->fSuccessfullyConnected);
+
+    const int rounds{PumpUntilQuiet(*dialer, *conn.out_side, *listener, *conn.in_side)};
+
+    // VERSION out, VERSION and VERACK back, VERACK out. Both sides end up
+    // fully connected, each having learned the other's protocol version.
+    BOOST_CHECK(conn.out_side->fSuccessfullyConnected);
+    BOOST_CHECK(conn.in_side->fSuccessfullyConnected);
+    BOOST_CHECK_EQUAL(conn.out_side->nVersion.load(), PROTOCOL_VERSION);
+    BOOST_CHECK_EQUAL(conn.in_side->nVersion.load(), PROTOCOL_VERSION);
+    BOOST_CHECK_EQUAL(conn.out_side->GetCommonVersion(), PROTOCOL_VERSION);
+    BOOST_CHECK_EQUAL(conn.in_side->GetCommonVersion(), PROTOCOL_VERSION);
+
+    // Neither side decided to hang up.
+    BOOST_CHECK(!conn.out_side->fDisconnect);
+    BOOST_CHECK(!conn.in_side->fDisconnect);
+
+    // Both connmans see exactly their one peer.
+    BOOST_CHECK_EQUAL(dialer->connman->GetNodeCount(ConnectionDirection::Out), 1U);
+    BOOST_CHECK_EQUAL(listener->connman->GetNodeCount(ConnectionDirection::In), 1U);
+
+    // Real bytes moved. A handshake that converged in one round would mean the
+    // pump was short-circuiting rather than transporting.
+    BOOST_CHECK_GT(rounds, 2);
+    BOOST_CHECK_GT(conn.out_side->nSendBytes, 0U);
+    BOOST_CHECK_GT(conn.out_side->nRecvBytes, 0U);
+}
+
+/** The dialer must learn addresses from its peer's GETADDR response.
+ *
+ * This is the narrowest end-to-end check of the thing the simulator exists to
+ * measure: GETADDR out, ADDR back, ProcessAddrs, AddrMan::Add.
+ */
+BOOST_FIXTURE_TEST_CASE(netsim_getaddr_populates_addrman, SimTestingSetup)
+{
+    SimClock clock{SIM_START};
+    constexpr uint32_t UNIVERSE{64};
+    const AddressUniverse universe{UNIVERSE, 8333};
+
+    auto dialer{netsim::MakeNode(ctx, /*id=*/0, universe.At(0), /*listening=*/false)};
+    auto listener{netsim::MakeNode(ctx, /*id=*/1, universe.At(1), /*listening=*/true)};
+
+    // Give the listener something worth asking for. The source is a third
+    // address, so these do not look self-announced.
+    const CNetAddr source{universe.At(2)};
+    std::vector<CAddress> known;
+    for (uint32_t i{3}; i < UNIVERSE; ++i) {
+        known.emplace_back(universe.At(i), ServiceFlags(NODE_NETWORK | NODE_WITNESS), Now<NodeSeconds>());
+    }
+    BOOST_REQUIRE(listener->addrman->Add(known, source));
+    // Not every address necessarily lands: entries sharing a new-table slot are
+    // only displaced when the occupant is terrible or multiply referenced, so a
+    // few of a batch this size are legitimately dropped.
+    const size_t listener_known{listener->addrman->Size()};
+    BOOST_REQUIRE_GT(listener_known, known.size() / 2);
+    BOOST_REQUIRE_EQUAL(dialer->addrman->Size(), 0U);
+
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    const auto conn{netsim::ConnectPair(ctx, *dialer, *listener, /*out_id=*/0, /*in_id=*/1)};
+
+    // The ADDR response is queued against the dialer's m_next_addr_send timer,
+    // which is Poisson with a 30 s mean, so step the clock forward between
+    // rounds instead of expecting it in the handshake burst.
+    for (int step{0}; step < 20; ++step) {
+        PumpUntilQuiet(*dialer, *conn.out_side, *listener, *conn.in_side);
+        if (dialer->addrman->Size() > 0) break;
+        clock.AdvanceTo(clock.Now() + std::chrono::duration_cast<SimTime>(30s));
+    }
+
+    BOOST_CHECK(conn.out_side->fSuccessfullyConnected);
+
+    // GetAddr returns 23 percent of the table, capped at 1000, so expect a
+    // strict subset of what the listener knows rather than all of it.
+    BOOST_CHECK_GT(dialer->addrman->Size(), 0U);
+    BOOST_CHECK_LT(dialer->addrman->Size(), listener_known);
+
+    // The listener really did spend bytes on an ADDR message. Per-message-type
+    // accounting is how a run will report its address-relay traffic, so it is
+    // worth checking that the pump keeps it.
+    CNodeStats stats;
+    conn.in_side->CopyStats(stats);
+    const auto& sent{stats.mapSendBytesPerMsgType};
+    BOOST_CHECK(sent.count(NetMsgType::ADDRV2) > 0 || sent.count(NetMsgType::ADDR) > 0);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

@@ -10,9 +10,17 @@ add_library(bitcoin_netsim STATIC EXCLUDE_FROM_ALL
   clock.cpp
   eventqueue.cpp
   latency.cpp
+  node.cpp
+  pump.cpp
 )
 
+# test_util is a deliberate dependency, not an accident. It carries
+# ConnmanTestMsg, which exposes exactly the CConnman internals a socketless
+# driver needs, and TestingSetup, which wires up the shared ChainstateManager.
+# Neither pulls in Boost.Test: that lives only in the test_bitcoin executable.
 target_link_libraries(bitcoin_netsim
   PRIVATE
     core_interface
+  PUBLIC
+    test_util
 )

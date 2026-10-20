@@ -433,8 +433,8 @@ if(BUILD_KERNEL_LIB)
 endif()
 
 
-add_subdirectory(netsim)
 add_subdirectory(test/util)
+add_subdirectory(netsim)
 if(BUILD_BENCH)
   add_subdirectory(bench)
 endif()
