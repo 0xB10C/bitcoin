@@ -1330,6 +1330,27 @@ public:
      */
     std::vector<CAddress> GetAddresses(CNode& requestor, size_t max_addresses, size_t max_pct);
 
+    /**
+     * Pick the address for the next automatic outbound connection.
+     *
+     * The inner selection loop of ThreadOpenConnections, extracted so that it
+     * can be driven on its own. Tries anchors first, then draws from addrman
+     * and applies the usual filters: a netgroup distinct from every existing
+     * outbound peer, reachability, service flags, the recently-tried window and
+     * the bad-port list.
+     *
+     * Returns std::nullopt when no suitable address turned up within the
+     * internal attempt limit, which the caller should treat as "try again
+     * later" rather than as an error.
+     */
+    std::optional<CAddress> TryPickOutboundAddress(
+        bool anchor,
+        ConnectionType conn_type,
+        bool fFeeler,
+        const std::set<std::vector<unsigned char>>& outbound_ipv46_peer_netgroups,
+        std::optional<Network> preferred_net
+    ) EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_added_nodes_mutex, !m_anchors_mutex);
+
     // This allows temporarily exceeding m_max_outbound_full_relay, with the goal of finding
     // a peer that is better than all our current peers.
     void SetTryNewOutboundPeer(bool flag);

@@ -2848,116 +2848,21 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
 
         addrman.get().ResolveCollisions();
 
-        const auto current_time{NodeClock::now()};
-        int nTries = 0;
-        const auto reachable_nets{g_reachable_nets.All()};
+        std::optional<CAddress> addr_opt = TryPickOutboundAddress(
+            anchor,
+            conn_type,
+            fFeeler,
+            outbound_ipv46_peer_netgroups,
+            preferred_net
+        );
 
-        while (!m_interrupt_net->interrupted()) {
-            if (anchor) {
-                std::optional<CAddress> anchor_addr;
-                {
-                    LOCK(m_anchors_mutex);
-                    if (!m_anchors.empty()) {
-                        anchor_addr = m_anchors.back();
-                        m_anchors.pop_back();
-                    }
-                }
-                if (anchor_addr) {
-                    if (!anchor_addr->IsValid() || IsLocal(*anchor_addr) || !g_reachable_nets.Contains(*anchor_addr) ||
-                        !m_msgproc->HasAllDesirableServiceFlags(anchor_addr->nServices) ||
-                        outbound_ipv46_peer_netgroups.contains(m_netgroupman.GetGroup(*anchor_addr))) continue;
-                    addrConnect = *anchor_addr;
-                    LogDebug(BCLog::NET, "Trying to make an anchor connection to %s\n", addrConnect.ToStringAddrPort());
-                    break;
-                }
-            }
-
-            // If we didn't find an appropriate destination after trying 100 addresses fetched from addrman,
-            // stop this loop, and let the outer loop run again (which sleeps, adds seed nodes, recalculates
-            // already-connected network ranges, ...) before trying new addrman addresses.
-            nTries++;
-            if (nTries > 100)
-                break;
-
-            CAddress addr;
-            NodeSeconds addr_last_try{0s};
-
-            if (fFeeler) {
-                // First, try to get a tried table collision address. This returns
-                // an empty (invalid) address if there are no collisions to try.
-                std::tie(addr, addr_last_try) = addrman.get().SelectTriedCollision();
-
-                if (!addr.IsValid()) {
-                    // No tried table collisions. Select a new table address
-                    // for our feeler.
-                    std::tie(addr, addr_last_try) = addrman.get().Select(true, reachable_nets);
-                } else if (AlreadyConnectedToAddress(addr)) {
-                    // If test-before-evict logic would have us connect to a
-                    // peer that we're already connected to, just mark that
-                    // address as Good(). We won't be able to initiate the
-                    // connection anyway, so this avoids inadvertently evicting
-                    // a currently-connected peer.
-                    addrman.get().Good(addr);
-                    // Select a new table address for our feeler instead.
-                    std::tie(addr, addr_last_try) = addrman.get().Select(true, reachable_nets);
-                }
-            } else {
-                // Not a feeler
-                // If preferred_net has a value set, pick an extra outbound
-                // peer from that network. The eviction logic in net_processing
-                // ensures that a peer from another network will be evicted.
-                std::tie(addr, addr_last_try) = preferred_net.has_value()
-                    ? addrman.get().Select(false, {*preferred_net})
-                    : addrman.get().Select(false, reachable_nets);
-            }
-
-            // Require outbound IPv4/IPv6 connections, other than feelers, to be to distinct network groups
-            if (!fFeeler && outbound_ipv46_peer_netgroups.contains(m_netgroupman.GetGroup(addr))) {
-                continue;
-            }
-
-            // if we selected an invalid or local address, restart
-            if (!addr.IsValid() || IsLocal(addr)) {
-                break;
-            }
-
-            if (!g_reachable_nets.Contains(addr)) {
-                continue;
-            }
-
-            // only consider very recently tried nodes after 30 failed attempts
-            if (current_time - addr_last_try < 10min && nTries < 30) {
-                continue;
-            }
-
-            // for non-feelers, require all the services we'll want,
-            // for feelers, only require they be a full node (only because most
-            // SPV clients don't have a good address DB available)
-            if (!fFeeler && !m_msgproc->HasAllDesirableServiceFlags(addr.nServices)) {
-                continue;
-            } else if (fFeeler && !MayHaveUsefulAddressDB(addr.nServices)) {
-                continue;
-            }
-
-            // Do not connect to bad ports, unless 50 invalid addresses have been selected already.
-            if (nTries < 50 && (addr.IsIPv4() || addr.IsIPv6()) && IsBadPort(addr.GetPort())) {
-                continue;
-            }
-
-            // Do not make automatic outbound connections to addnode peers, to
-            // not use our limited outbound slots for them and to ensure
-            // addnode connections benefit from their intended protections.
-            if (AddedNodesContain(addr)) {
-                LogDebug(BCLog::NET, "Not making automatic %s%s connection to %s peer selected for manual (addnode) connection%s\n",
-                              preferred_net.has_value() ? "network-specific " : "",
-                              ConnectionTypeAsString(conn_type), GetNetworkName(addr.GetNetwork()),
-                              fLogIPs ? strprintf(": %s", addr.ToStringAddrPort()) : "");
-                continue;
-            }
-
-            addrConnect = addr;
-            break;
+        if (!addr_opt) {
+            // No suitable destination within the attempt limit. Let the outer
+            // loop run again, which sleeps, re-adds seed nodes and recomputes
+            // the already-connected netgroups before trying addrman afresh.
+            continue;
         }
+        addrConnect = addr_opt.value();
 
         if (addrConnect.IsValid()) {
             if (fFeeler) {
@@ -2986,6 +2891,128 @@ void CConnman::ThreadOpenConnections(const std::vector<std::string> connect, std
                                   /*proxy_override=*/std::nullopt);
         }
     }
+}
+
+std::optional<CAddress> CConnman::TryPickOutboundAddress(
+    bool anchor,
+    ConnectionType conn_type,
+    bool fFeeler,
+    const std::set<std::vector<unsigned char>>& outbound_ipv46_peer_netgroups,
+    std::optional<Network> preferred_net
+)
+{
+    AssertLockNotHeld(m_nodes_mutex);
+    AssertLockNotHeld(m_added_nodes_mutex);
+
+    const auto current_time{NodeClock::now()};
+    int nTries = 0;
+    const auto reachable_nets{g_reachable_nets.All()};
+
+    while (!m_interrupt_net->interrupted()) {
+        if (anchor) {
+            std::optional<CAddress> anchor_addr;
+            {
+                LOCK(m_anchors_mutex);
+                if (!m_anchors.empty()) {
+                    anchor_addr = m_anchors.back();
+                    m_anchors.pop_back();
+                }
+            }
+            if (anchor_addr) {
+                if (!anchor_addr->IsValid() || IsLocal(*anchor_addr) || !g_reachable_nets.Contains(*anchor_addr) ||
+                    !m_msgproc->HasAllDesirableServiceFlags(anchor_addr->nServices) ||
+                    outbound_ipv46_peer_netgroups.contains(m_netgroupman.GetGroup(*anchor_addr))) continue;
+                LogDebug(BCLog::NET, "Trying to make an anchor connection to %s\n", anchor_addr->ToStringAddrPort());
+                return *anchor_addr;
+            }
+        }
+
+        // If we didn't find an appropriate destination after trying 100 addresses fetched from addrman,
+        // stop this loop, and let the outer loop run again (which sleeps, adds seed nodes, recalculates
+        // already-connected network ranges, ...) before trying new addrman addresses.
+        nTries++;
+        if (nTries > 100)
+            return std::nullopt;
+
+        CAddress addr;
+        NodeSeconds addr_last_try{0s};
+
+        if (fFeeler) {
+            // First, try to get a tried table collision address. This returns
+            // an empty (invalid) address if there are no collisions to try.
+            std::tie(addr, addr_last_try) = addrman.get().SelectTriedCollision();
+
+            if (!addr.IsValid()) {
+                // No tried table collisions. Select a new table address
+                // for our feeler.
+                std::tie(addr, addr_last_try) = addrman.get().Select(true, reachable_nets);
+            } else if (AlreadyConnectedToAddress(addr)) {
+                // If test-before-evict logic would have us connect to a
+                // peer that we're already connected to, just mark that
+                // address as Good(). We won't be able to initiate the
+                // connection anyway, so this avoids inadvertently evicting
+                // a currently-connected peer.
+                addrman.get().Good(addr);
+                // Select a new table address for our feeler instead.
+                std::tie(addr, addr_last_try) = addrman.get().Select(true, reachable_nets);
+            }
+        } else {
+            // Not a feeler
+            // If preferred_net has a value set, pick an extra outbound
+            // peer from that network. The eviction logic in net_processing
+            // ensures that a peer from another network will be evicted.
+            std::tie(addr, addr_last_try) = preferred_net.has_value()
+                ? addrman.get().Select(false, {*preferred_net})
+                : addrman.get().Select(false, reachable_nets);
+        }
+
+        // Require outbound IPv4/IPv6 connections, other than feelers, to be to distinct network groups
+        if (!fFeeler && outbound_ipv46_peer_netgroups.contains(m_netgroupman.GetGroup(addr))) {
+            continue;
+        }
+
+        // if we selected an invalid or local address, restart
+        if (!addr.IsValid() || IsLocal(addr)) {
+            return std::nullopt;
+        }
+
+        if (!g_reachable_nets.Contains(addr)) {
+            continue;
+        }
+
+        // only consider very recently tried nodes after 30 failed attempts
+        if (current_time - addr_last_try < 10min && nTries < 30) {
+            continue;
+        }
+
+        // for non-feelers, require all the services we'll want,
+        // for feelers, only require they be a full node (only because most
+        // SPV clients don't have a good address DB available)
+        if (!fFeeler && !m_msgproc->HasAllDesirableServiceFlags(addr.nServices)) {
+            continue;
+        } else if (fFeeler && !MayHaveUsefulAddressDB(addr.nServices)) {
+            continue;
+        }
+
+        // Do not connect to bad ports, unless 50 invalid addresses have been selected already.
+        if (nTries < 50 && (addr.IsIPv4() || addr.IsIPv6()) && IsBadPort(addr.GetPort())) {
+            continue;
+        }
+
+        // Do not make automatic outbound connections to addnode peers, to
+        // not use our limited outbound slots for them and to ensure
+        // addnode connections benefit from their intended protections.
+        if (AddedNodesContain(addr)) {
+            LogDebug(BCLog::NET, "Not making automatic %s%s connection to %s peer selected for manual (addnode) connection%s\n",
+                          preferred_net.has_value() ? "network-specific " : "",
+                          ConnectionTypeAsString(conn_type), GetNetworkName(addr.GetNetwork()),
+                          fLogIPs ? strprintf(": %s", addr.ToStringAddrPort()) : "");
+            continue;
+        }
+
+        return addr;
+    }
+    return std::nullopt;
 }
 
 std::vector<CAddress> CConnman::GetCurrentBlockRelayOnlyConns() const

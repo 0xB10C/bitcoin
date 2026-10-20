@@ -344,8 +344,10 @@ BOOST_FIXTURE_TEST_CASE(netsim_two_node_handshake, SimTestingSetup)
     // Real bytes moved. A handshake that converged in one round would mean the
     // pump was short-circuiting rather than transporting.
     BOOST_CHECK_GT(rounds, 2);
-    BOOST_CHECK_GT(conn.out_side->nSendBytes, 0U);
-    BOOST_CHECK_GT(conn.out_side->nRecvBytes, 0U);
+    CNodeStats stats;
+    conn.out_side->CopyStats(stats);
+    BOOST_CHECK_GT(stats.nSendBytes, 0U);
+    BOOST_CHECK_GT(stats.nRecvBytes, 0U);
 }
 
 /** The dialer must learn addresses from its peer's GETADDR response.
