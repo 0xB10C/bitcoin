@@ -87,9 +87,23 @@ double AddrInfo::GetChance(NodeSeconds now) const
     return fChance;
 }
 
-AddrManImpl::AddrManImpl(const NetGroupManager& netgroupman, bool deterministic, int32_t consistency_check_ratio)
-    : insecure_rand{deterministic}
-    , nKey{deterministic ? uint256{1} : insecure_rand.rand256()}
+/** Build the RNG backing one AddrMan instance.
+ *
+ * An explicit seed wins over `deterministic`: it yields a stream that is both
+ * reproducible and distinct per seed, which is what a simulation of many nodes
+ * needs. `deterministic` keeps its historical meaning of a zero-keyed stream,
+ * identical in every instance.
+ */
+static FastRandomContext MakeAddrManRng(bool deterministic, const std::optional<uint256>& seed)
+{
+    if (seed) return FastRandomContext{*seed};
+    return FastRandomContext{deterministic};
+}
+
+AddrManImpl::AddrManImpl(const NetGroupManager& netgroupman, bool deterministic, int32_t consistency_check_ratio,
+                         std::optional<uint256> seed)
+    : insecure_rand{MakeAddrManRng(deterministic, seed)}
+    , nKey{(deterministic && !seed) ? uint256{1} : insecure_rand.rand256()}
     , m_consistency_check_ratio{consistency_check_ratio}
     , m_netgroupman{netgroupman}
 {
@@ -1251,8 +1265,9 @@ std::optional<AddressPosition> AddrManImpl::FindAddressEntry(const CAddress& add
     return entry;
 }
 
-AddrMan::AddrMan(const NetGroupManager& netgroupman, bool deterministic, int32_t consistency_check_ratio)
-    : m_impl(std::make_unique<AddrManImpl>(netgroupman, deterministic, consistency_check_ratio)) {}
+AddrMan::AddrMan(const NetGroupManager& netgroupman, bool deterministic, int32_t consistency_check_ratio,
+                 std::optional<uint256> seed)
+    : m_impl(std::make_unique<AddrManImpl>(netgroupman, deterministic, consistency_check_ratio, seed)) {}
 
 AddrMan::~AddrMan() = default;
 

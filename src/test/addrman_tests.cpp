@@ -1238,4 +1238,42 @@ BOOST_AUTO_TEST_CASE(addrman_size)
     BOOST_CHECK_EQUAL(addrman->Size(/*net=*/std::nullopt, /*in_new=*/false), 1U);
 }
 
+BOOST_AUTO_TEST_CASE(addrman_instance_seed)
+{
+    const CNetAddr source{ResolveIP("252.2.2.2")};
+
+    // Place the same spread of addresses into an AddrMan and report where each landed.
+    const auto bucket_layout{[&](std::optional<uint256> seed, bool deterministic) {
+        AddrMan addrman{EMPTY_NETGROUPMAN, deterministic, /*consistency_check_ratio=*/0, seed};
+        std::vector<AddressPosition> positions;
+        // Distinct /16s, so the entries spread across buckets instead of piling into one.
+        for (unsigned i{0}; i < 16; ++i) {
+            const CAddress addr{ResolveService(strprintf("250.%u.1.1", i), 8333), NODE_NONE};
+            BOOST_REQUIRE(addrman.Add({addr}, source));
+            const auto pos{addrman.FindAddressEntry(addr)};
+            BOOST_REQUIRE(pos.has_value());
+            positions.push_back(*pos);
+        }
+        return positions;
+    }};
+
+    const auto seed_a{uint256{1}};
+    const auto seed_b{uint256{2}};
+
+    // The same seed has to reproduce the same keyspace exactly, otherwise a simulation
+    // cannot be replayed.
+    BOOST_CHECK(bucket_layout(seed_a, false) == bucket_layout(seed_a, false));
+
+    // Different seeds have to produce different bucketing, otherwise every simulated node
+    // would be the same node wearing a different address.
+    BOOST_CHECK(bucket_layout(seed_a, false) != bucket_layout(seed_b, false));
+
+    // A seed takes precedence over `deterministic`, so passing both is not a silent no-op.
+    BOOST_CHECK(bucket_layout(seed_a, true) == bucket_layout(seed_a, false));
+
+    // Without a seed, `deterministic` keeps its historical meaning: one shared keyspace.
+    BOOST_CHECK(bucket_layout(std::nullopt, true) == bucket_layout(std::nullopt, true));
+    BOOST_CHECK(bucket_layout(std::nullopt, true) != bucket_layout(seed_a, false));
+}
+
 BOOST_AUTO_TEST_SUITE_END()

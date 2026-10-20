@@ -107,7 +107,8 @@ public:
 class AddrManImpl
 {
 public:
-    AddrManImpl(const NetGroupManager& netgroupman, bool deterministic, int32_t consistency_check_ratio);
+    AddrManImpl(const NetGroupManager& netgroupman, bool deterministic, int32_t consistency_check_ratio,
+                std::optional<uint256> seed = std::nullopt);
 
     ~AddrManImpl();
 

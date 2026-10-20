@@ -8,6 +8,7 @@
 
 #include <netaddress.h>
 #include <protocol.h>
+#include <uint256.h>
 #include <util/time.h>
 
 #include <cstddef>
@@ -112,7 +113,18 @@ protected:
     const std::unique_ptr<AddrManImpl> m_impl;
 
 public:
-    explicit AddrMan(const NetGroupManager& netgroupman, bool deterministic, int32_t consistency_check_ratio);
+    /**
+     * @param[in] deterministic   Use a fixed bucketing key and a zero-keyed RNG, so that
+     *                            repeated runs behave identically. Every instance built this
+     *                            way is interchangeable, which is what unit tests want and
+     *                            what a simulation of many distinct nodes does not.
+     * @param[in] seed            If set, derive both the RNG stream and the bucketing key
+     *                            from this value. Takes precedence over `deterministic`, and
+     *                            gives each instance its own reproducible keyspace. Intended
+     *                            for simulations that need many non-identical AddrMans.
+     */
+    explicit AddrMan(const NetGroupManager& netgroupman, bool deterministic, int32_t consistency_check_ratio,
+                     std::optional<uint256> seed = std::nullopt);
 
     ~AddrMan();
 
