@@ -74,6 +74,7 @@ add_executable(test_bitcoin
   net_peer_eviction_tests.cpp
   net_tests.cpp
   netbase_tests.cpp
+  netsim_tests.cpp
   node_init_tests.cpp
   node_warnings_tests.cpp
   orphanage_tests.cpp
@@ -167,6 +168,7 @@ add_windows_application_manifest(test_bitcoin)
 target_link_libraries(test_bitcoin
   core_interface
   test_util
+  bitcoin_netsim
   bitcoin_cli
   bitcoin_node
   bitcoin_consensus
