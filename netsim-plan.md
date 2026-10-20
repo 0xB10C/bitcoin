@@ -15,21 +15,34 @@ from that tree.
 The 100-node MVP is built and running. Code in `src/netsim/`, regression tests
 in `src/test/netsim_tests.cpp`, driven by the `netsim_tests` suite.
 
+There is also a standalone driver, `bitcoin-netsim`, built with
+`cmake --build build --target bitcoin-netsim`. It takes `--nodes`,
+`--listeners`, `--minutes`, `--bootstrap`, `--blocksonly`, `--seed` and
+`--csv`, and reports what the run cost.
+
 What works: real `AddrMan`, `CConnman` and `PeerManager` per node, no sockets
 and no threads, a microsecond event queue with a region latency model and
-ordered per-direction delivery, Core's own `TryPickOutboundAddress` choosing
-destinations, and reproducible runs.
+ordered per-direction delivery, Core's own ladder choosing what to open,
+full-relay plus block-relay-only plus feelers, connection teardown, inbound
+eviction, and reproducible runs.
 
 Measured over 100 nodes, 20 listening, 30 simulated minutes:
 
 | | |
 |---|---|
-| Connections formed | 785 |
-| Nodes filling all 8 outbound slots | 93 of 100 |
+| Connections opened | 1165: 875 full-relay, 163 block-relay, 127 feeler |
+| Still up at the end | 947 |
+| Nodes filling all 8 outbound slots | 88 of 100 |
 | Nodes left isolated | 0 |
-| Addresses held, total | 1241 against 400 seeded |
+| Addresses held, total | 1265 against 400 seeded |
 | Circulating addresses pointing nowhere | 0 |
 | Outbound attempts to a dead address | 0 |
+
+Eviction is exercised separately, because a default node holds 189 inbound and
+Core's protections shield around 28 candidates, so a population large enough to
+evict is slow to simulate. With the connection budget cut to 51, giving 40
+inbound slots, 50 nodes against 8 listeners produced 2537 evictions with no
+listener ever over its cap and not one refusal.
 
 Both blockers from §3 are resolved. AddrMan takes a per-instance seed, and the
 listen flag is now per `CConnman` rather than the process-wide `fListen`;
@@ -41,9 +54,8 @@ address from the `addr_recv` field of its peer's VERSION, so the peer-reported
 substitution path in `GetLocalAddrForPeer` produces the right answer as long
 as the address universe uses `GetListenPort()`.
 
-Still to do: a standalone `bitcoin-netsim` binary (the library is ready for
-one), inbound eviction instead of refusal when a listener is full, feelers and
-block-relay-only connections, churn, and the graph export in §11.
+Still to do: churn, the graph export and the extra networks in §12, and the
+further production-fidelity steps in §11.
 
 ---
 
@@ -887,7 +899,57 @@ expected behaviour: `p2p_addr_relay.py`, `p2p_addr_selfannouncement.py`,
 
 ---
 
-## 11. Requested follow-ups
+## 11. Staying close to production
+
+The point of using Core's own code is that a change to Core shows up in the
+simulator without anyone remembering to mirror it. That property is not
+automatic, so it is worth being precise about where it holds today.
+
+**What is shared, not copied.** The simulator calls
+`CConnman::CountOutboundSlots()`, `CConnman::DecideNextOutbound()` and
+`CConnman::TryPickOutboundAddress()`. `ThreadOpenConnections` calls the same
+three functions. The logic was moved rather than duplicated, so a change to the
+connection-type ladder, the netgroup accounting or the selection filters
+reaches the simulator with no further work, and a change to their signatures
+breaks the simulator's build rather than silently diverging. The same holds for
+`AttemptToEvictConnection`, `DisconnectNodes`, `ProcessMessages`,
+`SendMessages`, all of `AddrMan`, and the whole V1 transport.
+
+**What is still duplicated.** The loop *around* those calls. The 500 ms
+cadence, the outbound semaphore, the ordering of `ProcessAddrFetch` and
+`PerformReconnections`, the fixed-seed and seed-node handling, and the
+post-selection steps inside `OpenNetworkConnection`: the `IsLocal` and
+ban checks, the feeler sleep jitter, `count_failures`, and the v2 transport
+decision. Reorder those in `ThreadOpenConnections` and the simulator will not
+notice.
+
+**The next step, and it is not threads.** Extract one
+`CConnman::OpenOutboundConnectionsOnce()` holding the whole loop body, so
+`ThreadOpenConnections` becomes a sleep plus a call, and the simulator calls
+the same function on its own 500 ms tick. That removes nearly all the
+duplication above. The obstacle is the tail of the body: it ends in
+`ConnectNode()`, which does real name resolution and a real socket connect.
+
+**Going further means faking the socket, not the loop.** `CreateSock` is a
+`std::function` hook (`src/netbase.h:297`) that `ConnectDirectly` goes through,
+and `DynSock` already implements a byte-pipe `Sock` with an accept queue
+(`src/test/util/net.h:239`). Supply a `Sock` that connects into the simulated
+network and the entire real path runs, `ConnectNode` and even `SocketHandler`
+included. Cost: `CreateSock` is one process-global, so it has to be told which
+node is connecting, and the poll emulation and byte buffering are not free.
+
+**A thread per node is the one option that cannot work.** Not because of the
+threads themselves, though 100k nodes times four threads would end it, but
+because `NetEventsInterface::g_msgproc_mutex` is a single process-global mutex
+held across the whole of `ProcessMessages` and `SendMessages`. Every node's
+message handling already serialises through it. Threads would buy contention
+and nondeterminism and no parallelism. The same is true of `cs_main` and of
+mock time. Parallelism needs those three sharded first, which is a much larger
+change than the simulator.
+
+---
+
+## 12. Requested follow-ups
 
 **Export the network graph when a run finishes.** Wanted for later, not for the
 MVP. The data already exists in `Network::Links()`, which holds the initiator,
@@ -896,3 +958,26 @@ serialiser: an edge list plus per-node attributes (listening, region, netgroup,
 AddrMan size, inbound and outbound degree) in a format igraph or networkx can
 read directly. Worth emitting the AddrMan contents alongside it, since several
 topology questions are really questions about what each node knew.
+
+**Support Tor, I2P and IPv6.** The address universe is IPv4-only today, and
+`NetGroupManager::NoAsmap()` groups IPv4 by /16. Three separate pieces of work:
+
+- *IPv6* is the easy one. `AddressUniverse` needs to emit `CNetAddr` from
+  `in6_addr`, and the netgroup for IPv6 is a /32 rather than a /16, so the
+  "one netgroup per node" property needs rechecking.
+- *Tor and I2P* change the selection arithmetic, not just the addresses.
+  `CountOutboundSlots()` already separates them: addresses on those networks
+  increment `privacy_network_peers` instead of joining the netgroup set,
+  because their addrman groups are random and diversity is meaningless there.
+  That plumbing is in place and unexercised. What is missing is reachability,
+  since `g_reachable_nets` is a process global, so a per-node `-onlynet` is not
+  expressible yet; and the fact that onion and I2P addresses have no port in
+  the sense the listener map assumes.
+- *The extra-network peer branch* of the ladder calls
+  `MaybePickPreferredNetwork`, which exists to get one outbound peer on every
+  reachable network. It can never fire in an IPv4-only universe, so that path
+  is currently dead in the simulator and will come alive the moment a second
+  network appears.
+
+Worth doing alongside an asmap, since real ASN grouping and multiple networks
+answer the same class of question.
