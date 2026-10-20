@@ -865,7 +865,12 @@ is built. Inside `TestingSetup` this is already true.
 
 ## 9. Phasing
 
-**Phase 0 — prove the mechanism.** `src/test/netsim_tests.cpp` on top of
+Phases 0 and 1 are done, and Phase 1b has been walked as far as 800 nodes for
+the memory measurements in §5.1. This section is kept as written because the
+reasoning behind the order still applies to the rungs above; §0 is the record
+of where things actually stand.
+
+**Phase 0 — prove the mechanism.** *(done)* `src/test/netsim_tests.cpp` on top of
 `TestingSetup`, per §7.1. Two nodes, one link, the pump from §7.3, and a real
 VERSION/VERACK handshake with no sockets. Then prepopulate one node's addrman
 with synthetic addresses, connect the other to it, and assert the addresses
@@ -873,7 +878,7 @@ arrive via GETADDR. That single test exercises the handshake, the transport,
 `ProcessAddrs` and `AddrMan::Add` end to end, and it is the cheapest possible
 answer to "does this work at all".
 
-**Phase 1 — the 100-node MVP.** The full mechanism at a size that runs on a
+**Phase 1 — the 100-node MVP.** *(done)* The full mechanism at a size that runs on a
 laptop in seconds: event queue, latency model, synthetic addresses, listener
 map, `TryPickOutboundAddress` plus simulator-side connect, inbound caps,
 eviction, teardown, and the two patches from §3.
