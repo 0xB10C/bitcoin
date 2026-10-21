@@ -1587,3 +1587,97 @@ random slots until it finds an occupied one, so its cost scales inversely with
 table occupancy. A sparsely seeded population appears to hang rather than to
 be slow: four bootstrap addresses cost 147 s at the 1k rung where sixteen cost
 5 s, for the same resulting topology. §5.2.
+
+---
+
+## 17. Propagation, measured
+
+Both goals the simulator was built for now produce curves rather than
+anecdotes. `--blockrelay` turns on per-node chainstates (§13.1), without which
+no block is ever requested; `--tracked=N` withholds listener addresses so only
+relay can spread them (§4.1).
+
+### 17.1 Blocks
+
+1000 nodes, 200 listening, blocks-only, 120 simulated minutes, ten blocks
+mined. 749 seconds of wall clock, 1.97 MB per node.
+
+| Height | 50% of nodes | 90% | last node |
+|---|---|---|---|
+| 11 | 370 ms | 454 ms | 626 ms |
+| 12 | 373 ms | 459 ms | 617 ms |
+| 13 | 367 ms | 451 ms | 642 ms |
+| 14 | 373 ms | 462 ms | 624 ms |
+| 15 | 374 ms | 468 ms | 614 ms |
+| 16 | 368 ms | 446 ms | 616 ms |
+| 17 | 370 ms | 445 ms | 614 ms |
+| 18 | 364 ms | 451 ms | 629 ms |
+| 19 | 372 ms | 453 ms | 635 ms |
+| 20 | 364 ms | 440 ms | 621 ms |
+
+Every block reached all 1000 nodes. The spread of the median across ten
+independent blocks is 364 to 374 ms — about 1% — which says the figure is a
+structural property of the topology and the latency model rather than noise,
+and that ten blocks is already plenty for a stable reading.
+
+**Propagation scales with the logarithm of the population, and the arithmetic
+checks out.** The same configuration at 200 nodes reached half the network in
+329 ms against 370 ms at 1000. Five times the population costs 41 ms. Each
+node holds about ten outbound peers, so reach grows roughly tenfold per hop:
+200 nodes is about 2.3 hops deep and 1000 about 3.0, a difference of 0.7 hops,
+and at the model's mean one-way delay of around 60 ms that predicts 42 ms.
+Measured 41 ms.
+
+**Block size, and what it is worth.** The table above is 250-byte regtest
+blocks with bandwidth unlimited, so it measures hop count times latency. With
+`--block-bytes=900000 --bandwidth-mbit=50` at 200 nodes the same block takes
+598 ms to half the population rather than 329, and the run moves 190 MB
+instead of 15 MB. That is the figure to quote for anything bandwidth-related.
+
+Two honest limits on the padded figure. The filler all sits in the coinbase,
+so compact-block reconstruction can shortcut nothing and every hop ships the
+whole block — the pessimistic case, equivalent to a block full of transactions
+nobody had seen. And 1 MB is a ceiling rather than a setting: filler is
+non-witness data and weight counts it four times, so a megabyte is already
+`MAX_BLOCK_WEIGHT`. Past that needs real transactions carrying witness data.
+
+`--block-csv` writes one row per (block, node): 10,001 rows for the run above,
+which sorted by height then elapsed time is the curve.
+
+### 17.2 Addresses
+
+Four withheld self-announcements, in the same runs:
+
+| Nodes | Minutes | Reached, mean | Worst | Via `tried` |
+|---|---|---|---|---|
+| 200 | 60 | 80 of 200 (40%) | 73 | 82% |
+| 1000 | 120 | 400 of 1000 (40%) | 389 | 58% |
+
+Coverage holds at 40% as the population grows fivefold, and the four
+addresses stay within 3% of each other, so this too is structural rather than
+a lucky draw.
+
+The `tried` share is the more interesting column, because it separates nodes
+that merely heard the address from nodes that connected to it. It falls from
+82% to 58% between the two rungs, which is what you would expect: the number
+of outbound slots per node is fixed at ten whatever the population, so a
+larger network has proportionally more candidates competing for the same
+slots.
+
+### 17.3 The artefact this measurement started with
+
+Worth keeping, because the shape of the mistake is reusable. The first block
+figures were 1220 ms to half the nodes, 1285 ms to 90%, 2040 ms to the last —
+and *identical across two different blocks*, which is the tell. Propagation
+was advancing one service interval per hop.
+
+`DeliverNow` serviced only the link the bytes arrived on. A node therefore
+reacted to its sender immediately but waited for the next periodic tick before
+forwarding to any other peer. `ThreadMessageHandler` does not behave that way:
+it calls `SendMessages` for every peer on each pass, so a node that learns
+something from one peer forwards it to the rest in the same pass. Servicing
+all of the receiver's links removed about 900 ms of pure artefact.
+
+The lesson for anything measured here: a number that does not vary between
+independent trials is more likely to be quantised by the simulator than to be
+a property of Bitcoin.
