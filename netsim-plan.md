@@ -1870,24 +1870,51 @@ themselves. With `s = L/N`:
     reach/N = s*theta + (1-s)*(1 - exp(-lam*theta))
 
 `d` depends only on `s`, which is why reach is flat in N at a fixed listening
-share: **reach is set by the reachable share, not by the population.**
+share: where structure is what limits the spread, reach is set by the reachable
+share and not by the population.
 
 | Nodes | Share | listeners m/meas | others m/meas | population m/meas | window | depth |
 |---|---|---|---|---|---|---|
 | 500 | 20% | 79.7 / 80.9 | 23.3 / 24.9 | 34.6 / 36.1 | 4.98 | 12.4 |
 | 1000 | 5% | 79.7 / 82.8 | 7.3 / 8.0 | 10.9 / 11.7 | 6.60 | 11.4 |
-| 1000 | 10% | 79.7 / 79.9 | 13.5 / 14.3 | 20.1 / 20.8 | 5.06 | 12.7 |
+| 1000 | 10% | 79.7 / 80.3 | 13.5 / 14.3 | 20.1 / 20.9 | 5.13 | 12.8 |
+| 1000 | 40% | 79.7 / 73.9 | 36.6 / 36.1 | 53.8 / **51.2** | 9.36 | 21.2 |
+| 1000 | 80% | 79.7 / 59.7 | 50.8 / 38.4 | 73.9 / **55.5** | 11.33 | 26.1 |
 | 1000 | 20% | 79.7 / 83.7 | 23.3 / 25.9 | 34.6 / 37.5 | 6.45 | 16.2 |
 | 2000 | 20% | 79.7 / 79.4 | 23.3 / 24.9 | 34.6 / 35.8 | 8.92 | 20.2 |
 | 4000 | 20% | 79.7 / 76.2 | 23.3 / 24.1 | 34.6 / 34.5 | 10.93 | 26.7 |
 | 10000 | 20% | 79.7 / 61.4 | 23.3 / 18.4 | 34.6 / **27.0** | 12.55 | 36.5 |
 
-1.49 points RMS over the six configurations where the wave finishes, nothing
-fitted. The share series at N=1000 is the load-bearing part: 5%, 10% and 20%
-listening give 11.7%, 20.8% and 37.5% reach, a threefold range driven by the
-share alone, and the formula follows all three. Two 10,000-node seeds agree to
-within 0.6% of each other (3203 and 3185 holders), so the breakdown below is
-not seed noise.
+**This is a ceiling, not a prediction.** It is the reach an announcement would
+get with unlimited time to spread, and it has ten minutes. It holds to 1.64
+points RMS over the five configurations whose wave finished inside about nine
+minutes, nothing fitted, and the share series at N=1000 is the load-bearing
+part there: 5%, 10% and 20% listening give 11.7%, 20.9% and 37.5% reach, a
+threefold range driven by the share alone, tracked by the formula throughout.
+
+Every configuration that ran longer than that falls *short* of the ceiling, and
+by more the longer it ran. The shortfall in listener reach against theta
+correlates **0.83** with the window across all nine configurations:
+
+    window <= 6.6 min  ->  listener reach 80.3 - 83.7%   (theta = 79.7)
+    window  = 8.9 min  ->  79.4%
+    window  = 9.4 min  ->  73.9%
+    window  = 10.9 min ->  76.2%
+    window  = 11.3 min ->  59.7%
+    window  = 12.6 min ->  61.4%
+
+So the two-part answer: **the reachable share sets the ceiling, and the clock
+decides how much of it you get.** 80% listening at 1000 nodes is the worst miss
+(55.5% against 73.9%) because a denser listener set makes the tree deeper --
+26.1 hops -- and 26 hops at ~26 s each needs 11.3 minutes.
+
+The 4000-node row agreeing to 0.1 points at a 10.9-minute window is probably
+luck rather than the model working there: its listener reach is 3.5 points below
+theta while its non-listener reach is 0.8 above, and the two errors cancel in
+the population total. Do not read it as the boundary.
+
+Two 10,000-node seeds agree to within 0.6% of each other (3203 and 3185
+holders), so the breakdown there is not seed noise.
 
 **10,000 nodes is where the assumption fails.** The model assumes the wave
 finishes; here the network is deeper than the clock allows. Mean arrival climbs
