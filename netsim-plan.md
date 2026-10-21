@@ -1804,7 +1804,7 @@ rules in `ProcessAddrs` set it, and they are not the same rule:
 
 And the owner stamps a fresh one only once:
 `AVG_LOCAL_ADDRESS_BROADCAST_INTERVAL` is 24 h, so within a 20-minute run
-there is exactly one burst. Measured over 203,780 arrivals: every arrival whose
+there is exactly one burst. Measured over 316,219 arrivals: every arrival whose
 recorded source was the address owner itself landed within the first 10
 seconds. Zero later ones, in any run.
 
@@ -1814,7 +1814,7 @@ addresses per run, 20 simulated minutes, sampled every 10 s:
 | Nodes | Samples | min | p25 | median | p75 | p90 | max | mean | sd | gained after the gate |
 |---|---|---|---|---|---|---|---|---|---|---|
 | 1000 | 240 | 3.8 | 5.8 | 6.5 | 7.2 | 7.8 | 10.2 | 6.51 | 1.02 | 1 of 240 |
-| 5000 | 60 | 9.8 | 10.8 | 11.3 | 11.7 | 12.2 | 13.0 | 11.27 | 0.66 | 59 of 60 |
+| 5000 | 120 | 9.8 | 10.8 | 11.2 | 11.7 | 12.2 | 13.5 | 11.28 | 0.64 | 119 of 120 |
 
 At 1000 nodes the push wave exhausts after about 6.5 of its 10 available
 minutes -- it runs out of peers that do not already know, not out of time. At
@@ -1828,9 +1828,9 @@ Two things I got wrong on the way, both worth keeping:
   out near `AVG_ADDRESS_BROADCAST_INTERVAL` (24.3 s measured against a 30 s
   exponential mean, lower because a node forwards to two peers and the earlier
   flush continues the chain). But within a population, depth and window do not
-  co-vary: r = 0.09 at 1000 nodes, r = 0.03 at 5000. Branches run in parallel,
+  co-vary: r = 0.09 at 1000 nodes, r = -0.12 at 5000. Branches run in parallel,
   so the window is an exhaustion time, not a path length.
-- **Do not pool the populations to compute that r.** Pooled it is 0.84, which
+- **Do not pool the populations to compute that r.** Pooled it is 0.87, which
   would have supported exactly the wrong conclusion; depth and window both rise
   with population, so pooling two groups manufactures the correlation. A
   Simpson paradox, and the kind of mistake this kind of sweep invites.
