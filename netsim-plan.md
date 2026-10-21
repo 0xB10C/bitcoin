@@ -1423,3 +1423,167 @@ is therefore drawn from the wrong network.
   win.
 - `OpenOutboundConnectionsOnce`, so the simulator calls one extracted function
   per attempt rather than reassembling the ladder; see §11.
+
+---
+
+## 16. Cost accounting, and how to take the numbers again
+
+Everything below was measured, not estimated. Where a figure is a projection
+it says so. Machine: this laptop, 24 cores, 125 GB RAM, `TMPDIR` on a real
+disk; `RelWithDebInfo`, clang 20.1.5.
+
+### 16.1 How to re-measure
+
+**Per-component costs** live in disabled probes at the end of
+`src/test/netsim_tests.cpp`. They are disabled because they measure rather
+than assert, so ctest skips them. Name one explicitly to take a reading:
+
+```
+export TMPDIR=/some/large/tmp
+build/bin/test_bitcoin --run_test=netsim_tests/probe_type_sizes        -l test_suite
+build/bin/test_bitcoin --run_test=netsim_tests/probe_rolling_bloom_cost -l test_suite
+build/bin/test_bitcoin --run_test=netsim_tests/probe_node_cost_blocksonly -l test_suite
+build/bin/test_bitcoin --run_test=netsim_tests/probe_node_cost_txrelay    -l test_suite
+build/bin/test_bitcoin --run_test=netsim_tests/probe_node_cost_own_chain  -l test_suite
+```
+
+**One probe per process, always.** glibc does not return a freed arena to the
+kernel, so a second measurement in the same process sees a resident set that
+never shrank and reports nearly zero. That is why the three node-cost probes
+are three test cases rather than one loop — an earlier version of this note
+had two bogus numbers in it for exactly that reason.
+
+**Whole-run costs** come from the driver's own reporting:
+
+```
+bitcoin-netsim --nodes=1000 --listeners=200 --minutes=60 --blocksonly --csv
+```
+
+`rss_before_kb` is read after the host process and its shared chainstate
+exist but before the population does, so `sim_kb` and `bytes_per_node` are the
+population's own cost. Build the chain with `--chain=N` *before* that baseline
+is taken — the driver does, which keeps a thousand blocks of block index and
+LevelDB cache out of the per-node figure.
+
+For a sweep, `--csv-header` then one `--csv` line per rung; the committed
+`netsim-memory-sweep.csv` was produced that way.
+
+### 16.2 What each part costs
+
+| Component | Bytes | Source |
+|---|---|---|
+| `sizeof(AddrManImpl)` | 655,872 | compile-time |
+| `sizeof(CNode)` | 1,024 | compile-time |
+| `sizeof(CBlockIndex)` | 152 | compile-time |
+| `sizeof(netsim::Link)` | 88 | compile-time |
+| Idle node, shared chain | 673,280 | `probe_node_cost_blocksonly` |
+| Idle node, own chain | 799,872 | `probe_node_cost_own_chain` |
+| → the per-node `ChainstateManager` | 126,592 | difference of the two above |
+| → same, measured directly | 122,816 | 128 instances, RSS delta |
+| Empty `Chainstate`, shared `BlockManager` | 69,816 | 1024 instances, RSS delta |
+| `recent_rejects` filter (120k, 1e-6) | 1,295,339 | `probe_rolling_bloom_cost` |
+| `recent_rejects_reconsiderable` | 1,295,339 | same |
+| `recent_confirmed_transactions` (48k) | 517,611 | same |
+| Per-peer tx inventory filter | ~527 KiB | `Peer::TxRelay`, from source |
+| BanMan discouragement filter | ~539 KiB | avoided: `banman=nullptr` |
+
+Two readings worth keeping together: an idle node is **673 KB**, and
+`sizeof(AddrManImpl)` is **656 KB** of it. The AddrMan tables are the per-node
+floor, and they are 99% empty at any population this simulator reaches. That
+is what makes the occupancy bitmap in §5.3 the one remaining large win.
+
+An *idle* node shows no difference between blocks-only and tx-relay, because
+`Peer::TxRelay` is allocated per peer and an idle node has none. The
+difference only appears in a run with connections, and there it is large: see
+the 1k rung below.
+
+### 16.3 What a run costs
+
+| Nodes | Configuration | Minutes | Bytes/node | Total | Wall |
+|---|---|---|---|---|---|
+| 1,000 | blocks-only | 15 | 1,260,000 | 1.26 GB | 168 s |
+| 1,000 | tx-relay | 15 | 9,710,000 | 9.71 GB | 181 s |
+| 1,000 | blocks-only | 60 | 1,317,068 | 1.23 GB | 87 s |
+| 1,000 | mainnet mix, chain, mining | 60 | 1,884,360 | 1.74 GB | 90 s |
+| 10,000 | blocks-only | 15 | 1,432,774 | 13.34 GiB | 389 s |
+| 10,000 | blocks-only | 60 | 1,475,183 | 13.74 GiB | 1377 s |
+| 10,000 | mainnet mix, chain, mining | 60 | 1,940,489 | 18.07 GiB | 1302 s |
+| 100,000 | blocks-only | 60 | *~1.5 M projected* | *~148 GB* | *~3.8 h* |
+| 100,000 | mainnet mix, chain, mining | 60 | *~1.9 M projected* | *~194 GB* | *~3.6 h* |
+
+The 100,000 rows are **projections, not measurements**: per-node cost is flat
+across the measured rungs, so the projection is that figure times the node
+count, and wall clock scales linearly in both node count and simulated time.
+Neither fits in this laptop's 125 GB, which is why they have never been run.
+What would make 100k fit here is the AddrMan occupancy bitmap: 656 KB down to
+about 16 KB per node takes the blocks-only projection from ~148 GB to ~84 GB.
+
+Tx relay costs 7.4× the memory of blocks-only and almost nothing in CPU
+(181 s against 168 s at the 1k rung) — it is the per-peer inventory filter,
+not work.
+
+Adding a chain and mining costs about 518 KB per node: the
+recent-confirmed-transactions filter that the coinbase lands in. It was 2.96
+MiB before the fix in `src/node/txdownloadman_impl.cpp`; see §13.2.
+
+### 16.4 Known hazards
+
+Things that have already bitten, or would.
+
+**Process globals, in rough order of how much they constrain the design.**
+
+- `NetEventsInterface::g_msgproc_mutex` is global and held across all message
+  handling, so the simulator is single-threaded by necessity, not by choice.
+  This is the binding constraint on ever parallelising it.
+- `cs_main` is global. For the simulator this costs nothing — we never
+  contend, being single-threaded already — but it is the second thing that
+  would have to go to parallelise. Upstream has built the seam:
+  `ChainstateManager::GetMutex()` (`validation.h:1042`) returns `::cs_main`,
+  and the intent is to migrate every `GUARDED_BY(::cs_main)` to it and then
+  make the mutex a member. As of this branch that migration is roughly 5%
+  done: 33 `GetMutex()` annotations against 633 mentions of `cs_main`. Not
+  something to take on as a side effect.
+- Mock time is global *and* whole-second resolution (`SetMockTime` stores
+  `std::chrono::seconds`), which is why the event queue runs at microsecond
+  resolution independently of what the nodes can observe.
+- `g_reachable_nets` is global, so `-onlynet` cannot differ between nodes.
+  Every node can reach every network. Right default for studying how a mixed
+  network forms; wrong for asking what a Tor-only node experiences.
+- `mapLocalHost` *was* global and is now per-`CConnman`; see §14. It had to
+  move before Tor and I2P nodes could announce themselves at all.
+- `fDiscover` and `GetListenPort()` are still read from globals inside
+  `LocalAddresses`. Both are configuration rather than learned state and are
+  identical across simulated nodes, so this is harmless today.
+- The script-execution and signature caches are process-global. Per-node
+  chainstates set both budgets to zero, so one node's validation cannot answer
+  for another's.
+
+**Lazy allocation, which makes memory appear later than you expect.**
+
+- The three `TxDownloadManager` rolling blooms are allocated on first use, and
+  two of them used to be allocated by `ActiveTipChange` merely to be reset.
+  Fixed, and worth 2.47 MiB per node.
+- `Peer::TxRelay` and its 527 KiB filter appear on the first peer, not at
+  construction. An idle-node probe therefore understates a tx-relay run by
+  roughly 8.5 MB.
+- `mapRecvBytesPerMsgType` cannot be made lazy: `CNode::ReceiveMsgBytes`
+  indexes it without checking and asserts.
+
+**Measurement traps.**
+
+- Only the first RSS measurement in a process is valid (§16.1).
+- `/tmp` on this machine is a 13 GB tmpfs; a 10k run fills it. Runs set
+  `TMPDIR=/home/core/.cache/netsim-tmp` and delete leftover `test_common`
+  datadirs afterwards.
+- A per-node `ChainstateManager` defaults to `worker_threads_num = 2` and
+  `prevoutfetch_threads_num = 2`. Left alone that is 40,000 threads at 10k
+  nodes. `MakeNode` sets both to zero.
+- `BlockManagerOpts::blocks_dir` is a real filesystem path — the one part of a
+  simulated node that is not in memory. `fast_prune` keeps the files to 16 kB
+  chunks rather than preallocating 16 MiB each.
+
+**A CPU trap that looks like a memory problem.** `AddrMan::Select()` probes
+random slots until it finds an occupied one, so its cost scales inversely with
+table occupancy. A sparsely seeded population appears to hang rather than to
+be slow: four bootstrap addresses cost 147 s at the 1k rung where sixteen cost
+5 s, for the same resulting topology. §5.2.
