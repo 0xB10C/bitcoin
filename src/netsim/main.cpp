@@ -39,6 +39,7 @@
 #include <string>
 #include <string_view>
 #include <functional>
+#include <limits>
 #include <vector>
 
 namespace {
@@ -54,6 +55,9 @@ struct Args {
     bool header{false};
     std::string export_prefix;
     uint32_t service_ms{1000};
+    uint32_t tracked{0};
+    uint32_t sample_sec{60};
+    std::string addr_csv;
 };
 
 void PrintUsage()
@@ -72,7 +76,13 @@ void PrintUsage()
                  "  --csv-header     print the CSV column names and exit\n"
                  "  --service-ms=N   how often each node flushes queued sends (default 1000)\n"
                  "  --export=PREFIX  write PREFIX-nodes.csv and PREFIX-edges.csv,\n"
-                 "                   readable directly by networkx or igraph\n");
+                 "                   readable directly by networkx or igraph\n"
+                 "  --tracked=N      withhold the first N listener addresses from the\n"
+                 "                   bootstrap seeding, so address relay is the only way\n"
+                 "                   they can spread, and measure how far they get\n"
+                 "  --sample-sec=N   how often to count who holds a tracked address\n"
+                 "                   (default 60)\n"
+                 "  --addr-csv=FILE  write the coverage samples there\n");
 }
 
 bool ParseUint(std::string_view text, uint32_t& out)
@@ -107,6 +117,12 @@ bool ParseArgs(int argc, char* argv[], Args& args)
             args.service_ms = value;
         } else if (arg.starts_with("--export=") && arg.size() > 9) {
             args.export_prefix = std::string{arg.substr(9)};
+        } else if (arg.starts_with("--tracked=") && ParseUint(arg.substr(10), value)) {
+            args.tracked = value;
+        } else if (arg.starts_with("--sample-sec=") && ParseUint(arg.substr(13), value)) {
+            args.sample_sec = value;
+        } else if (arg.starts_with("--addr-csv=") && arg.size() > 11) {
+            args.addr_csv = std::string{arg.substr(11)};
         } else {
             std::fprintf(stderr, "unrecognised argument: %s\n\n", argv[i]);
             return false;
@@ -114,6 +130,10 @@ bool ParseArgs(int argc, char* argv[], Args& args)
     }
     if (args.listeners > args.nodes) {
         std::fprintf(stderr, "--listeners cannot exceed --nodes\n");
+        return false;
+    }
+    if (args.tracked > args.listeners) {
+        std::fprintf(stderr, "--tracked cannot exceed --listeners\n");
         return false;
     }
     return true;
@@ -176,6 +196,8 @@ int main(int argc, char* argv[])
     opts.blocks_only = args.blocks_only;
     opts.rng_seed = uint256{args.seed};
     opts.service_interval = std::chrono::duration_cast<netsim::SimTime>(std::chrono::milliseconds{args.service_ms});
+    opts.num_tracked = args.tracked;
+    opts.addr_sample_interval = std::chrono::duration_cast<netsim::SimTime>(std::chrono::seconds{args.sample_sec});
 
     netsim::Network net{opts, shared};
     {
@@ -189,6 +211,12 @@ int main(int argc, char* argv[])
         if (!netsim::WriteGraph(net, fs::PathFromString(args.export_prefix))) {
             std::fprintf(stderr, "failed to write the graph to %s-nodes.csv / -edges.csv\n",
                          args.export_prefix.c_str());
+            return EXIT_FAILURE;
+        }
+    }
+    if (!args.addr_csv.empty()) {
+        if (!netsim::WriteAddrSamples(net, fs::PathFromString(args.addr_csv))) {
+            std::fprintf(stderr, "failed to write the coverage samples to %s\n", args.addr_csv.c_str());
             return EXIT_FAILURE;
         }
     }
@@ -243,6 +271,23 @@ int main(int argc, char* argv[])
     std::printf("addresses       %llu held, %llu of them unreachable\n",
                 static_cast<unsigned long long>(addrman_total),
                 static_cast<unsigned long long>(known_strangers));
+    if (!net.TrackedNodes().empty()) {
+        // The last sample for each tracked address, which is where its
+        // propagation curve ended.
+        const size_t n{net.TrackedNodes().size()};
+        const auto& samples{net.AddrSamples()};
+        uint64_t holders{0}, in_tried{0}, worst{std::numeric_limits<uint64_t>::max()};
+        for (size_t i{samples.size() >= n ? samples.size() - n : 0}; i < samples.size(); ++i) {
+            holders += samples[i].holders;
+            in_tried += samples[i].in_tried;
+            worst = std::min<uint64_t>(worst, samples[i].holders);
+        }
+        std::printf("addr relay      %u withheld addresses reached %llu nodes on average, "
+                    "%llu at worst, %llu%% of those via tried\n",
+                    static_cast<unsigned>(n), static_cast<unsigned long long>(holders / n),
+                    static_cast<unsigned long long>(worst),
+                    static_cast<unsigned long long>(holders > 0 ? in_tried * 100 / holders : 0));
+    }
     std::printf("attempts        %llu failed, %llu refused as duplicates, %llu turned away\n",
                 static_cast<unsigned long long>(net.FailedAttempts()),
                 static_cast<unsigned long long>(net.RejectedAttempts()),

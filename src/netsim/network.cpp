@@ -53,6 +53,10 @@ Network::Network(Options opts_in, const SharedContext& ctx)
       m_rng{m_opts.rng_seed}
 {
     Assert(m_opts.num_listening <= m_opts.num_nodes);
+    Assert(m_opts.num_tracked <= m_opts.num_listening);
+
+    m_tracked.reserve(m_opts.num_tracked);
+    for (uint32_t id{0}; id < m_opts.num_tracked; ++id) m_tracked.push_back(id);
 
     m_nodes.reserve(m_opts.num_nodes);
     m_links_by_node.resize(m_opts.num_nodes);
@@ -74,11 +78,24 @@ Network::Network(Options opts_in, const SharedContext& ctx)
     }
 
     Bootstrap();
+
+    // A baseline reading before anything has connected, so a plot of coverage
+    // starts where it should. Then the repeating schedule.
+    if (!m_tracked.empty() && m_opts.addr_sample_interval.count() > 0) {
+        SampleAddrCoverage();
+        ArmAddrSample(m_clock.Now() + m_opts.addr_sample_interval);
+    }
 }
 
 void Network::Bootstrap()
 {
-    if (m_opts.bootstrap_addrs == 0 || m_opts.num_listening == 0) return;
+    if (m_opts.bootstrap_addrs == 0) return;
+
+    // Tracked listeners are skipped: withholding them is what makes relay the
+    // only way their addresses can spread.
+    const uint32_t first{m_opts.num_tracked};
+    const uint32_t count{m_opts.num_listening - first};
+    if (count == 0) return;
 
     constexpr auto SERVICES{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
     const auto now{Now<NodeSeconds>()};
@@ -87,7 +104,7 @@ void Network::Bootstrap()
         std::vector<CAddress> seeds;
         seeds.reserve(m_opts.bootstrap_addrs);
         for (uint32_t k{0}; k < m_opts.bootstrap_addrs; ++k) {
-            const auto pick{static_cast<uint32_t>(m_rng.randrange(m_opts.num_listening))};
+            const auto pick{first + static_cast<uint32_t>(m_rng.randrange(count))};
             if (pick == id) continue;
             // Backdate like ConvertSeeds does, so these do not all look
             // freshly announced and the selection is not dominated by
@@ -432,6 +449,44 @@ void Network::ArmOpenConnTick(uint32_t id, SimTime at)
         TryOpenOutbound(id);
         ArmOpenConnTick(id, at + m_opts.open_conn_interval);
     });
+}
+
+void Network::ArmAddrSample(SimTime at)
+{
+    if (m_opts.addr_sample_interval <= SimTime::zero()) return;
+    m_queue.Post(at, [this, at] {
+        SampleAddrCoverage();
+        ArmAddrSample(at + m_opts.addr_sample_interval);
+    });
+}
+
+void Network::SampleAddrCoverage()
+{
+    constexpr auto SERVICES{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
+    const SimTime now{m_clock.Now()};
+
+    for (const uint32_t tracked : m_tracked) {
+        const CAddress addr{m_universe.At(tracked), SERVICES};
+        AddrSample sample;
+        sample.at = now;
+        sample.node = tracked;
+
+        for (uint32_t id{0}; id < m_opts.num_nodes; ++id) {
+            if (id == tracked) continue; // its own address is not news
+            // One hash lookup rather than a table walk, which is what keeps a
+            // whole-population sample affordable at 100,000 nodes.
+            const auto found{At(id).addrman->FindAddressEntry(addr)};
+            if (!found) continue;
+            ++sample.holders;
+            if (found->tried) {
+                ++sample.in_tried;
+                ++sample.multiplicity;
+            } else {
+                sample.multiplicity += static_cast<uint32_t>(found->multiplicity);
+            }
+        }
+        m_addr_samples.push_back(sample);
+    }
 }
 
 void Network::RunFor(SimTime duration)

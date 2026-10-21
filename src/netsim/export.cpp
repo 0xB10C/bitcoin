@@ -61,6 +61,30 @@ std::string EdgeColumns()
     return "initiator,acceptor,conn_type,opened_us,bytes_to_acceptor,bytes_to_initiator";
 }
 
+std::string AddrSampleColumns()
+{
+    return "elapsed_us,node,address,holders,in_tried,multiplicity";
+}
+
+bool WriteAddrSamples(const Network& net, const fs::path& path)
+{
+    std::ofstream out{path.std_path()};
+    if (!out.is_open()) return false;
+    out << AddrSampleColumns() << "\n";
+
+    const SimTime start{net.StartTime()};
+    for (const Network::AddrSample& sample : net.AddrSamples()) {
+        out << (sample.at - start).count() << ','
+            << sample.node << ','
+            << net.At(sample.node).self.ToStringAddrPort() << ','
+            << sample.holders << ','
+            << sample.in_tried << ','
+            << sample.multiplicity << '\n';
+    }
+    out.flush();
+    return out.good();
+}
+
 bool WriteGraph(const Network& net, const fs::path& prefix)
 {
     const fs::path nodes_path{fs::PathFromString(fs::PathToString(prefix) + "-nodes.csv")};

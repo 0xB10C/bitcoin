@@ -129,8 +129,37 @@ public:
          * Lowering it is the cheap way to reach the inbound cap, and so to
          * exercise eviction, without a population of hundreds. */
         int max_automatic_connections{DEFAULT_MAX_PEER_CONNECTIONS};
+        /** Listeners whose addresses are withheld from the bootstrap seeding.
+         *
+         * The first `num_tracked` listening nodes. Nobody starts out knowing
+         * them, so the only route their addresses have into the population is
+         * Core's own address relay: the node learns its own address from the
+         * `addr_recv` field of a peer's VERSION, announces it to that peer,
+         * and the peer gossips it on to two more. How far and how fast that
+         * gets is the measurement. */
+        uint32_t num_tracked{0};
+        /** How often to count who holds each tracked address. Zero disables.
+         *
+         * A sample is one hash lookup per (node, tracked address), so the cost
+         * is small, but it is also a whole-population scan that the nodes
+         * cannot see, so it does not belong on a fine schedule. */
+        SimTime addr_sample_interval{std::chrono::duration_cast<SimTime>(std::chrono::minutes{1})};
         RegionLatency::Options latency{};
         uint256 rng_seed{uint256{1}};
+    };
+
+    /** How widely one tracked address had spread, at one instant. */
+    struct AddrSample {
+        SimTime at{};
+        /** The node whose address this is. */
+        uint32_t node{0};
+        /** Nodes holding it in either AddrMan table, the owner excluded. */
+        uint32_t holders{0};
+        /** Of those, how many have it in `tried` rather than `new`. */
+        uint32_t in_tried{0};
+        /** Summed new-table multiplicity, which counts distinct sources that
+         *  announced it rather than distinct holders. */
+        uint32_t multiplicity{0};
     };
 
     Network(Options opts, const SharedContext& ctx);
@@ -197,6 +226,11 @@ public:
     /** Connections opened, by connection type. */
     uint64_t OpenedOfType(ConnectionType type) const;
 
+    /** The nodes whose addresses were withheld from the bootstrap seeding. */
+    const std::vector<uint32_t>& TrackedNodes() const { return m_tracked; }
+    /** Every coverage sample taken over the run, in time order. */
+    const std::vector<AddrSample>& AddrSamples() const { return m_addr_samples; }
+
 private:
     void ServiceEndpoint(size_t link_index, Direction outgoing)
         EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex);
@@ -217,6 +251,9 @@ private:
     void Bootstrap();
     void ArmServiceTick(uint32_t id, SimTime at);
     void ArmOpenConnTick(uint32_t id, SimTime at);
+    void ArmAddrSample(SimTime at);
+    /** Count, for each tracked address, how many nodes now hold it. */
+    void SampleAddrCoverage();
 
     const Options m_opts;
     const SharedContext m_ctx;
@@ -233,6 +270,8 @@ private:
     std::vector<size_t> m_free_links;
     std::vector<std::vector<size_t>> m_links_by_node;
     std::map<CService, uint32_t> m_listeners;
+    std::vector<uint32_t> m_tracked;
+    std::vector<AddrSample> m_addr_samples;
 
     NodeId m_next_node_id{0};
     uint64_t m_inbound_refusals{0};

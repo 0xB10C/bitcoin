@@ -796,4 +796,85 @@ BOOST_FIXTURE_TEST_CASE(netsim_graph_export, SimTestingSetup)
     BOOST_CHECK_EQUAL(inbound_sum, edges.size() - 1);
 }
 
+/** A withheld listener address reaches the population by relay alone.
+ *
+ * Nobody is seeded with node 0's address, so the only route it has into any
+ * other AddrMan is Core's own machinery: node 0 learns its own address from
+ * the `addr_recv` field of a peer's VERSION, self-announces it to the peers it
+ * dialled, and each of those gossips it on. If any of that were missing the
+ * coverage would stay at zero for the whole run.
+ */
+BOOST_FIXTURE_TEST_CASE(netsim_addr_relay_reaches_the_population, SimTestingSetup)
+{
+    netsim::Network::Options opts;
+    opts.num_nodes = 40;
+    opts.num_listening = 12;
+    opts.num_tracked = 1;
+    opts.bootstrap_addrs = 6;
+    opts.blocks_only = true;
+    opts.addr_sample_interval = std::chrono::duration_cast<SimTime>(30s);
+    netsim::Network net{opts, ctx};
+
+    // Taken before anything has connected: the withheld address is unknown.
+    BOOST_REQUIRE_EQUAL(net.AddrSamples().size(), 1U);
+    BOOST_CHECK_EQUAL(net.AddrSamples().front().holders, 0U);
+    BOOST_CHECK_EQUAL(net.AddrSamples().front().node, 0U);
+
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        net.RunFor(std::chrono::duration_cast<SimTime>(8min));
+    }
+
+    const auto& samples{net.AddrSamples()};
+    BOOST_REQUIRE_GT(samples.size(), 2U);
+    const auto& last{samples.back()};
+    BOOST_TEST_MESSAGE("samples=" << samples.size() << " final_holders=" << last.holders
+                                   << " in_tried=" << last.in_tried
+                                   << " multiplicity=" << last.multiplicity);
+
+    // It got past the peers node 0 dialled itself, which is the part that
+    // needs relay rather than a handshake.
+    BOOST_CHECK_GT(last.holders, net.At(0).connman->GetNodeCount(ConnectionDirection::Out));
+    // Nobody can have tried it without first having been told about it.
+    BOOST_CHECK_LE(last.in_tried, last.holders);
+
+    // Coverage is non-decreasing here: nothing is terrible enough to be
+    // dropped, and the tables are far from full.
+    for (size_t i{1}; i < samples.size(); ++i) {
+        BOOST_CHECK_GE(samples[i].holders, samples[i - 1].holders);
+        BOOST_CHECK_GT(samples[i].at.count(), samples[i - 1].at.count());
+    }
+
+    // And the writer agrees with what the run recorded.
+    const fs::path path{m_path_root / "addr-samples.csv"};
+    BOOST_REQUIRE(netsim::WriteAddrSamples(net, path));
+    std::ifstream in{path.std_path()};
+    BOOST_REQUIRE(in.is_open());
+    std::vector<std::string> lines;
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty()) lines.push_back(line);
+    }
+    BOOST_REQUIRE_EQUAL(lines.size(), samples.size() + 1);
+    BOOST_CHECK_EQUAL(lines[0], netsim::AddrSampleColumns());
+    BOOST_CHECK_EQUAL(lines[1], "0,0," + net.At(0).self.ToStringAddrPort() + ",0,0,0");
+}
+
+/** Without tracking, nothing is withheld and nothing is sampled. */
+BOOST_FIXTURE_TEST_CASE(netsim_addr_sampling_is_opt_in, SimTestingSetup)
+{
+    netsim::Network::Options opts;
+    opts.num_nodes = 8;
+    opts.num_listening = 4;
+    netsim::Network net{opts, ctx};
+    BOOST_CHECK(net.TrackedNodes().empty());
+    BOOST_CHECK(net.AddrSamples().empty());
+
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        net.RunFor(std::chrono::duration_cast<SimTime>(1min));
+    }
+    BOOST_CHECK(net.AddrSamples().empty());
+}
+
 BOOST_AUTO_TEST_SUITE_END()
