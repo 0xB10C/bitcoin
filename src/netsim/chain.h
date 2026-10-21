@@ -7,6 +7,8 @@
 
 #include <netsim/clock.h>
 #include <netsim/node.h>
+#include <random.h>
+#include <uint256.h>
 
 #include <chrono>
 #include <cstdint>
@@ -49,14 +51,24 @@ public:
          * Zero leaves the genesis-only chain, which is the historical
          * behaviour and needs `disable_chain_sync_timeout`. */
         uint32_t initial_blocks{0};
-        /** Simulated interval between blocks, for the initial chain and for
-         *  the ongoing mining alike. Bitcoin's target. */
+        /** Mean simulated interval between blocks, for the initial chain and
+         *  for the ongoing mining alike. Bitcoin's target. */
         std::chrono::seconds spacing{600};
+        /** Draw each interval from an exponential distribution with that mean,
+         *  rather than spacing blocks evenly.
+         *
+         * Bitcoin's block arrivals are a Poisson process, so the gap between
+         * two blocks is exponentially distributed and the count in any window
+         * is Poisson. Even spacing is the one thing mining is definitely not,
+         * and it would hide exactly the clustering that makes a twenty-minute
+         * timeout interesting. Off only to let a test pin the block count. */
+        bool poisson{true};
+        uint256 rng_seed{uint256{1}};
     };
 
-    explicit Chain(const SharedContext& ctx);
+    Chain(const SharedContext& ctx, const Options& opts);
 
-    /** Build `count` blocks `spacing` apart, the last landing on `end`.
+    /** Build `Options::initial_blocks` blocks, the last landing on `end`.
      *
      * Timestamps run up to `end` rather than from it so that the tip is fresh
      * when the run starts: `IsInitialBlockDownload` calls a tip older than
@@ -65,8 +77,11 @@ public:
      *
      * Mock time is moved for each block, because that is where
      * `CreateNewTemplate` takes `nTime` from, and left at `end` afterwards.
+     *
+     * Does nothing if the chain is already at least that tall, so whoever
+     * needs it first may build it.
      */
-    void Prefill(uint32_t count, std::chrono::seconds spacing, std::chrono::seconds end);
+    void Prefill(std::chrono::seconds end);
 
     /** Mine one block on the tip, timestamped at the current mock time.
      *
@@ -75,12 +90,17 @@ public:
      */
     bool MineOne();
 
+    /** How long until the next block, drawn from `Options`. */
+    std::chrono::seconds NextInterval();
+
     int Height() const;
     /** Blocks mined during the run, excluding the prefilled chain. */
     uint64_t Mined() const { return m_mined - m_prefilled; }
 
 private:
     const SharedContext& m_ctx;
+    const Options m_opts;
+    FastRandomContext m_rng;
     uint64_t m_mined{0};
     uint64_t m_prefilled{0};
 };

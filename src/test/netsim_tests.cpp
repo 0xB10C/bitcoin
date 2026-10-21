@@ -7,6 +7,7 @@
 #include <netaddress.h>
 #include <netgroup.h>
 #include <netsim/addresses.h>
+#include <netsim/chain.h>
 #include <netsim/clock.h>
 #include <netsim/eventqueue.h>
 #include <netsim/export.h>
@@ -1045,6 +1046,11 @@ BOOST_FIXTURE_TEST_CASE(netsim_mining_satisfies_the_chain_sync_timer, SimChainTe
     opts.blocks_only = true;
     opts.chain.initial_blocks = 20;
     opts.mine = true;
+    // Evenly spaced on purpose. Real arrivals are Poisson, and
+    // netsim_block_intervals_are_exponential covers that; here a fixed
+    // schedule is what makes "five blocks in fifty minutes" a statement about
+    // the chain-sync timer rather than about a lucky draw.
+    opts.chain.poisson = false;
     netsim::Network net{opts, ctx};
 
     // The chain was built before any node existed, and its tip landed on the
@@ -1073,6 +1079,50 @@ BOOST_FIXTURE_TEST_CASE(netsim_mining_satisfies_the_chain_sync_timer, SimChainTe
     // outbound peers past fifty simulated minutes is the result worth having.
     BOOST_CHECK_EQUAL(sat.isolated, 0U);
     BOOST_CHECK_GT(sat.saturated, opts.num_nodes * 3 / 4);
+}
+
+/** Block intervals are exponential, with the asked-for mean.
+ *
+ * Checked on the Chain alone rather than through a run, because a thousand
+ * draws is the smallest sample that says anything about a distribution and a
+ * thousand simulated blocks is not.
+ */
+BOOST_FIXTURE_TEST_CASE(netsim_block_intervals_are_exponential, SimChainTestingSetup)
+{
+    constexpr size_t DRAWS{20'000};
+    netsim::Chain::Options opts;
+    opts.spacing = 600s;
+    netsim::Chain chain{ctx, opts};
+
+    std::vector<int64_t> gaps;
+    gaps.reserve(DRAWS);
+    int64_t total{0};
+    for (size_t i{0}; i < DRAWS; ++i) {
+        gaps.push_back(chain.NextInterval().count());
+        total += gaps.back();
+    }
+
+    const double mean{double(total) / DRAWS};
+    // The standard error of the mean of an exponential is mean/sqrt(n), so
+    // 600/141 = 4.2 seconds here; ten of those is a wide berth.
+    BOOST_TEST_MESSAGE("mean=" << mean);
+    BOOST_CHECK_GT(mean, 560.0);
+    BOOST_CHECK_LT(mean, 640.0);
+
+    // An exponential has its median at ln(2) times the mean, well below it,
+    // and a long tail: a fixed interval would have neither.
+    std::ranges::sort(gaps);
+    const double median{double(gaps[DRAWS / 2])};
+    BOOST_TEST_MESSAGE("median=" << median << " max=" << gaps.back());
+    BOOST_CHECK_GT(median, 0.9 * 600.0 * 0.693);
+    BOOST_CHECK_LT(median, 1.1 * 600.0 * 0.693);
+    BOOST_CHECK_GT(gaps.back(), 3 * 600);
+
+    // And the knob that turns it off, which exists so a test can pin a count.
+    opts.poisson = false;
+    netsim::Chain fixed{ctx, opts};
+    BOOST_CHECK(fixed.NextInterval() == 600s);
+    BOOST_CHECK(fixed.NextInterval() == 600s);
 }
 
 /** No chain means no announcements, which is why the gate exists. */

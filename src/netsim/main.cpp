@@ -99,8 +99,9 @@ void PrintUsage()
                  "  --mainnet        both of the above\n"
                  "  --chain=N        build a chain of N blocks before the run, so the\n"
                  "                   nodes start out with something to announce\n"
-                 "  --mine           mine a block every --block-sec of simulated time\n"
-                 "  --block-sec=N    simulated seconds between blocks (default 600)\n");
+                 "  --mine           mine blocks as a Poisson process, one every\n"
+                 "                   --block-sec of simulated time on average\n"
+                 "  --block-sec=N    mean simulated seconds between blocks (default 600)\n");
 }
 
 bool ParseUint(std::string_view text, uint32_t& out)
@@ -324,10 +325,13 @@ int main(int argc, char* argv[])
     // the memory baseline below instead of being charged to the nodes. The
     // Network's own prefill then finds the chain already at height and does
     // nothing.
-    const netsim::SimTime sim_start{netsim::Network::Options{}.start};
     if (args.chain > 0) {
-        netsim::Chain{shared}.Prefill(args.chain, std::chrono::seconds{args.block_sec},
-                                      std::chrono::duration_cast<std::chrono::seconds>(sim_start));
+        netsim::Chain::Options chain_opts;
+        chain_opts.initial_blocks = args.chain;
+        chain_opts.spacing = std::chrono::seconds{args.block_sec};
+        chain_opts.rng_seed = uint256{args.seed};
+        netsim::Chain{shared, chain_opts}.Prefill(
+            std::chrono::duration_cast<std::chrono::seconds>(netsim::Network::Options{}.start));
     }
 
     // Read before the population exists, so the host process and its shared

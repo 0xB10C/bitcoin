@@ -30,6 +30,10 @@ Network::Options ResolveOptions(Network::Options opts)
     opts.addresses.num_nodes = opts.num_nodes;
     opts.addresses.port = opts.port;
     opts.addresses.seed = opts.rng_seed;
+    // Chain derives its own stream from this, so the block schedule is
+    // reproducible and does not shift when anything else changes how often it
+    // draws.
+    opts.chain.rng_seed = opts.rng_seed;
     return opts;
 }
 } // namespace
@@ -40,7 +44,7 @@ Network::Network(Options opts_in, const SharedContext& ctx)
       m_universe{m_opts.addresses},
       m_clock{m_opts.start},
       m_latency{m_opts.latency},
-      m_chain{m_ctx},
+      m_chain{m_ctx, m_opts.chain},
       m_rng{m_opts.rng_seed}
 {
     Assert(m_opts.num_listening <= m_opts.num_nodes);
@@ -49,8 +53,7 @@ Network::Network(Options opts_in, const SharedContext& ctx)
     // Before any node exists, so the nodes come up on a chain that is already
     // there rather than watching it appear. The tip lands on the instant the
     // run starts, which is also what keeps them out of initial block download.
-    m_chain.Prefill(m_opts.chain.initial_blocks, m_opts.chain.spacing,
-                    std::chrono::duration_cast<std::chrono::seconds>(m_opts.start));
+    m_chain.Prefill(std::chrono::duration_cast<std::chrono::seconds>(m_opts.start));
     m_clock.AdvanceTo(m_opts.start);
 
     m_tracked.reserve(m_opts.num_tracked);
@@ -85,7 +88,7 @@ Network::Network(Options opts_in, const SharedContext& ctx)
     }
 
     if (m_opts.mine) {
-        ArmMineTick(m_clock.Now() + std::chrono::duration_cast<SimTime>(m_opts.chain.spacing));
+        ArmMineTick(m_clock.Now() + std::chrono::duration_cast<SimTime>(m_chain.NextInterval()));
     }
 }
 
@@ -473,15 +476,16 @@ void Network::ArmAddrSample(SimTime at)
 
 void Network::ArmMineTick(SimTime at)
 {
-    const auto spacing{std::chrono::duration_cast<SimTime>(m_opts.chain.spacing)};
-    if (spacing <= SimTime::zero()) return;
-    m_queue.Post(at, [this, at, spacing] {
-        // One block per interval, from nobody in particular. Which node mined
-        // it is not expressible while the chainstate is shared: see chain.h.
-        // What matters for the peers is that the tip moved, and that every
-        // node's PeerManager heard about it.
+    if (m_opts.chain.spacing <= std::chrono::seconds::zero()) return;
+    m_queue.Post(at, [this, at] {
+        // One block, from nobody in particular. Which node mined it is not
+        // expressible while the chainstate is shared: see chain.h. What
+        // matters for the peers is that the tip moved, and that every node's
+        // PeerManager heard about it.
         Assert(m_chain.MineOne());
-        ArmMineTick(at + spacing);
+        // The next gap is drawn fresh, so block arrivals are the Poisson
+        // process they are on the real network rather than a metronome.
+        ArmMineTick(at + std::chrono::duration_cast<SimTime>(m_chain.NextInterval()));
     });
 }
 

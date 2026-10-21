@@ -1289,13 +1289,23 @@ what happens to a Tor-only node.
 ## 13. The shared chain
 
 `--chain=N` builds N blocks before the population exists; `--mine` extends the
-chain every `--block-sec` of simulated time, ten minutes by default. Both go
-through `BlockTemplateManager` and `ProcessNewBlock`, so the coinbase, the
-witness commitment, the difficulty and the timestamp rules are Core's rather
-than something reimplemented here.
+chain as a Poisson process with a mean interval of `--block-sec`, ten minutes
+by default. Both go through `BlockTemplateManager` and `ProcessNewBlock`, so
+the coinbase, the witness commitment, the difficulty and the timestamp rules
+are Core's rather than something reimplemented here.
 
-Two details that are load-bearing:
+Three details that are load-bearing:
 
+- **Intervals are exponential, not even.** Block arrivals are a Poisson
+  process, so the gap between two blocks is exponentially distributed and the
+  count in any window is Poisson, not fixed: 120 simulated minutes at a
+  ten-minute mean produced 11, 12 and 8 blocks for three seeds. Even spacing is
+  the one thing mining is definitely not, and it would hide exactly the
+  clustering that makes a twenty-minute timeout interesting. `Chain` draws from
+  `FastRandomContext::rand_exp_duration`, the same primitive `MaybeSendAddr`
+  uses for its own Poisson timers, on a stream derived from the run's seed so
+  the schedule is reproducible. `Options::poisson` turns it off, which is how a
+  test pins a block count.
 - **Timestamps run up to the start of the run, not from it.**
   `IsInitialBlockDownload` calls a tip older than `max_tip_age`, a day by
   default, still-syncing, and a node in initial block download never announces
