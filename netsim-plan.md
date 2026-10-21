@@ -1847,3 +1847,64 @@ Two things I got wrong on the way, both worth keeping:
 Re-measure with `scratchpad/addrdist.sh` (runs) and `addrdiststats.sh`
 (samples plus quantiles plus the within-population r); `mkdist.sh` folds the
 samples into the chart data. 1000 nodes is ~47 s per seed, 5000 is ~370 s.
+
+### 17.7 A closed form for reach, and the size where it stops working
+
+`RelayAddress` picks its targets by hashing the address against each peer id,
+and `ROTATE_ADDR_RELAY_DEST_INTERVAL` is 24 h, so within a run every node always
+picks the *same* two peers for a given address. The forward path is therefore a
+fixed out-degree-2 digraph and reach is just the forward-reachable set from the
+owner in it. Only the 8 full-relay outbound slots are eligible:
+`SetupAddressRelay` (net_processing.cpp:5964) excludes block-relay-only and
+feeler connections.
+
+Among listeners the targets are effectively uniform, so forward exploration is a
+branching process with two children and the reachable share is the giant
+out-component of a digraph whose in-degree is Poisson(2). Non-listeners cannot
+be dialled, so they are only ever picked by the 8 listeners they dialled
+themselves. With `s = L/N`:
+
+    theta = 1 - exp(-2 theta)  = 0.7968     giant out-component
+    d     = 8 (1 + 1/s)                     mean listener degree
+    lam   = 8 * 2/d = 2s/(1+s)              non-listener in-degree
+    reach/N = s*theta + (1-s)*(1 - exp(-lam*theta))
+
+`d` depends only on `s`, which is why reach is flat in N at a fixed listening
+share: **reach is set by the reachable share, not by the population.**
+
+| Nodes | Share | listeners m/meas | others m/meas | population m/meas | window | depth |
+|---|---|---|---|---|---|---|
+| 500 | 20% | 79.7 / 80.9 | 23.3 / 24.9 | 34.6 / 36.1 | 4.98 | 12.4 |
+| 1000 | 5% | 79.7 / 82.8 | 7.3 / 8.0 | 10.9 / 11.7 | 6.60 | 11.4 |
+| 1000 | 20% | 79.7 / 83.7 | 23.3 / 25.9 | 34.6 / 37.5 | 6.45 | 16.2 |
+| 2000 | 20% | 79.7 / 79.4 | 23.3 / 24.9 | 34.6 / 35.8 | 8.92 | 20.2 |
+| 4000 | 20% | 79.7 / 76.2 | 23.3 / 24.1 | 34.6 / 34.5 | 10.93 | 26.7 |
+| 10000 | 20% | 79.7 / 61.7 | 23.3 / 18.5 | 34.6 / **27.2** | 12.44 | 36.4 |
+
+1.72 points RMS up to 4000, nothing fitted. The 5% row is the load-bearing one:
+dropping the share alone cuts reach threefold and the formula follows it.
+
+**10,000 nodes is where the assumption fails.** The model assumes the wave
+finishes; here the network is deeper than the clock allows. Mean arrival climbs
+a steady ~20 s per hop through hop 24, which extrapolates to 12+ minutes by hop
+33 -- but hops 33-40 all measure a mean of 9.0-9.2 min and stop rising. They
+cannot cross the gate, so nothing reaches those depths on an average-speed
+chain; only chains that ran fast get there, and everything behind them is never
+told. Reach 27.2% against the formula's 34.6%.
+
+Two things to keep straight at this size:
+
+- **Arrivals past 10 min are not late forwarding.** They were authorised just
+  inside the deadline and then waited on `m_next_addr_send` (Poisson, 30 s mean,
+  long tail). Forwarding stops at the gate; delivery does not. This is why the
+  4000-node window is 10.93 min with reach still matching the model.
+- **Do not filter the hop tree to pushed arrivals.** Only first arrivals are
+  recorded, and at 10,000 nodes 16% of first arrivals are bulk GETADDR replies.
+  A node whose first sight was a pull may still forward a later push copy, so
+  push-only filtering orphans its children and lost 40% of the tree (1638 of
+  2718 nodes). Build the tree over all first arrivals and label each edge
+  instead; push still accounts for 76-100% of every hop.
+
+Re-measure with `scratchpad/addrmodel.sh` and `addr10k.sh`; `addrmodelstats.sh`
+tabulates, `addrpredict.sh` compares against the formula, `mk10k.sh` and
+`mkmodel.sh` build the chart data. 10,000 nodes is 872 s and 14 GB.
