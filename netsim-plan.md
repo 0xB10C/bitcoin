@@ -17,14 +17,16 @@ in `src/test/netsim_tests.cpp`, driven by the `netsim_tests` suite.
 
 There is also a standalone driver, `bitcoin-netsim`, built with
 `cmake --build build --target bitcoin-netsim`. It takes `--nodes`,
-`--listeners`, `--minutes`, `--bootstrap`, `--blocksonly`, `--seed` and
+`--listeners`, `--minutes`, `--bootstrap`, `--blocksonly`, `--seed`,
+`--service-ms`, `--export`, `--tracked`, `--sample-sec`, `--addr-csv` and
 `--csv`, and reports what the run cost.
 
 What works: real `AddrMan`, `CConnman` and `PeerManager` per node, no sockets
 and no threads, a microsecond event queue with a region latency model and
 ordered per-direction delivery, Core's own ladder choosing what to open,
 full-relay plus block-relay-only plus feelers, connection teardown, inbound
-eviction, and reproducible runs.
+eviction, reproducible runs, a graph export, and an address-propagation
+measurement (§4.1).
 
 Measured over 100 nodes, 20 listening, 30 simulated minutes:
 
@@ -55,30 +57,37 @@ substitution path in `GetLocalAddrForPeer` produces the right answer as long
 as the address universe uses `GetListenPort()`.
 
 The graph export lands in `<prefix>-nodes.csv` and `<prefix>-edges.csv` via
-`--export=PREFIX`, readable directly by networkx or igraph. Closed connections
-are kept, marked `live=0`, because a feeler exists only for a moment and when
-short-lived connections happened is the interesting part.
+`--export=PREFIX`, readable directly by networkx or igraph. It is a snapshot of
+what is still up when the clock stops. Closed connections are not in it, and
+are not kept in memory either: feelers dominate the count over a long run
+(41,260 connections opened in an hour at 1000 nodes against 10,012 ever up at
+once), so a file of all of them is a log rather than a topology, and holding
+them was the largest remaining avoidable allocation.
 
 ### The 1000-node rung
 
-1000 nodes, 200 listening, 15 simulated minutes, deliberately inside the
-20-minute window of §8. Blocks-only cost 1.26 GB and 168 seconds of wall clock;
+1000 nodes, 200 listening, 15 simulated minutes, from before the chain-sync
+timeout was addressed. Blocks-only cost 1.26 GB and 168 seconds of wall clock;
 the default configuration cost 9.71 GB and 181 seconds, which says the
 transaction inventory filter is a memory cost and not a CPU one.
 
-Checked against the exported graph:
+With the timeout off the same population holds a stable topology for a full
+simulated hour: 87 seconds of wall clock, 1.23 GB, 41,260 connections opened
+and 10,012 standing at the end.
+
+Checked against the exported graph of that hour:
 
 | | |
 |---|---|
-| Connections opened | 17,233 |
+| Connections standing at the end | 10,012 |
 | Outbound full-relay | 8,000, which is 8 for every node |
 | Block-relay-only | 2,000, which is 2 for every node |
-| Feelers | 7,233, of which 7,228 had already closed |
+| Feelers caught mid-probe | 12, out of 31,248 opened and closed |
 | Nodes with all 10 persistent slots filled | 1000 of 1000 |
 | Nodes left isolated | 0 |
 | Outbound pairs sharing a netgroup | 0 of 10,000 |
-| Listener inbound degree | min 22, mean 50, max 83 |
-| Addresses held | 86,896, or 87 per node |
+| Listener inbound degree | min 19, mean 50, max 96 |
+| Addresses held | 108,564, or 109 per node |
 | Circulating addresses pointing nowhere | 0 |
 
 The zero duplicate-netgroup pairs across ten thousand persistent connections is
@@ -86,12 +95,15 @@ the strongest single check available that the simulator is exercising Core's
 selection rather than approximating it.
 
 The inbound spread is the first genuine result rather than a self-check. Load
-across listeners varies by nearly a factor of four around a mean of 50, so
-AddrMan selection is visibly not uniform across equally reachable listeners.
-That is the sort of question the simulator exists to answer.
+across listeners varies by a factor of five around a mean of 50, so AddrMan
+selection is visibly not uniform across equally reachable listeners. That is
+the sort of question the simulator exists to answer.
 
-Still to do: churn and the extra networks in §12, the 20-minute chain-sync
-timeout in §8, and the further production-fidelity steps in §11.
+The graph is rendered at https://claude.ai/artifact/MXqhkGfeoDNX7nG5e1t7q9,
+drawn from those two CSV files unchanged.
+
+Still to do: churn and the extra networks in §12, and the further
+production-fidelity steps in §11.
 
 ---
 
@@ -375,6 +387,26 @@ connection that seeds the table but does not spread, plus a slow 24-hour
 self-announcement gossip that does. Any result about propagation time depends
 on getting §3.2 right.
 
+### 4.1 Measured, and the shape it takes
+
+`--tracked=N` withholds the first N listener addresses from the bootstrap
+seeding. Nothing starts out knowing them, so coverage over time is a direct
+measurement of the path above and of nothing else. `--sample-sec` controls how
+often the population is counted and `--addr-csv` writes the curve, with the
+holders split by whether the address reached the `tried` table — which
+separates nodes that merely heard about it from nodes that connected to it.
+
+The curve is not the 24-hour one the constants suggest, because the first
+self-announcement goes out immediately after verack rather than on the 24-hour
+timer. Every new outbound connection a node makes is another seeding event, and
+`ThreadOpenConnections` makes those constantly. So a fresh listener spreads at
+the rate its peers open connections, not at the rate of the broadcast interval:
+at 40 nodes a withheld address reached 28 of the other 39 within 8 simulated
+minutes, 18 of which had tried it.
+
+The 24-hour interval still matters for a node whose address has gone stale
+everywhere, which is a longer experiment than anything run so far.
+
 ---
 
 ## 5. Memory
@@ -647,9 +679,12 @@ minute in two hours of wall clock. Twenty listeners with 100 nodes completes 30
 simulated minutes in seconds. Keep the address universe rich enough that nodes
 saturate, and treat an unexpectedly slow run as a sign that they cannot.
 
-Two cheap reductions if they are ever wanted, neither needed up front:
-`nid_type` to `int32_t` halves the fixed tables and saves ~31 GiB at 100k
-nodes; making `mapRecvBytesPerMsgType` lazy saves ~5 GiB.
+Two apparently cheap reductions, both since investigated: `nid_type` to
+`int32_t` halves the fixed tables and saves ~31 GiB at 100k nodes but **must
+not be taken**, for the reason in §5.3; making `mapRecvBytesPerMsgType` lazy
+looks like ~5 GiB but trips an assert in `CNode::ReceiveMsgBytes`, which
+indexes the map without checking. The remaining safe win is the occupancy
+bitmap in §5.3.
 
 Also cap the per-node queues. Defaults are 5 MB receive flood and 1 MB send
 buffer (`src/net.h:101-102`), i.e. ~6 MB worst case per node, which at scale
@@ -963,27 +998,27 @@ behind the same interface.
 
 Roughly in order of how likely they are to cost a day.
 
-**Runs stop being valid at 20 simulated minutes, and the graph export is what
-revealed it.** Outbound full-relay peers start getting disconnected in a wave
-at about minute 22. The cause is `ConsiderEviction`
+**Runs stopped being valid at 20 simulated minutes, and the graph export is
+what revealed it. Resolved.** Outbound full-relay peers started getting
+disconnected in a wave at about minute 22. The cause is `ConsiderEviction`
 (`src/net_processing.cpp:5514`): an outbound peer that has not announced a
 block with as much work as our tip within `CHAIN_SYNC_TIMEOUT`, which is 20
 minutes, gets one `getheaders` and then a disconnect. Every node here sits on a
 genesis-only chain and never announces anything, so every unprotected outbound
-peer times out together.
+peer timed out together.
 
-This is Core behaving correctly given a static chain, not a simulator bug, but
-it is an artefact of block relay being out of scope and it corrupts any
+That was Core behaving correctly given a static chain, not a simulator bug, but
+it is an artefact of block relay being out of scope and it corrupted any
 long-horizon measurement: at 30 simulated minutes, 91 of 875 full-relay
 connections had been shed and reopened for this reason alone.
 
-Until it is addressed, keep runs under 20 simulated minutes, or read anything
-past that point knowing a disconnection wave is mixed into it. The fix belongs
-with block relay: either give the shared chainstate a tip the nodes actually
-announce to each other, or keep headers sync from starting so `fSyncStarted`
-stays false and `ConsiderEviction` returns immediately. The first is more
-faithful; the second is a one-line gate and enough for topology and address
-work.
+The fix is `PeerManager::Options::disable_chain_sync_timeout`, a test-only gate
+that returns from `ConsiderEviction` before it looks at the chain, set by
+`MakeNode`. The honest alternative is to give the shared chainstate a tip the
+nodes announce to each other, which belongs with block relay; this is the
+one-line stand-in and is enough for topology and address work. With it on,
+1000 nodes over 60 simulated minutes hold all 10,000 persistent connections and
+isolate nobody, where before the hour contained three disconnection waves.
 
 **Per-node self-address state.** Covered in §3.2. It is the one blocker that
 cannot be worked around, because self-announcement is the only thing that
@@ -1108,19 +1143,27 @@ at each rung rather than one leap:
 Optimise in roughly this order, and only when a profile says so:
 
 1. Confirm logging, `checkaddrman` and the validation cache are actually off.
+   *(done, and the bootstrap-count finding in §5.2 mattered far more)*
 2. Lower the per-node receive and send buffer caps well below the 5 MB and
    1 MB defaults.
 3. Swap `V1Transport` for a pass-through transport if serialisation shows up.
-4. Make `mapRecvBytesPerMsgType` lazy, worth about 2.7 KiB per `CNode`.
-5. Narrow `nid_type` to `int32_t`, halving the fixed AddrMan tables.
-6. Try a different allocator for the allocation count, not the byte count.
-7. Only then consider sharding the event loop, which is blocked on the three
+4. Put an occupancy bitmap in front of the AddrMan bucket tables (§5.3). The
+   one remaining large, safe win, and it should be faster as well as smaller.
+5. Try a different allocator for the allocation count, not the byte count.
+6. Only then consider sharding the event loop, which is blocked on the three
    process globals in §2.4.
 
-**Phase 2 — address relay.** Per-node self-address state (§3.2), real
-`PeerManager` on every node, the shared chainstate. Measure propagation time,
-table occupancy over time, duplicate volume, and how often the rate limiter
-actually binds.
+Two levers that look attractive and are not: narrowing `nid_type` (§5.3, it
+reverts a disclosed overflow fix) and making `mapRecvBytesPerMsgType` lazy
+(it trips an assert in `CNode::ReceiveMsgBytes`).
+
+**Phase 2 — address relay.** *(propagation done, §4.1)* Per-node self-address
+state (§3.2), real `PeerManager` on every node, the shared chainstate. Still to
+measure: duplicate volume and how often the rate limiter actually binds, both
+of which need counters inside `ProcessAddrs` rather than anything the simulator
+can observe from outside. Table occupancy over time is already in the node
+export, sampled once at the end; a periodic version is a small addition to the
+sampling tick.
 
 **Phase 3 — outputs.** CSV per run, plus the topology metrics worth having:
 degree distribution, netgroup diversity per node, time to a connected graph,
@@ -1213,8 +1256,17 @@ change than the simulator.
 writes `PREFIX-nodes.csv` and `PREFIX-edges.csv`. Node rows carry the address,
 whether it listens, its region, its netgroup, the size of its AddrMan and its
 tried table, and its live degree split by connection kind. Edge rows carry the
-initiator, the acceptor, the connection type, whether it is still up, when it
-opened and closed, and the bytes moved in each direction.
+initiator, the acceptor, the connection type, when it opened, and the bytes
+moved in each direction.
+
+It is a snapshot of the connections still up when the clock stops, not a log of
+every connection the run made. Feelers are the reason: a run holds about 30 per
+node per simulated hour, each alive for a moment, so they outnumber the real
+topology three to one in an hour and keep growing after that. Dropping them
+from the export also let the link storage itself be bounded by the peak
+concurrent count rather than by history — a closed link's slot goes on a free
+list and is reused, guarded by a per-link generation counter so a delivery
+queued before the recycle cannot land on the connection that took the slot.
 
 **Support Tor, I2P and IPv6.** The address universe is IPv4-only today, and
 `NetGroupManager::NoAsmap()` groups IPv4 by /16. Three separate pieces of work:
