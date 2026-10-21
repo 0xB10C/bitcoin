@@ -229,10 +229,10 @@ public:
     uint64_t FailedAttempts() const { return m_failed_attempts; }
     /** Outbound attempts the node aimed at its own address.
      *
-     * Core suppresses these with IsLocal(), which reads the process-global
-     * mapLocalHost. One global table cannot express a per-node view of "my
-     * own addresses", so the simulator filters them instead and counts them
-     * here. A non-zero figure is expected, not a bug. */
+     * Core suppresses these inside its selection loop via LocalAddresses,
+     * which a listening node here is given, so this should now be zero for a
+     * listening node. It can still be non-zero for a non-listening one, which
+     * has no address of its own to record. */
     uint64_t SelfPicks() const { return m_self_picks; }
     /** Outbound attempts the acceptor turned away. */
     uint64_t RejectedAttempts() const { return m_rejected_attempts; }

@@ -143,13 +143,6 @@ struct CSerializedNetMsg {
     size_t GetMemoryUsage() const noexcept;
 };
 
-/**
- * Look up IP addresses from all interfaces on the machine and add them to the
- * list of local addresses to self-advertise.
- * The loopback interface is skipped.
- */
-void Discover();
-
 uint16_t GetListenPort();
 
 enum
@@ -163,17 +156,6 @@ enum
     LOCAL_MAX
 };
 
-/** Returns a local address that we should advertise to this peer. */
-std::optional<CService> GetLocalAddrForPeer(CNode& node);
-
-void ClearLocal();
-bool AddLocal(const CService& addr, int nScore = LOCAL_NONE, bool add_even_if_unreachable = false);
-bool AddLocal(const CNetAddr& addr, int nScore = LOCAL_NONE, bool add_even_if_unreachable = false);
-void RemoveLocal(const CService& addr);
-bool SeenLocal(const CService& addr);
-bool IsLocal(const CService& addr);
-CService GetLocalAddress(const CNode& peer);
-
 extern bool fDiscover;
 extern bool fListen;
 
@@ -185,8 +167,93 @@ struct LocalServiceInfo {
     uint16_t nPort;
 };
 
-extern GlobalMutex g_maplocalhost_mutex;
-extern std::map<CNetAddr, LocalServiceInfo> mapLocalHost GUARDED_BY(g_maplocalhost_mutex);
+/** The addresses a node believes are its own, and how it came to believe them.
+ *
+ * Owned by CConnman. "My own address" is a property of one node and of nothing
+ * else, so a process running several nodes needs one table each: with a shared
+ * one, every node advertises whichever address happened to score highest,
+ * which is to say somebody else's.
+ *
+ * The table matters most on Tor and I2P, where it is the *only* route an
+ * address has. `version`'s `addr_recv` field is V1-serialized, and
+ * `CNetAddr::SerializeV1Array` writes onion, I2P and CJDNS addresses as
+ * all-zeros, so a node on one of those networks cannot learn its own address
+ * from a peer the way an IPv4 node can. What fills the table there is the Tor
+ * control port, `-i2psam`, or `-externalip`.
+ */
+class LocalAddresses
+{
+public:
+    /** Record `addr` as ours, scored by how it was learned (LOCAL_*).
+     *
+     * Returns false without recording anything if the address is unroutable,
+     * on an unreachable network, or if discovery is off and this was not the
+     * operator's explicit instruction. `add_even_if_unreachable` is for
+     * `-externalip`, where the operator has said so outright.
+     */
+    bool Add(const CService& addr, int score = LOCAL_NONE, bool add_even_if_unreachable = false)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** As above, on our listening port. */
+    bool Add(const CNetAddr& addr, int score = LOCAL_NONE, bool add_even_if_unreachable = false)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    void Remove(const CService& addr) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    void Clear() EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** A peer agrees this address is ours, which raises our confidence in it.
+     *  Returns false if we were not holding it. */
+    bool Seen(const CService& addr) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Whether we hold `addr` as one of ours. */
+    bool Contains(const CService& addr) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** The best address we hold that `peer` could reach, if any.
+     *
+     * Ranked by reachability from the peer first and by score second. Our
+     * privacy-network addresses are never offered to peers on other networks,
+     * and vice versa.
+     */
+    std::optional<CService> GetBestFor(const CNode& peer) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** `GetBestFor`, or an address-less service on our listening port.
+     *
+     * The unroutable fallback exists because the IP may still be filled in
+     * from what the peer reports; see GetForPeer.
+     */
+    CService GetAddressFor(const CNode& peer) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+    /** Where `peer` should be told to find us, or nothing if nowhere. */
+    std::optional<CService> GetForPeer(CNode& peer) const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** A copy of the whole table, for `getnetworkinfo`. */
+    std::map<CNetAddr, LocalServiceInfo> Snapshot() const EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+    /** Whether the owning node accepts inbound connections.
+     *
+     * A node that does not listen advertises nothing. Set from
+     * `CConnman::Options::m_listen` rather than read from the global `fListen`,
+     * so that nodes sharing a process can differ.
+     */
+    void SetListening(bool listening) { m_listening = listening; }
+
+protected:
+    /** Insert an entry without the checks in Add().
+     *
+     * Only `LocalAddressesTestMsg` reaches this. One regression test needs an
+     * unroutable entry in the table, which `Add` refuses and which production
+     * code therefore never produces.
+     */
+    void InsertUnchecked(const CNetAddr& addr, LocalServiceInfo info) EXCLUSIVE_LOCKS_REQUIRED(!m_mutex);
+
+private:
+    int Score(const CService& addr) const EXCLUSIVE_LOCKS_REQUIRED(m_mutex);
+
+    mutable Mutex m_mutex;
+    std::map<CNetAddr, LocalServiceInfo> m_map GUARDED_BY(m_mutex);
+    std::atomic_bool m_listening{true};
+};
+
+/**
+ * Look up IP addresses from all interfaces on the machine and add them to
+ * `local_addrs` to self-advertise. The loopback interface is skipped.
+ */
+void Discover(LocalAddresses& local_addrs);
 
 extern const std::string NET_MESSAGE_TYPE_OTHER;
 using mapMsgTypeSize = std::map</* message type */ std::string, /* total bytes */ uint64_t>;
@@ -1135,6 +1202,7 @@ public:
         m_max_inbound = std::max(0, m_max_automatic_connections - m_max_automatic_outbound);
         m_max_inbound_full_relay = std::max(0, static_cast<int>(connOptions.m_full_relay_inbound_percent / 100.0 * m_max_inbound));
         m_listen = connOptions.m_listen.value_or(fListen);
+        m_local_addrs.SetListening(m_listen);
         m_use_addrman_outgoing = connOptions.m_use_addrman_outgoing;
         m_client_interface = connOptions.uiInterface;
         m_banman = connOptions.m_banman;
@@ -1419,6 +1487,15 @@ public:
     /** Whether this instance accepts inbound connections, and so whether it has
      *  an address worth advertising. See Options::m_listen. */
     bool IsListening() const { return m_listen; }
+
+    /** The addresses this instance believes are its own.
+     *
+     * Exposed because the things that learn them live outside: the Tor control
+     * port, the port mapper, `-externalip`, interface discovery, and the
+     * `version` handler in net_processing.
+     */
+    LocalAddresses& LocalAddrs() { return m_local_addrs; }
+    const LocalAddresses& LocalAddrs() const { return m_local_addrs; }
 
     void SetTryNewOutboundPeer(bool flag);
     bool GetTryNewOutboundPeer() const;
@@ -1827,6 +1904,8 @@ private:
     int m_max_inbound_full_relay;
 
     bool m_listen{true};
+    /** Was the process-global mapLocalHost. See LocalAddresses. */
+    LocalAddresses m_local_addrs;
     bool m_use_addrman_outgoing;
     CClientUIInterface* m_client_interface;
     NetEventsInterface* m_msgproc;

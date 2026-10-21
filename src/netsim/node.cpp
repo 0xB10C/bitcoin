@@ -139,6 +139,18 @@ std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const C
     // at any interesting population size is the end of the experiment.
     node->connman->Init(conn_opts);
 
+    // Tell the node its own address, which is what a real node learns from the
+    // Tor control port, from -i2psam, or from -externalip. Without this an
+    // onion or I2P node never self-announces and its address can only spread
+    // if something was seeded with it: `version`'s addr_recv field is
+    // V1-serialized, and CNetAddr::SerializeV1Array writes onion and I2P
+    // addresses as all-zeros, so the peer-reported route an IPv4 node relies
+    // on carries nothing. `add_even_if_unreachable` because -externalip is the
+    // closest production analogue and says so outright.
+    if (listening) {
+        node->connman->LocalAddrs().Add(self, LOCAL_MANUAL, /*add_even_if_unreachable=*/true);
+    }
+
     // Arm the connection-opening timers from the same clock ThreadOpenConnections
     // uses, so comparisons against GetTime<microseconds>() line up.
     node->rng = std::make_unique<FastRandomContext>(DeriveHash(SEED_SCHEDULER, id));

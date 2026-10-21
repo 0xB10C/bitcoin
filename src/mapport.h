@@ -7,7 +7,12 @@
 
 inline constexpr bool DEFAULT_NATPMP = true;
 
-void StartMapPort(bool enable);
+class LocalAddresses;
+
+/** `local_addrs` receives the external address of any mapping created, and
+ *  must outlive the mapping thread; InterruptMapPort and StopMapPort are what
+ *  guarantee that. */
+void StartMapPort(bool enable, LocalAddresses& local_addrs);
 void InterruptMapPort();
 void StopMapPort();
 

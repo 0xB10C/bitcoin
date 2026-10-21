@@ -1889,7 +1889,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     for (const std::string& strAddr : args.GetArgs("-externalip")) {
         const std::optional<CService> addrLocal{Lookup(strAddr, GetListenPort(), fNameLookup)};
         if (addrLocal.has_value() && addrLocal->IsValid())
-            AddLocal(addrLocal.value(), LOCAL_MANUAL, /*add_even_if_unreachable=*/true);
+            node.connman->LocalAddrs().Add(addrLocal.value(), LOCAL_MANUAL, /*add_even_if_unreachable=*/true);
         else
             return InitError(ResolveErrMsg("externalip", strAddr));
     }
@@ -2211,7 +2211,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     if (node.peerman) node.peerman->SetBestBlock(chain_active_height, std::chrono::seconds{best_block_time});
 
     // Map ports with NAT-PMP
-    StartMapPort(args.GetBoolArg("-natpmp", DEFAULT_NATPMP));
+    StartMapPort(args.GetBoolArg("-natpmp", DEFAULT_NATPMP), node.connman->LocalAddrs());
 
     CConnman::Options connOptions;
     connOptions.m_local_services = g_local_services;
@@ -2313,7 +2313,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
                                     "for the automatically created Tor onion service."),
                                   onion_service_target.ToStringAddrPort()));
         }
-        node.tor_controller = std::make_unique<TorController>(gArgs.GetArg("-torcontrol", DEFAULT_TOR_CONTROL), onion_service_target);
+        node.tor_controller = std::make_unique<TorController>(gArgs.GetArg("-torcontrol", DEFAULT_TOR_CONTROL), onion_service_target, node.connman->LocalAddrs());
     }
 
     bool should_discover = connOptions.bind_on_any;
@@ -2338,7 +2338,7 @@ bool AppInitMain(NodeContext& node, interfaces::BlockAndHeaderTipInfo* tip_info)
     if (should_discover) {
         // Only add all IP addresses of the machine if we would be listening on
         // any address - 0.0.0.0 (IPv4) and :: (IPv6).
-        Discover();
+        Discover(node.connman->LocalAddrs());
     }
 
     for (const auto& net : args.GetArgs("-whitelist")) {

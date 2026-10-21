@@ -200,7 +200,12 @@ public:
         });
         args().WriteSettingsFile();
     }
-    void mapPort(bool enable) override { StartMapPort(enable); }
+    void mapPort(bool enable) override
+    {
+        // Nothing to map to without a connman to record the external address
+        // in, and nothing is listening in that case either.
+        if (m_context->connman) StartMapPort(enable, m_context->connman->LocalAddrs());
+    }
     std::optional<Proxy> getProxy(Network net) override { return GetProxy(net); }
     size_t getNodeCount(ConnectionDirection flags) override
     {

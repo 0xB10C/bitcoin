@@ -3921,7 +3921,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
 
         if (pfrom.IsInboundConn() && addrMe.IsRoutable())
         {
-            SeenLocal(addrMe);
+            m_connman.LocalAddrs().Seen(addrMe);
         }
 
         // Inbound peers send us their version message when they connect.
@@ -5764,7 +5764,7 @@ void PeerManagerImpl::MaybeSendAddr(CNode& node, Peer& peer, std::chrono::micros
         if (peer.m_next_local_addr_send != 0us) {
             peer.m_addr_known->reset();
         }
-        if (std::optional<CService> local_service = GetLocalAddrForPeer(node)) {
+        if (std::optional<CService> local_service = m_connman.LocalAddrs().GetForPeer(node)) {
             CAddress local_addr{*local_service, peer.m_our_services, Now<NodeSeconds>()};
             if (peer.m_next_local_addr_send == 0us) {
                 // Send the initial self-announcement in its own message. This makes sure

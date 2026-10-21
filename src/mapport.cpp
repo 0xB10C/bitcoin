@@ -30,7 +30,7 @@ using namespace std::chrono_literals;
 static constexpr auto PORT_MAPPING_REANNOUNCE_PERIOD{20min};
 static constexpr auto PORT_MAPPING_RETRY_PERIOD{5min};
 
-static void ProcessPCP()
+static void ProcessPCP(LocalAddresses& local_addrs)
 {
     // The same nonce is used for all mappings, this is allowed by the spec, and simplifies keeping track of them.
     PCPMappingNonce pcp_nonce;
@@ -48,7 +48,7 @@ static void ProcessPCP()
     auto handle_mapping = [&](std::variant<MappingResult, MappingError> &res) -> void {
         if (MappingResult* mapping = std::get_if<MappingResult>(&res)) {
             LogInfo("portmap: Added mapping %s", mapping->ToString());
-            AddLocal(mapping->external, LOCAL_MAPPED);
+            local_addrs.Add(mapping->external, LOCAL_MAPPED);
             ret = true;
             actual_lifetime = std::min(actual_lifetime, mapping->lifetime);
         } else if (MappingError *err = std::get_if<MappingError>(&res)) {
@@ -120,25 +120,25 @@ static void ProcessPCP()
 }
 
 /// \anchor mapport
-static void ThreadMapPort()
+static void ThreadMapPort(LocalAddresses& local_addrs)
 {
     do {
-        ProcessPCP();
+        ProcessPCP(local_addrs);
     } while (g_mapport_interrupt.sleep_for(PORT_MAPPING_RETRY_PERIOD));
 }
 
-void StartThreadMapPort()
+static void StartThreadMapPort(LocalAddresses& local_addrs)
 {
     if (!g_mapport_thread.joinable()) {
         assert(!g_mapport_interrupt);
-        g_mapport_thread = std::thread(&util::TraceThread, "mapport", &ThreadMapPort);
+        g_mapport_thread = std::thread(&util::TraceThread, "mapport", [&local_addrs] { ThreadMapPort(local_addrs); });
     }
 }
 
-void StartMapPort(bool enable)
+void StartMapPort(bool enable, LocalAddresses& local_addrs)
 {
     if (enable) {
-        StartThreadMapPort();
+        StartThreadMapPort(local_addrs);
     } else {
         InterruptMapPort();
         StopMapPort();

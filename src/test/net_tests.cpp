@@ -599,14 +599,9 @@ BOOST_AUTO_TEST_CASE(ipv4_peer_with_ipv6_addrMe_test)
     // !IsRoutable the undefined behavior is easier to trigger deterministically
     in_addr raw_addr;
     raw_addr.s_addr = htonl(0x7f000001);
-    const CNetAddr mapLocalHost_entry = CNetAddr(raw_addr);
-    {
-        LOCK(g_maplocalhost_mutex);
-        LocalServiceInfo lsi;
-        lsi.nScore = 23;
-        lsi.nPort = 42;
-        mapLocalHost[mapLocalHost_entry] = lsi;
-    }
+    LocalAddressesTestMsg local_addrs;
+    const CNetAddr local_entry = CNetAddr(raw_addr);
+    local_addrs.InsertUnchecked(local_entry, LocalServiceInfo{.nScore = 23, .nPort = 42});
 
     // create a peer with an IPv4 address
     in_addr ipv4AddrPeer;
@@ -632,28 +627,24 @@ BOOST_AUTO_TEST_CASE(ipv4_peer_with_ipv6_addrMe_test)
     pnode->SetAddrLocal(addrLocal);
 
     // before patch, this causes undefined behavior detectable with clang's -fsanitize=memory
-    GetLocalAddrForPeer(*pnode);
+    local_addrs.GetForPeer(*pnode);
 
     // suppress no-checks-run warning; if this test fails, it's by triggering a sanitizer
     BOOST_CHECK(1);
-
-    // Cleanup, so that we don't confuse other tests.
-    {
-        LOCK(g_maplocalhost_mutex);
-        mapLocalHost.erase(mapLocalHost_entry);
-    }
 }
 
 BOOST_AUTO_TEST_CASE(get_local_addr_for_peer_port)
 {
-    // Test that GetLocalAddrForPeer() properly selects the address to self-advertise:
+    // Test that LocalAddresses::GetForPeer() properly selects the address to self-advertise:
     //
-    // 1. GetLocalAddrForPeer() calls GetLocalAddress() which returns an address that is
+    // 1. GetForPeer() calls GetAddressFor() which returns an address that is
     //    not routable.
-    // 2. GetLocalAddrForPeer() overrides the address with whatever the peer has told us
+    // 2. GetForPeer() overrides the address with whatever the peer has told us
     //    he sees us as.
     // 2.1. For inbound connections we must override both the address and the port.
     // 2.2. For outbound connections we must override only the address.
+
+    LocalAddresses local_addrs;
 
     // Pretend that we bound to this port.
     const uint16_t bind_port = 20001;
@@ -681,7 +672,7 @@ BOOST_AUTO_TEST_CASE(get_local_addr_for_peer_port)
     peer_out.SetAddrLocal(peer_us);
 
     // Without the fix peer_us:8333 is chosen instead of the proper peer_us:bind_port.
-    auto chosen_local_addr = GetLocalAddrForPeer(peer_out);
+    auto chosen_local_addr = local_addrs.GetForPeer(peer_out);
     BOOST_REQUIRE(chosen_local_addr);
     const CService expected{peer_us_addr, bind_port};
     BOOST_CHECK(*chosen_local_addr == expected);
@@ -703,7 +694,7 @@ BOOST_AUTO_TEST_CASE(get_local_addr_for_peer_port)
     peer_in.SetAddrLocal(peer_us);
 
     // Without the fix peer_us:8333 is chosen instead of the proper peer_us:peer_us.GetPort().
-    chosen_local_addr = GetLocalAddrForPeer(peer_in);
+    chosen_local_addr = local_addrs.GetForPeer(peer_in);
     BOOST_REQUIRE(chosen_local_addr);
     BOOST_CHECK(*chosen_local_addr == peer_us);
 
@@ -790,51 +781,53 @@ BOOST_AUTO_TEST_CASE(LimitedAndReachable_CNetAddr)
 
 BOOST_AUTO_TEST_CASE(LocalAddress_BasicLifecycle)
 {
+    LocalAddresses local_addrs;
     CService addr = CService(UtilBuildAddress(0x002, 0x001, 0x001, 0x001), 1000); // 2.1.1.1:1000
 
     g_reachable_nets.Add(NET_IPV4);
 
-    BOOST_CHECK(!IsLocal(addr));
-    BOOST_CHECK(AddLocal(addr, 1000));
-    BOOST_CHECK(IsLocal(addr));
+    BOOST_CHECK(!local_addrs.Contains(addr));
+    BOOST_CHECK(local_addrs.Add(addr, 1000));
+    BOOST_CHECK(local_addrs.Contains(addr));
 
-    RemoveLocal(addr);
-    BOOST_CHECK(!IsLocal(addr));
+    local_addrs.Remove(addr);
+    BOOST_CHECK(!local_addrs.Contains(addr));
 }
 
 BOOST_AUTO_TEST_CASE(LocalAddress_nScore_Overflow)
 {
+    LocalAddresses local_addrs;
     g_reachable_nets.Add(NET_IPV4);
     const CService addr{UtilBuildAddress(0x002, 0x001, 0x001, 0x001), 1000}; // 2.1.1.1:1000
 
-    const auto get_score = [](const CService& service) -> int {
-        LOCK(g_maplocalhost_mutex);
-        const auto it = mapLocalHost.find(service);
-        return it != mapLocalHost.end() ? it->second.nScore : 0;
+    const auto get_score = [&local_addrs](const CService& service) -> int {
+        const auto snapshot{local_addrs.Snapshot()};
+        const auto it = snapshot.find(service);
+        return it != snapshot.end() ? it->second.nScore : 0;
     };
 
     const int initial_score = 1000;
-    BOOST_REQUIRE(AddLocal(addr, initial_score));
-    BOOST_REQUIRE(IsLocal(addr));
+    BOOST_REQUIRE(local_addrs.Add(addr, initial_score));
+    BOOST_REQUIRE(local_addrs.Contains(addr));
     BOOST_CHECK_EQUAL(get_score(addr), initial_score);
 
-    // SeenLocal should increment nScore by 1.
-    BOOST_CHECK(SeenLocal(addr));
+    // Seen() should increment nScore by 1.
+    BOOST_CHECK(local_addrs.Seen(addr));
     BOOST_CHECK_EQUAL(get_score(addr), initial_score + 1);
 
-    // AddLocal() saturates nScore when updating an existing entry at INT_MAX.
-    BOOST_REQUIRE(AddLocal(addr, std::numeric_limits<int>::max()));
+    // Add() saturates nScore when updating an existing entry at INT_MAX.
+    BOOST_REQUIRE(local_addrs.Add(addr, std::numeric_limits<int>::max()));
     BOOST_CHECK_EQUAL(get_score(addr), std::numeric_limits<int>::max());
 
-    BOOST_CHECK(AddLocal(addr, std::numeric_limits<int>::max()));
+    BOOST_CHECK(local_addrs.Add(addr, std::numeric_limits<int>::max()));
     BOOST_CHECK_EQUAL(get_score(addr), std::numeric_limits<int>::max());
 
-    // SeenLocal() also saturates at INT_MAX.
-    BOOST_CHECK(SeenLocal(addr));
+    // Seen() also saturates at INT_MAX.
+    BOOST_CHECK(local_addrs.Seen(addr));
     BOOST_CHECK_EQUAL(get_score(addr), std::numeric_limits<int>::max());
 
-    RemoveLocal(addr);
-    BOOST_CHECK(!IsLocal(addr));
+    local_addrs.Remove(addr);
+    BOOST_CHECK(!local_addrs.Contains(addr));
 }
 
 BOOST_AUTO_TEST_CASE(initial_advertise_from_version_message)
@@ -849,6 +842,8 @@ BOOST_AUTO_TEST_CASE(initial_advertise_from_version_message)
     //   (20002 is a random port assigned by our OS for the outgoing TCP connection,
     //   we cannot accept connections to it)
     // * we should self-advertise to that peer as 2.3.4.5:20001
+
+    LocalAddresses local_addrs;
 
     // Pretend that we bound to this port.
     const uint16_t bind_port = 20001;
@@ -939,6 +934,7 @@ BOOST_AUTO_TEST_CASE(initial_advertise_from_version_message)
 
 BOOST_AUTO_TEST_CASE(advertise_local_address)
 {
+    LocalAddresses local_addrs;
     auto CreatePeer = [](const CAddress& addr) {
         return std::make_unique<CNode>(/*id=*/0,
                                        /*sock=*/nullptr,
@@ -995,51 +991,51 @@ BOOST_AUTO_TEST_CASE(advertise_local_address)
     const auto peer_cjdns{CreatePeer(addr_cjdns)};
 
     // one local clearnet address - advertise to all but privacy peers
-    AddLocal(addr_ipv4);
-    BOOST_CHECK(GetLocalAddress(*peer_ipv4) == addr_ipv4);
-    BOOST_CHECK(GetLocalAddress(*peer_ipv6) == addr_ipv4);
-    BOOST_CHECK(GetLocalAddress(*peer_ipv6_tunnel) == addr_ipv4);
-    BOOST_CHECK(GetLocalAddress(*peer_teredo) == addr_ipv4);
-    BOOST_CHECK(GetLocalAddress(*peer_cjdns) == addr_ipv4);
-    BOOST_CHECK(!GetLocalAddress(*peer_onion).IsValid());
-    BOOST_CHECK(!GetLocalAddress(*peer_i2p).IsValid());
-    RemoveLocal(addr_ipv4);
+    local_addrs.Add(addr_ipv4);
+    BOOST_CHECK(local_addrs.GetAddressFor(*peer_ipv4) == addr_ipv4);
+    BOOST_CHECK(local_addrs.GetAddressFor(*peer_ipv6) == addr_ipv4);
+    BOOST_CHECK(local_addrs.GetAddressFor(*peer_ipv6_tunnel) == addr_ipv4);
+    BOOST_CHECK(local_addrs.GetAddressFor(*peer_teredo) == addr_ipv4);
+    BOOST_CHECK(local_addrs.GetAddressFor(*peer_cjdns) == addr_ipv4);
+    BOOST_CHECK(!local_addrs.GetAddressFor(*peer_onion).IsValid());
+    BOOST_CHECK(!local_addrs.GetAddressFor(*peer_i2p).IsValid());
+    local_addrs.Remove(addr_ipv4);
 
     // local privacy addresses - don't advertise to clearnet peers
-    AddLocal(addr_onion);
-    AddLocal(addr_i2p);
-    BOOST_CHECK(!GetLocalAddress(*peer_ipv4).IsValid());
-    BOOST_CHECK(!GetLocalAddress(*peer_ipv6).IsValid());
-    BOOST_CHECK(!GetLocalAddress(*peer_ipv6_tunnel).IsValid());
-    BOOST_CHECK(!GetLocalAddress(*peer_teredo).IsValid());
-    BOOST_CHECK(!GetLocalAddress(*peer_cjdns).IsValid());
-    BOOST_CHECK(GetLocalAddress(*peer_onion) == addr_onion);
-    BOOST_CHECK(GetLocalAddress(*peer_i2p) == addr_i2p);
-    RemoveLocal(addr_onion);
-    RemoveLocal(addr_i2p);
+    local_addrs.Add(addr_onion);
+    local_addrs.Add(addr_i2p);
+    BOOST_CHECK(!local_addrs.GetAddressFor(*peer_ipv4).IsValid());
+    BOOST_CHECK(!local_addrs.GetAddressFor(*peer_ipv6).IsValid());
+    BOOST_CHECK(!local_addrs.GetAddressFor(*peer_ipv6_tunnel).IsValid());
+    BOOST_CHECK(!local_addrs.GetAddressFor(*peer_teredo).IsValid());
+    BOOST_CHECK(!local_addrs.GetAddressFor(*peer_cjdns).IsValid());
+    BOOST_CHECK(local_addrs.GetAddressFor(*peer_onion) == addr_onion);
+    BOOST_CHECK(local_addrs.GetAddressFor(*peer_i2p) == addr_i2p);
+    local_addrs.Remove(addr_onion);
+    local_addrs.Remove(addr_i2p);
 
     // local addresses from all networks
-    AddLocal(addr_ipv4);
-    AddLocal(addr_ipv6);
-    AddLocal(addr_ipv6_tunnel);
-    AddLocal(addr_teredo);
-    AddLocal(addr_onion);
-    AddLocal(addr_i2p);
-    AddLocal(addr_cjdns);
-    BOOST_CHECK(GetLocalAddress(*peer_ipv4) == addr_ipv4);
-    BOOST_CHECK(GetLocalAddress(*peer_ipv6) == addr_ipv6);
-    BOOST_CHECK(GetLocalAddress(*peer_ipv6_tunnel) == addr_ipv6);
-    BOOST_CHECK(GetLocalAddress(*peer_teredo) == addr_ipv4);
-    BOOST_CHECK(GetLocalAddress(*peer_onion) == addr_onion);
-    BOOST_CHECK(GetLocalAddress(*peer_i2p) == addr_i2p);
-    BOOST_CHECK(GetLocalAddress(*peer_cjdns) == addr_cjdns);
-    RemoveLocal(addr_ipv4);
-    RemoveLocal(addr_ipv6);
-    RemoveLocal(addr_ipv6_tunnel);
-    RemoveLocal(addr_teredo);
-    RemoveLocal(addr_onion);
-    RemoveLocal(addr_i2p);
-    RemoveLocal(addr_cjdns);
+    local_addrs.Add(addr_ipv4);
+    local_addrs.Add(addr_ipv6);
+    local_addrs.Add(addr_ipv6_tunnel);
+    local_addrs.Add(addr_teredo);
+    local_addrs.Add(addr_onion);
+    local_addrs.Add(addr_i2p);
+    local_addrs.Add(addr_cjdns);
+    BOOST_CHECK(local_addrs.GetAddressFor(*peer_ipv4) == addr_ipv4);
+    BOOST_CHECK(local_addrs.GetAddressFor(*peer_ipv6) == addr_ipv6);
+    BOOST_CHECK(local_addrs.GetAddressFor(*peer_ipv6_tunnel) == addr_ipv6);
+    BOOST_CHECK(local_addrs.GetAddressFor(*peer_teredo) == addr_ipv4);
+    BOOST_CHECK(local_addrs.GetAddressFor(*peer_onion) == addr_onion);
+    BOOST_CHECK(local_addrs.GetAddressFor(*peer_i2p) == addr_i2p);
+    BOOST_CHECK(local_addrs.GetAddressFor(*peer_cjdns) == addr_cjdns);
+    local_addrs.Remove(addr_ipv4);
+    local_addrs.Remove(addr_ipv6);
+    local_addrs.Remove(addr_ipv6_tunnel);
+    local_addrs.Remove(addr_teredo);
+    local_addrs.Remove(addr_onion);
+    local_addrs.Remove(addr_i2p);
+    local_addrs.Remove(addr_cjdns);
 }
 
 namespace {
@@ -1666,6 +1662,8 @@ BOOST_AUTO_TEST_CASE(private_broadcast_version_does_not_update_addrman_services)
 
 BOOST_AUTO_TEST_CASE(addlocal_onlynet_externalip)
 {
+    LocalAddresses local_addrs;
+
     // Test that `-externalip` addresses bypass `-onlynet`, but score alone does
     // not.
 
@@ -1682,24 +1680,24 @@ BOOST_AUTO_TEST_CASE(addlocal_onlynet_externalip)
     g_reachable_nets.Add(NET_IPV4);
     fDiscover = false;
 
-    // Now AddLocal with a non-manual score should fail for an unreachable network.
-    BOOST_CHECK(!AddLocal(addr_onion, LOCAL_BIND));
-    BOOST_CHECK(!IsLocal(addr_onion));
+    // Now Add with a non-manual score should fail for an unreachable network.
+    BOOST_CHECK(!local_addrs.Add(addr_onion, LOCAL_BIND));
+    BOOST_CHECK(!local_addrs.Contains(addr_onion));
 
-    BOOST_CHECK(!AddLocal(addr_onion, LOCAL_MANUAL));
-    BOOST_CHECK(!IsLocal(addr_onion));
+    BOOST_CHECK(!local_addrs.Add(addr_onion, LOCAL_MANUAL));
+    BOOST_CHECK(!local_addrs.Contains(addr_onion));
 
-    // Whereas AddLocal for -externalip should succeed.
-    BOOST_CHECK(AddLocal(addr_onion, LOCAL_MANUAL, /*add_even_if_unreachable=*/true));
-    BOOST_CHECK(IsLocal(addr_onion));
+    // Whereas Add for -externalip should succeed.
+    BOOST_CHECK(local_addrs.Add(addr_onion, LOCAL_MANUAL, /*add_even_if_unreachable=*/true));
+    BOOST_CHECK(local_addrs.Contains(addr_onion));
 
-    // Normal AddLocal on a reachable network still works.
+    // Normal Add on a reachable network still works.
     const CNetAddr addr_ipv4{LookupHost("1.2.3.4", false).value()};
-    BOOST_CHECK(AddLocal(addr_ipv4, LOCAL_MANUAL));
-    BOOST_CHECK(IsLocal(CService{addr_ipv4, GetListenPort()}));
+    BOOST_CHECK(local_addrs.Add(addr_ipv4, LOCAL_MANUAL));
+    BOOST_CHECK(local_addrs.Contains(CService{addr_ipv4, GetListenPort()}));
 
-    RemoveLocal(CService{addr_ipv4, GetListenPort()});
-    RemoveLocal(addr_onion);
+    local_addrs.Remove(CService{addr_ipv4, GetListenPort()});
+    local_addrs.Remove(addr_onion);
     g_reachable_nets.RemoveAll();
     for (const auto& net : reachable_nets_at_start) {
         g_reachable_nets.Add(net);

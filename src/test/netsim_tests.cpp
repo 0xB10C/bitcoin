@@ -32,6 +32,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <memory>
 #include <set>
@@ -1106,6 +1107,57 @@ BOOST_FIXTURE_TEST_CASE(netsim_static_chain_needs_the_gate, SimTestingSetup)
         if (net.At(id).connman->GetFullOutboundConnCount() == 0) ++isolated;
     }
     BOOST_CHECK_EQUAL(isolated, 0U);
+}
+
+/** An onion listener's address spreads, which needs a per-node address table.
+ *
+ * `version`'s `addr_recv` field is V1-serialized and
+ * `CNetAddr::SerializeV1Array` writes onion and I2P addresses as all-zeros, so
+ * a node on either network cannot learn its own address from a peer the way an
+ * IPv4 node can. Its only route is `LocalAddresses`, filled in production from
+ * the Tor control port or `-i2psam` and here by `MakeNode`. While that table
+ * was a process global it could not hold a per-node view, and so every onion
+ * and I2P address in a run stayed where it started.
+ */
+BOOST_FIXTURE_TEST_CASE(netsim_privacy_network_addresses_spread, SimTestingSetup)
+{
+    using Net = AddressUniverse::Net;
+
+    netsim::Network::Options opts;
+    opts.num_nodes = 60;
+    opts.num_listening = 20;
+    opts.num_tracked = 4;
+    opts.bootstrap_addrs = 10;
+    opts.blocks_only = true;
+    opts.addresses.UseMainnetMix();
+    opts.addr_sample_interval = std::chrono::duration_cast<SimTime>(1min);
+    netsim::Network net{opts, ctx};
+
+    // The four withheld listeners have to span more than one network for this
+    // to be testing anything.
+    std::set<Net> tracked_nets;
+    for (const uint32_t id : net.TrackedNodes()) tracked_nets.insert(net.Addresses().NetOf(id));
+    BOOST_REQUIRE_GT(tracked_nets.size(), 1U);
+    BOOST_REQUIRE(tracked_nets.contains(Net::Onion) || tracked_nets.contains(Net::I2P));
+
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        net.RunFor(std::chrono::duration_cast<SimTime>(10min));
+    }
+
+    // The last sample for each tracked address.
+    std::map<uint32_t, uint32_t> final_holders;
+    for (const auto& sample : net.AddrSamples()) final_holders[sample.node] = sample.holders;
+
+    for (const uint32_t id : net.TrackedNodes()) {
+        const auto net_name{AddressUniverse::NetName(net.Addresses().NetOf(id))};
+        BOOST_TEST_MESSAGE("node " << id << " on " << net_name << " reached "
+                                    << final_holders[id] << " of " << (opts.num_nodes - 1));
+        // Past the peers it dialled itself, which is the part needing relay.
+        BOOST_CHECK_MESSAGE(final_holders[id] > MAX_OUTBOUND_FULL_RELAY_CONNECTIONS,
+                            std::string{"a withheld "} + net_name + " address reached only " +
+                                util::ToString(final_holders[id]) + " nodes");
+    }
 }
 
 /** Without tracking, nothing is withheld and nothing is sampled. */

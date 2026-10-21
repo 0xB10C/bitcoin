@@ -86,10 +86,7 @@ FUZZ_TARGET(local_address, .init = initialize_net)
     FakeSteadyClock steady_clock;
     CService service{ConsumeService(fuzzed_data_provider)};
     CNode node{ConsumeNode(fuzzed_data_provider, steady_clock)};
-    {
-        LOCK(g_maplocalhost_mutex);
-        mapLocalHost.clear();
-    }
+    LocalAddresses local_addrs;
     LIMITED_WHILE (fuzzed_data_provider.ConsumeBool(), 10000) {
         CallOneOf(
             fuzzed_data_provider,
@@ -97,23 +94,23 @@ FUZZ_TARGET(local_address, .init = initialize_net)
                 service = ConsumeService(fuzzed_data_provider);
             },
             [&] {
-                const bool added{AddLocal(service, fuzzed_data_provider.ConsumeIntegralInRange<int>(0, LOCAL_MAX - 1))};
+                const bool added{local_addrs.Add(service, fuzzed_data_provider.ConsumeIntegralInRange<int>(0, LOCAL_MAX - 1))};
                 if (!added) return;
                 assert(service.IsRoutable());
-                assert(IsLocal(service));
-                assert(SeenLocal(service));
+                assert(local_addrs.Contains(service));
+                assert(local_addrs.Seen(service));
             },
             [&] {
-                (void)RemoveLocal(service);
+                (void)local_addrs.Remove(service);
             },
             [&] {
-                (void)SeenLocal(service);
+                (void)local_addrs.Seen(service);
             },
             [&] {
-                (void)IsLocal(service);
+                (void)local_addrs.Contains(service);
             },
             [&] {
-                (void)GetLocalAddress(node);
+                (void)local_addrs.GetAddressFor(node);
             });
     }
 }

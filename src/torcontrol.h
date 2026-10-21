@@ -21,6 +21,8 @@
 #include <thread>
 #include <vector>
 
+class LocalAddresses;
+
 inline constexpr uint16_t DEFAULT_TOR_SOCKS_PORT{9050};
 inline constexpr int DEFAULT_TOR_CONTROL_PORT = 9051;
 extern const std::string DEFAULT_TOR_CONTROL;
@@ -122,7 +124,7 @@ private:
 class TorController
 {
 public:
-    TorController(const std::string& tor_control_center, const CService& target);
+    TorController(const std::string& tor_control_center, const CService& target, LocalAddresses& local_addrs);
     TorController() : m_conn(m_interrupt) {
         // Used for testing only.
     }
@@ -147,6 +149,9 @@ private:
     std::chrono::duration<double> m_reconnect_timeout;
     CService m_service;
     const CService m_target;
+    /** Where the onion service address is recorded once Tor reports it.
+     *  Null only for the test-only default constructor. */
+    LocalAddresses* const m_local_addrs{nullptr};
     /** Cookie for SAFECOOKIE auth */
     std::vector<uint8_t> m_cookie;
     /** ClientNonce for SAFECOOKIE auth */

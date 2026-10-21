@@ -152,7 +152,6 @@ BasicTestingSetup::BasicTestingSetup(const ChainType chainType, TestOpts opts)
     fListen = true;
     SetRPCWarmupStarting();
     g_reachable_nets.Reset();
-    ClearLocal();
 
     m_node.shutdown_signal = &m_interrupt;
     m_node.shutdown_request = [this]{ return m_interrupt(); };

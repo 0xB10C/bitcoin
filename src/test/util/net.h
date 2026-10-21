@@ -33,6 +33,15 @@
 
 class FastRandomContext;
 
+/** A LocalAddresses whose unchecked insert is reachable.
+ *
+ * One regression test needs an unroutable entry in the table, which `Add`
+ * refuses and which production code therefore never produces.
+ */
+struct LocalAddressesTestMsg : public LocalAddresses {
+    using LocalAddresses::InsertUnchecked;
+};
+
 struct ConnmanTestMsg : public CConnman {
     using CConnman::CConnman;
 

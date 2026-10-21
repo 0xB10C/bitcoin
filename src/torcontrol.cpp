@@ -348,12 +348,13 @@ std::map<std::string,std::string> ParseTorReplyMapping(const std::string &s)
     return mapping;
 }
 
-TorController::TorController(const std::string& tor_control_center, const CService& target)
+TorController::TorController(const std::string& tor_control_center, const CService& target, LocalAddresses& local_addrs)
     : m_tor_control_center(tor_control_center),
       m_conn(m_interrupt),
       m_reconnect(true),
       m_reconnect_timeout(RECONNECT_TIMEOUT_START),
-      m_target(target)
+      m_target(target),
+      m_local_addrs(&local_addrs)
 {
     // Read service private key if cached
     std::pair<bool,std::string> pkf = ReadBinaryFile(GetPrivateKeyFile());
@@ -369,7 +370,7 @@ TorController::~TorController()
     Interrupt();
     Join();
     if (m_service.IsValid()) {
-        RemoveLocal(m_service);
+        if (m_local_addrs) m_local_addrs->Remove(m_service);
     }
 }
 
@@ -517,7 +518,7 @@ void TorController::add_onion_cb(TorControlConnection& _conn, const TorControlRe
         } else {
             LogWarning("tor: Error writing service private key to %s", fs::PathToString(GetPrivateKeyFile()));
         }
-        AddLocal(m_service, LOCAL_MANUAL);
+        if (m_local_addrs) m_local_addrs->Add(m_service, LOCAL_MANUAL);
         // ... onion requested - keep connection open
     } else if (reply.code == TOR_REPLY_UNRECOGNIZED) {
         LogWarning("tor: Add onion failed with unrecognized command (You probably need to upgrade Tor)");
@@ -711,7 +712,7 @@ void TorController::disconnected_cb(TorControlConnection& _conn)
 {
     // Stop advertising service when disconnected
     if (m_service.IsValid())
-        RemoveLocal(m_service);
+        if (m_local_addrs) m_local_addrs->Remove(m_service);
     m_service = CService();
     if (!m_reconnect)
         return;

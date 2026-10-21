@@ -410,11 +410,11 @@ void Network::TryOpenOutbound(uint32_t id)
         next->anchor, next->conn_type, next->feeler, slots.netgroups, next->preferred_net)};
     if (!picked) return;
 
-    // Core would have discarded its own address inside the selection loop, via
-    // IsLocal(). That reads the process-global mapLocalHost, which cannot hold
-    // a per-node view, so the nodes here do not recognise themselves and the
-    // simulator has to do it for them. Not counted as a failure, because in a
-    // correctly configured node the address would never have been offered.
+    // Core discards its own address inside the selection loop, via its
+    // LocalAddresses table, which MakeNode fills for a listening node. A
+    // non-listening node has no address of its own to record, so it can still
+    // pick itself and the simulator catches that here. Not counted as a
+    // failure: nothing was attempted.
     if (static_cast<const CService&>(*picked) == node.self) {
         ++m_self_picks;
         return;
