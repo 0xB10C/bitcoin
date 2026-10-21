@@ -977,6 +977,84 @@ BOOST_FIXTURE_TEST_CASE(netsim_addr_relay_reaches_the_population, SimTestingSetu
     BOOST_CHECK_EQUAL(lines[1], "0,0," + net.At(0).self.ToStringAddrPort() + ",0,0,0");
 }
 
+/** The address relay tree, read out of AddrMan rather than inferred.
+ *
+ * A block's sender is known because the simulator is servicing that link when
+ * the tip moves. An address has no such instant: it is noticed by sampling,
+ * minutes later. But AddrMan stored the peer it first heard the address from
+ * when it created the entry, so the edge is recoverable after the fact, and
+ * that is what `AddrArrival::from` carries.
+ *
+ * What makes it worth checking is that nothing forces the stored source to be
+ * a peer: it is whatever `ProcessAddrs` passed, and bootstrap seeds are
+ * deliberately self-sourced. So every edge here has to be one the topology
+ * actually contains, and has to point back in time.
+ */
+BOOST_FIXTURE_TEST_CASE(netsim_addr_sources_form_a_relay_tree, SimTestingSetup)
+{
+    netsim::Network::Options opts;
+    opts.num_nodes = 40;
+    opts.num_listening = 12;
+    opts.num_tracked = 1;
+    opts.bootstrap_addrs = 6;
+    opts.blocks_only = true;
+    opts.addr_sample_interval = std::chrono::duration_cast<SimTime>(30s);
+    opts.record_addr_sources = true;
+    netsim::Network net{opts, ctx};
+
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        net.RunFor(std::chrono::duration_cast<SimTime>(8min));
+    }
+
+    const auto& arrivals{net.AddrArrivals()};
+    BOOST_REQUIRE_GT(arrivals.size(), 1U);
+
+    // When each node first appeared as a holder, so an edge can be checked
+    // against the time of the node it points at.
+    std::map<uint32_t, SimTime> held;
+    for (const auto& a : arrivals) held.emplace(a.node, a.at);
+
+    size_t attributed{0};
+    size_t from_the_owner{0};
+    for (const auto& a : arrivals) {
+        BOOST_CHECK_EQUAL(a.address_of, 0U);
+        if (a.from < 0) continue; // a source outside the population
+        ++attributed;
+        const uint32_t from{static_cast<uint32_t>(a.from)};
+        // Not itself, and a node that exists.
+        BOOST_CHECK_NE(from, a.node);
+        BOOST_CHECK_LT(from, opts.num_nodes);
+        if (from == 0) {
+            // The owner announcing itself, which is the root of the tree.
+            ++from_the_owner;
+            continue;
+        }
+        // Anyone else can only pass on an address they already had, and they
+        // must have been seen holding it by this sample or an earlier one.
+        const auto it{held.find(from)};
+        BOOST_CHECK(it != held.end());
+        if (it != held.end()) BOOST_CHECK_LE(it->second.count(), a.at.count());
+    }
+
+    BOOST_TEST_MESSAGE("arrivals=" << arrivals.size() << " attributed=" << attributed
+                                   << " from_the_owner=" << from_the_owner);
+    // The lookup works at all, and the spread is rooted at the node whose
+    // address it is rather than appearing from nowhere.
+    BOOST_CHECK_GT(attributed, 0U);
+    BOOST_CHECK_GT(from_the_owner, 0U);
+
+    // And the writer carries the column.
+    const fs::path path{m_path_root / "addr-arrivals.csv"};
+    BOOST_REQUIRE(netsim::WriteAddrArrivals(net, path));
+    std::ifstream in{path.std_path()};
+    BOOST_REQUIRE(in.is_open());
+    std::string header;
+    BOOST_REQUIRE(std::getline(in, header));
+    BOOST_CHECK_EQUAL(header, netsim::AddrArrivalColumns());
+    BOOST_CHECK(header.ends_with(",from"));
+}
+
 /** A population spread over IPv4, IPv6, Tor and I2P still forms a topology.
  *
  * Two parts of Core only come alive here. `MaybePickPreferredNetwork` exists

@@ -4,6 +4,11 @@
 
 #include <netsim/network.h>
 
+// For `AddrInfo::source`, which is the recorded relay edge. `addrman.h` only
+// forward-declares the type, and it has to be included first: addrman_impl.h
+// names `AddressPosition` without declaring it.
+#include <addrman.h>
+#include <addrman_impl.h>
 #include <net.h>
 #include <netgroup.h>
 #include <netsim/pump.h>
@@ -116,6 +121,9 @@ Network::Network(Options opts_in, const SharedContext& ctx)
         }
         m_nodes.push_back(MakeNode(m_ctx, node_opts));
         if (listening) m_listeners.emplace(m_universe.At(id), id);
+        if (m_opts.record_addr_sources) {
+            m_nodes_by_host.emplace(CNetAddr{m_universe.At(id)}, id);
+        }
 
         // Stagger the first tick of each kind across its interval. Without
         // this every node acts on the same instants forever, which turns a
@@ -605,6 +613,23 @@ void Network::ArmMineTick(SimTime at)
     });
 }
 
+int32_t Network::AddrSourceOf(uint32_t holder, const CAddress& addr) const
+{
+    // `FindAddressEntry` answers where the entry sits, not where it came from,
+    // and the source lives on `AddrInfo`, which only `GetEntries` hands out.
+    // So this is a walk of the holder's tables. Both of them: an address
+    // promoted to `tried` keeps the source it was created with.
+    const AddrMan& table{*At(holder).addrman};
+    for (const bool tried : {false, true}) {
+        for (const auto& [info, pos] : table.GetEntries(tried)) {
+            if (static_cast<const CService&>(info) != static_cast<const CService&>(addr)) continue;
+            const auto it{m_nodes_by_host.find(info.source)};
+            return it == m_nodes_by_host.end() ? -1 : static_cast<int32_t>(it->second);
+        }
+    }
+    return -1;
+}
+
 void Network::SampleAddrCoverage()
 {
     constexpr auto SERVICES{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
@@ -626,10 +651,13 @@ void Network::SampleAddrCoverage()
             const auto found{At(id).addrman->FindAddressEntry(addr)};
             if (!found) continue;
             ++sample.holders;
-            // First time this node has held it, so it is an arrival.
+            // First time this node has held it, so it is an arrival. The one
+            // place the table walk for the source is affordable: once per
+            // (address, node), not once per sample.
             if (!m_addr_seen[t][id]) {
                 m_addr_seen[t][id] = true;
-                m_addr_arrivals.push_back({now, id, tracked});
+                const int32_t from{m_opts.record_addr_sources ? AddrSourceOf(id, addr) : -1};
+                m_addr_arrivals.push_back({now, id, tracked, from});
             }
             if (found->tried) {
                 ++sample.in_tried;

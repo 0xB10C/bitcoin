@@ -180,6 +180,14 @@ public:
          * Costs about 40 bytes per row, so a thousand nodes and six blocks is
          * a quarter of a megabyte. */
         bool record_block_arrivals{true};
+        /** Also record which peer each tracked address first came from.
+         *
+         * AddrMan keeps the source of every entry, so the address relay tree
+         * is already there to be read; it just is not reachable through
+         * `FindAddressEntry`. Reading it means walking the holder's tables,
+         * which is why this is off by default, and why it is done only on the
+         * one sample where a node first appears as a holder. */
+        bool record_addr_sources{false};
         RegionLatency::Options latency{};
         uint256 rng_seed{uint256{1}};
     };
@@ -217,6 +225,14 @@ public:
         uint32_t node{0};
         /** The tracked node whose address it is. */
         uint32_t address_of{0};
+        /** The node that told this one about it, or -1 when unknown.
+         *
+         * AddrMan's own record: the peer it first heard the address from,
+         * which is one edge of the relay tree. Unlike a block's `from` this is
+         * not the instant of delivery but the holder's stored attribution, so
+         * it survives the sampling delay. -1 when `record_addr_sources` is
+         * off, and when the stored source is not a node of this network. */
+        int32_t from{-1};
     };
 
     /** How widely one tracked address had spread, at one instant. */
@@ -348,6 +364,8 @@ private:
     void ArmMineTick(SimTime at);
     /** Count, for each tracked address, how many nodes now hold it. */
     void SampleAddrCoverage();
+    /** Which node told `holder` about `addr`, per AddrMan's own record. */
+    int32_t AddrSourceOf(uint32_t holder, const CAddress& addr) const;
 
     const Options m_opts;
     const SharedContext m_ctx;
@@ -368,6 +386,11 @@ private:
     std::vector<size_t> m_free_links;
     std::vector<std::vector<size_t>> m_links_by_node;
     std::map<CService, uint32_t> m_listeners;
+    /** Every node keyed by host, because AddrMan stores a source as a bare
+     *  `CNetAddr`. Not just the listeners: a node that only dials out is still
+     *  the source its peers record for what it relays. Only filled when
+     *  sources are recorded. */
+    std::map<CNetAddr, uint32_t> m_nodes_by_host;
     std::vector<uint32_t> m_tracked;
     std::vector<AddrSample> m_addr_samples;
 

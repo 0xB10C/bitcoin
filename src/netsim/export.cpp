@@ -82,7 +82,7 @@ bool WriteBlockArrivals(const Network& net, const fs::path& path)
 
 std::string AddrArrivalColumns()
 {
-    return "address_of,node,elapsed_us";
+    return "address_of,node,elapsed_us,from";
 }
 
 bool WriteAddrArrivals(const Network& net, const fs::path& path)
@@ -95,7 +95,8 @@ bool WriteAddrArrivals(const Network& net, const fs::path& path)
     for (const Network::AddrArrival& arrival : net.AddrArrivals()) {
         out << arrival.address_of << ','
             << arrival.node << ','
-            << (arrival.at - start).count() << '\n';
+            << (arrival.at - start).count() << ','
+            << arrival.from << '\n';
     }
     out.flush();
     return out.good();

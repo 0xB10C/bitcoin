@@ -1730,3 +1730,61 @@ interface -- a per-region-pair matrix, or a lognormal fitted to measured RTTs
 This is the second artefact of this kind, after the service-tick quantisation
 in §17.3, and both were caught the same way: a feature of the output that was
 too regular to be real.
+### 17.5 The address relay tree, from AddrMan's own record
+
+Addresses now carry attribution like blocks do, and the mechanism is worth
+recording because no Core change was needed. A block's sender is known exactly:
+a node adopts the block while handling bytes from one particular peer and the
+simulator knows which link it was servicing. An address has no such instant --
+it is noticed by sampling, up to 30 s later. But `AddrInfo::source` already
+stores the peer the entry was first heard from, because that is what buckets
+it, and `AddrMan::GetEntries` is public (the `getrawaddrman` RPC uses it). So
+`Network::AddrSourceOf` reads the field back.
+
+Two costs shape the design. `FindAddressEntry` cannot return the source, so
+reading it means walking the holder's tables; and `netsim/network.cpp` has to
+include `addrman_impl.h` for `AddrInfo` to be complete, after `addrman.h`,
+which declares the `AddressPosition` that `addrman_impl.h` uses without
+declaring. The walk is therefore done once per (address, node) -- on the single
+sample where a node first appears as a holder -- and only under
+`record_addr_sources`, which `main.cpp` enables exactly when `--addr-arrivals`
+asks for the CSV. The whole-population sample stays one hash lookup per node,
+which is what keeps it affordable at 100,000.
+
+Validated the same way the block tree was, on a 100-node run (134 arrivals,
+three addresses): every arrival attributed, no node its own source, no sender
+that had not been seen holding it earlier or at the same sample, and every
+(receiver, sender) pair a connection present in the final topology snapshot.
+Note the reverse map has to cover *every* node, not just listeners -- a node
+that only dials out is still the source its peers record. Keying it on
+listeners alone left 2 of 28 arrivals unattributed in the first run.
+
+The shape is the finding, and it is nothing like a block's:
+
+| | Block (8 mined) | Address (3 withheld) |
+|---|---|---|
+| Hops to the farthest node | 3 | 5-6 |
+| Nodes reached, of 100 | 100 | 42-47 |
+| Time until it stopped | ~840 ms | ~4.5 min |
+| Peers a relayer passed it to | 1-34, median 16 | 1-8, median 1 |
+
+Block relay floods: a node forwards to every peer that does not have it, so
+hop 2 alone accounts for most of the network. Address relay is capped at two
+by `net_processing.cpp:2553` -- `nRelayNodes = (fReachable || (hasher.Finalize()
+& 1)) ? 2 : 1` -- so the tree is deep and narrow and dies out once those two
+peers already know. The measurement finds the cap without being told: 60 of 68
+relayers passed each address to exactly one node or two.
+
+Three loose ends worth keeping:
+
+- The three relayers at 8 are the address owners. Hop 1 is exactly the owner's
+  eight *outbound full-relay* peers -- not its two block-relay-only outbounds,
+  not its inbound ones.
+- Eight relayers reached 3 or 4, which a two-peer cap cannot produce. The
+  likely second path is the GETADDR reply, which returns a bulk sample of the
+  table, but this data cannot separate the two. Unproven.
+- Both trees are *first-arrival* trees over a denser gossip graph. Node 54 had
+  been connected to node 0 since 4.0 s and node 0 does self-announce, but node
+  5's copy landed first, so node 54's edge points at node 5; six other peers of
+  node 0 are attributed elsewhere the same way. AddrMan never revises `source`.
+

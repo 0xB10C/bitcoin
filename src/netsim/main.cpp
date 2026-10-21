@@ -112,6 +112,9 @@ void PrintUsage()
                  "                   travel: announce, getdata, block, validate, announce\n"
                  "                   on. Costs 123 KB per node; implies --mine and --chain\n"
                  "  --block-csv=FILE write one row per (block, node) arrival there\n"
+                 "  --addr-arrivals=FILE  the same for addresses: one row per\n"
+                 "                   (tracked address, node), with the peer AddrMan\n"
+                 "                   recorded it from, which is the relay tree\n"
                  "  --block-bytes=N  pad each block to about N serialised bytes, so that\n"
                  "                   transfer time counts (ceiling ~1000000, see chain.h)\n"
                  "  --bandwidth-mbit=N  per-link bandwidth, which is what turns block size\n"
@@ -421,6 +424,9 @@ int main(int argc, char* argv[])
     opts.service_interval = std::chrono::duration_cast<netsim::SimTime>(std::chrono::milliseconds{args.service_ms});
     opts.num_tracked = args.tracked;
     opts.addr_sample_interval = std::chrono::duration_cast<netsim::SimTime>(std::chrono::seconds{args.sample_sec});
+    // The arrivals CSV is the only thing that carries the sources out, so the
+    // table walk they cost is worth paying exactly when it is asked for.
+    opts.record_addr_sources = !args.addr_arrivals_csv.empty();
     if (args.mainnet_mix) opts.addresses.UseMainnetMix();
     opts.addresses.mainnet_netgroups = args.mainnet_netgroups;
     opts.chain.initial_blocks = args.chain;
