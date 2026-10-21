@@ -591,14 +591,40 @@ not a message ever arrives. Removing the prefill trips an assertion in
 `CNode::ReceiveMsgBytes`, which requires the key to be present, so it needs the
 accounting path changed to insert on demand rather than a deletion.
 
+**Where the 1.31 MB actually goes.** A run with `--bootstrap=0` forms no
+connections and holds no addresses, so it measures the fixed per-node floor
+directly: **671,739 bytes**. That is within 6 KB of `sizeof(AddrManImpl)`,
+which is 655,872. So the floor is AddrMan's two bucket tables and essentially
+nothing else: `CConnman` at 1,152 bytes, `PeerManagerImpl` at 1,576, the
+transaction-download object and the orphanage together account for the
+remainder. The three large lazy reject filters, worth 3.1 MB per node, are
+confirmed never allocated, because the floor would otherwise be far higher.
+
+So the blocks-only figure decomposes as roughly half AddrMan's fixed tables,
+and of the other half about 500 KB is `Peer::m_addr_known` at nineteen peers.
+Everything else is about a tenth. **There is no unnecessary allocation left to
+remove**; what remains are two load-bearing structures, and reducing either is
+a trade rather than a saving.
+
 Two further levers are untested and both carry a trade:
 
-- **Sparse AddrMan bucket tables.** At the occupancies these runs reach, around
-  100 addresses per node, the 81,920 slots are over 99% empty, so a sparse
-  representation would cut roughly 630 KB per node. But `Select()` already
-  probes random slots until it finds an occupied one, so the probe count would
-  not change while each probe became a hash lookup. That trades memory against
-  the CPU hot spot identified in §5.2.
+- **An occupancy bitmap in front of the bucket tables.** This is the one large
+  reduction left that costs nothing in fidelity, and it may well be faster
+  rather than slower. At these occupancies the 81,920 slots hold a few hundred
+  entries, so the tables are over 99% empty. A plain sparse map would save the
+  memory but make each of `Select()`'s probes a hash lookup, which is the wrong
+  trade against the hot spot in §5.2. A bitmap plus a map avoids that: 81,920
+  bits is 10 KB that sits in L2, so the 99% of probes that miss become a bit
+  test, and only a hit needs the map. Against today's 8-byte reads scattered
+  over 656 KB, which is cache-hostile precisely because the array is enormous
+  and nearly empty, that should *win* on both axes. Estimated 16 KB in place of
+  656 KB, taking per-node cost from 1.31 MB to around 0.66 MB, or 131 GB to
+  66 GB at 100k nodes. It is an invasive AddrMan change, and one that would
+  benefit a real node with a sparse table too.
+- **Not retaining closed links.** The simulator keeps every link ever opened so
+  the graph export can include short-lived feelers. Over a simulated day at
+  100k nodes that is roughly 72 million closed links at about 80 bytes, so
+  5.8 GB. Worth an option for long runs, though small beside the per-node cost.
 - **A smaller `Peer::m_addr_known`.** At 26.3 KiB per addr-relay peer this is
   roughly 500 KB per node, the dominant per-peer cost once transaction relay is
   off. It is safe to shrink for a pure topology run and not safe for an
