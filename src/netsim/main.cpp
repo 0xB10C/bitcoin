@@ -214,8 +214,8 @@ int main(int argc, char* argv[])
     }
 
     if (args.csv) {
-        std::printf("%u,%u,%d,%u,%zu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
-                    args.nodes, args.listeners, args.blocks_only ? 1 : 0, args.minutes, net.LinkCount(),
+        std::printf("%u,%u,%d,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
+                    args.nodes, args.listeners, args.blocks_only ? 1 : 0, args.minutes, static_cast<unsigned long long>(net.TotalOpened()),
                     static_cast<unsigned long long>(total_outbound), static_cast<unsigned long long>(saturated),
                     static_cast<unsigned long long>(isolated), static_cast<unsigned long long>(addrman_total),
                     static_cast<unsigned long long>(known_strangers),
@@ -234,8 +234,12 @@ int main(int argc, char* argv[])
     std::printf("population      %u nodes, %u listening%s\n", args.nodes, args.listeners,
                 args.blocks_only ? ", blocks-only" : "");
     std::printf("simulated       %u minutes\n", args.minutes);
-    std::printf("connections     %zu formed, %llu saturated, %llu isolated\n", net.LinkCount(),
+    std::printf("connections     %llu opened, %llu still up, %llu saturated, %llu isolated\n",
+                static_cast<unsigned long long>(net.TotalOpened()),
+                static_cast<unsigned long long>(net.LiveLinks()),
                 static_cast<unsigned long long>(saturated), static_cast<unsigned long long>(isolated));
+    std::printf("link slots      %zu peak concurrent, %llu closed and recycled\n",
+                net.LinkSlots(), static_cast<unsigned long long>(net.ClosedLinks()));
     std::printf("addresses       %llu held, %llu of them unreachable\n",
                 static_cast<unsigned long long>(addrman_total),
                 static_cast<unsigned long long>(known_strangers));

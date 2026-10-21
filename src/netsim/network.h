@@ -43,10 +43,16 @@ struct Link {
      *  exactly the thing an analysis wants to count. */
     ConnectionType conn_type{ConnectionType::OUTBOUND_FULL_RELAY};
     SimTime opened_at{};
-    /** Zero while the link is still up. */
-    SimTime closed_at{};
     uint64_t bytes_to_acceptor{0};
     uint64_t bytes_to_initiator{0};
+
+    /** Bumped every time this slot is recycled.
+     *
+     * A closed link's slot is reused, so a delivery queued before the recycle
+     * would otherwise land on whatever connection took its place. Events carry
+     * the generation they were scheduled under and are discarded if it no
+     * longer matches. */
+    uint32_t gen{0};
 
     /** Latest arrival already scheduled in each direction.
      *
@@ -57,13 +63,11 @@ struct Link {
     SimTime next_free_to_acceptor{};
     SimTime next_free_to_initiator{};
 
-    /** Set once both CNode ends have been reaped.
+    /** Set once both CNode ends have been reaped, after which the slot is
+     *  returned to the free list and may be recycled.
      *
      * Connections do close on their own: a feeler hangs up during the VERSION
-     * handler, and an addr-fetch connection after its first useful response.
-     * A closed link keeps its slot in the vector so that event callbacks
-     * holding its index stay valid, and the pointers are nulled as each end is
-     * deleted. */
+     * handler, and an addr-fetch connection after its first useful response. */
     bool closed{false};
 };
 
@@ -162,7 +166,14 @@ public:
     /** Run until `duration` of simulated time has elapsed. */
     void RunFor(SimTime duration) EXCLUSIVE_LOCKS_REQUIRED(NetEventsInterface::g_msgproc_mutex);
 
-    size_t LinkCount() const { return m_links.size(); }
+    /** Connections opened over the whole run, closed ones included. */
+    uint64_t TotalOpened() const { return m_total_opened; }
+    /** Connections still up. This is what the export contains. */
+    uint64_t LiveLinks() const { return m_live_links; }
+    /** Slots currently allocated, bounded by the peak concurrent count rather
+     *  than by every connection the run ever made. Closed links are recycled,
+     *  so iterate this only with the `closed` flag in hand. */
+    size_t LinkSlots() const { return m_links.size(); }
     const std::vector<Link>& Links() const { return m_links; }
     /** Connections refused because the acceptor had no inbound slot free. */
     uint64_t InboundRefusals() const { return m_inbound_refusals; }
@@ -194,7 +205,7 @@ private:
     // Reached only through an event callback. The lock is held for the whole
     // run, but the analysis cannot see through std::function, so these assert
     // at runtime instead.
-    void DeliverNow(size_t link_index, Direction outgoing, const std::vector<uint8_t>& wire)
+    void DeliverNow(size_t link_index, uint32_t gen, Direction outgoing, const std::vector<uint8_t>& wire)
         NO_THREAD_SAFETY_ANALYSIS;
     void ServiceNode(uint32_t id) NO_THREAD_SAFETY_ANALYSIS;
     /** One outbound attempt, using Core's own selection logic. */
@@ -216,8 +227,10 @@ private:
     FastRandomContext m_rng;
 
     std::vector<std::unique_ptr<SimNode>> m_nodes;
-    /** Stable storage: event callbacks capture indices into this. */
+    /** Stable storage: event callbacks capture an index plus a generation. */
     std::vector<Link> m_links;
+    /** Slots of closed links, available for the next connection. */
+    std::vector<size_t> m_free_links;
     std::vector<std::vector<size_t>> m_links_by_node;
     std::map<CService, uint32_t> m_listeners;
 
@@ -228,6 +241,8 @@ private:
     uint64_t m_self_picks{0};
     uint64_t m_rejected_attempts{0};
     uint64_t m_closed_links{0};
+    uint64_t m_total_opened{0};
+    uint64_t m_live_links{0};
     uint64_t m_evictions{0};
     std::map<ConnectionType, uint64_t> m_opened_by_type;
 };

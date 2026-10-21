@@ -168,8 +168,24 @@ bool Network::Connect(uint32_t from, uint32_t to, ConnectionType conn_type)
     const ConnPair pair{ConnectPair(m_ctx, dialer, acceptor, conn_type, out_id, in_id)};
     ++m_opened_by_type[conn_type];
 
-    const size_t index{m_links.size()};
-    Link link;
+    // Recycle a closed link's slot where one is free, so the vector is bounded
+    // by the peak number of concurrent connections rather than by every
+    // connection the run ever opened. Feelers alone would otherwise make that
+    // unbounded over a long run.
+    size_t index;
+    uint32_t gen{0};
+    if (!m_free_links.empty()) {
+        index = m_free_links.back();
+        m_free_links.pop_back();
+        gen = m_links[index].gen + 1;
+    } else {
+        index = m_links.size();
+        m_links.emplace_back();
+    }
+
+    Link& link{m_links[index]};
+    link = Link{};
+    link.gen = gen;
     link.initiator = from;
     link.acceptor = to;
     link.out_side = pair.out_side;
@@ -178,9 +194,11 @@ bool Network::Connect(uint32_t from, uint32_t to, ConnectionType conn_type)
     link.opened_at = m_clock.Now();
     link.next_free_to_acceptor = m_clock.Now();
     link.next_free_to_initiator = m_clock.Now();
-    m_links.push_back(link);
+
     m_links_by_node[from].push_back(index);
     m_links_by_node[to].push_back(index);
+    ++m_total_opened;
+    ++m_live_links;
 
     // The dialer has to speak first: PeerManager pushes VERSION lazily from
     // SendMessages, and the acceptor will ignore the link until it arrives.
@@ -223,15 +241,20 @@ void Network::ScheduleDelivery(size_t link_index, Direction outgoing, std::vecto
         link.bytes_to_initiator += wire.size();
     }
 
-    m_queue.Post(arrival, [this, link_index, outgoing, bytes = std::move(wire)] {
-        DeliverNow(link_index, outgoing, bytes);
+    const uint32_t gen{link.gen};
+    m_queue.Post(arrival, [this, link_index, gen, outgoing, bytes = std::move(wire)] {
+        DeliverNow(link_index, gen, outgoing, bytes);
     });
 }
 
-void Network::DeliverNow(size_t link_index, Direction outgoing, const std::vector<uint8_t>& wire)
+void Network::DeliverNow(size_t link_index, uint32_t gen, Direction outgoing, const std::vector<uint8_t>& wire)
 {
     AssertLockHeld(NetEventsInterface::g_msgproc_mutex);
     Link& link{m_links[link_index]};
+
+    // The slot was recycled while these bytes were in flight, so they belong to
+    // a connection that no longer exists.
+    if (link.gen != gen) return;
 
     const bool to_acceptor{outgoing == Direction::ToAcceptor};
     CNode* destination{to_acceptor ? link.in_side : link.out_side};
@@ -293,13 +316,41 @@ void Network::ReapNode(uint32_t id)
 
     At(id).connman->DisconnectNodesPublic();
 
-    for (const size_t index : m_links_by_node[id]) {
+    // Drop the links this node is finished with, and release the slot of any
+    // whose far end has gone too. Compacting here is what keeps the per-node
+    // list bounded by live degree instead of by history.
+    auto& mine{m_links_by_node[id]};
+    std::vector<size_t> finished;
+    size_t keep{0};
+    for (size_t i = 0; i < mine.size(); ++i) {
+        const size_t index{mine[i]};
         Link& link{m_links[index]};
+        CNode* ours{link.initiator == id ? link.out_side : link.in_side};
+        if (ours != nullptr) {
+            mine[keep++] = index; // still ours
+            continue;
+        }
         if (!link.closed && link.out_side == nullptr && link.in_side == nullptr) {
             link.closed = true;
-            link.closed_at = m_clock.Now();
             ++m_closed_links;
+            --m_live_links;
+            finished.push_back(index);
         }
+    }
+    mine.resize(keep);
+
+    for (const size_t index : finished) {
+        const Link& link{m_links[index]};
+        const uint32_t other{link.initiator == id ? link.acceptor : link.initiator};
+        auto& theirs{m_links_by_node[other]};
+        for (size_t i = 0; i < theirs.size(); ++i) {
+            if (theirs[i] == index) {
+                theirs[i] = theirs.back();
+                theirs.pop_back();
+                break;
+            }
+        }
+        m_free_links.push_back(index);
     }
 }
 

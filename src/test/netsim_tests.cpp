@@ -430,14 +430,14 @@ BOOST_FIXTURE_TEST_CASE(netsim_network_handshake_over_event_queue, SimTestingSet
 
     // Node 2 does not listen; node 0 does.
     BOOST_REQUIRE(net.Connect(2, 0));
-    BOOST_CHECK_EQUAL(net.LinkCount(), 1U);
+    BOOST_CHECK_EQUAL(net.TotalOpened(), 1U);
 
     // Refused: the target does not listen, the target is the dialer, and the
     // pair is already connected.
     BOOST_CHECK(!net.Connect(3, 2));
     BOOST_CHECK(!net.Connect(2, 2));
     BOOST_CHECK(!net.Connect(2, 0));
-    BOOST_CHECK_EQUAL(net.LinkCount(), 1U);
+    BOOST_CHECK_EQUAL(net.TotalOpened(), 1U);
 
     net.RunFor(std::chrono::duration_cast<SimTime>(5s));
 
@@ -615,7 +615,7 @@ BOOST_FIXTURE_TEST_CASE(netsim_hundred_node_topology, SimTestingSetup)
         }
     }
 
-    BOOST_TEST_MESSAGE("links=" << net.LinkCount() << " live=" << live_links << " closed=" << net.ClosedLinks()
+    BOOST_TEST_MESSAGE("opened=" << net.TotalOpened() << " live=" << net.LiveLinks() << " closed=" << net.ClosedLinks()
                                 << " full_relay=" << net.OpenedOfType(ConnectionType::OUTBOUND_FULL_RELAY)
                                 << " block_relay=" << net.OpenedOfType(ConnectionType::BLOCK_RELAY)
                                 << " feeler=" << net.OpenedOfType(ConnectionType::FEELER)
@@ -627,7 +627,7 @@ BOOST_FIXTURE_TEST_CASE(netsim_hundred_node_topology, SimTestingSetup)
 
     // Every live connection is some listener's inbound connection.
     BOOST_CHECK_EQUAL(total_inbound, live_links);
-    BOOST_CHECK_EQUAL(net.LinkCount() - net.ClosedLinks(), live_links);
+    BOOST_CHECK_EQUAL(net.LiveLinks(), live_links);
 
     // Core's ladder opened all three kinds without the simulator choosing any
     // of them. Block-relay-only peers persist; feelers do not, because they
@@ -756,11 +756,11 @@ BOOST_FIXTURE_TEST_CASE(netsim_graph_export, SimTestingSetup)
     const auto nodes{read_lines(fs::PathFromString(fs::PathToString(prefix) + "-nodes.csv"))};
     const auto edges{read_lines(fs::PathFromString(fs::PathToString(prefix) + "-edges.csv"))};
 
-    // Header plus one row per node, and header plus one row per connection ever
-    // opened. Closed connections stay in the file: a feeler exists only for a
-    // moment, and when short-lived connections happened is the interesting part.
+    // Header plus one row per node, and header plus one row per connection
+    // still up. The export is a snapshot: a closed connection is gone from it,
+    // which is what keeps short-lived feelers out of the file entirely.
     BOOST_REQUIRE_EQUAL(nodes.size(), opts.num_nodes + 1);
-    BOOST_REQUIRE_EQUAL(edges.size(), net.LinkCount() + 1);
+    BOOST_REQUIRE_EQUAL(edges.size(), net.LiveLinks() + 1);
     BOOST_CHECK_EQUAL(nodes[0], netsim::NodeColumns());
     BOOST_CHECK_EQUAL(edges[0], netsim::EdgeColumns());
 
@@ -783,23 +783,17 @@ BOOST_FIXTURE_TEST_CASE(netsim_graph_export, SimTestingSetup)
         inbound_sum += static_cast<size_t>(std::stoul(row[10]));
     }
 
-    size_t live_edges{0};
     for (size_t i{1}; i < edges.size(); ++i) {
         const auto row{fields(edges[i])};
-        BOOST_REQUIRE_EQUAL(row.size(), 8U);
+        BOOST_REQUIRE_EQUAL(row.size(), 6U);
         // An initiator is never its own acceptor.
         BOOST_CHECK(row[0] != row[1]);
-        if (row[3] == "1") {
-            ++live_edges;
-            // A live connection has no close time.
-            BOOST_CHECK_EQUAL(row[5], "-1");
-        } else {
-            BOOST_CHECK(row[5] != "-1");
-        }
+        // Every row names the instant it was opened.
+        BOOST_CHECK(row[3] != "-1");
     }
 
-    BOOST_CHECK_EQUAL(live_edges, net.LinkCount() - net.ClosedLinks());
-    BOOST_CHECK_EQUAL(inbound_sum, live_edges);
+    // The inbound degrees in the node file account for every exported edge.
+    BOOST_CHECK_EQUAL(inbound_sum, edges.size() - 1);
 }
 
 BOOST_AUTO_TEST_SUITE_END()

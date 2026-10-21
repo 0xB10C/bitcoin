@@ -58,8 +58,7 @@ std::string NodeColumns()
 
 std::string EdgeColumns()
 {
-    return "initiator,acceptor,conn_type,live,opened_us,closed_us,"
-           "bytes_to_acceptor,bytes_to_initiator";
+    return "initiator,acceptor,conn_type,opened_us,bytes_to_acceptor,bytes_to_initiator";
 }
 
 bool WriteGraph(const Network& net, const fs::path& prefix)
@@ -102,13 +101,14 @@ bool WriteGraph(const Network& net, const fs::path& prefix)
         if (!out.is_open()) return false;
         out << EdgeColumns() << "\n";
 
+        // A snapshot of what is still up. Closed links are left out, and their
+        // slots have in any case already been recycled.
         for (const Link& link : net.Links()) {
+            if (link.closed) continue;
             out << link.initiator << ','
                 << link.acceptor << ','
                 << ConnectionTypeAsString(link.conn_type) << ','
-                << (link.closed ? 0 : 1) << ','
                 << RelativeMicros(link.opened_at, start) << ','
-                << RelativeMicros(link.closed_at, start) << ','
                 << link.bytes_to_acceptor << ','
                 << link.bytes_to_initiator << '\n';
         }
