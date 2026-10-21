@@ -1876,13 +1876,18 @@ share: **reach is set by the reachable share, not by the population.**
 |---|---|---|---|---|---|---|
 | 500 | 20% | 79.7 / 80.9 | 23.3 / 24.9 | 34.6 / 36.1 | 4.98 | 12.4 |
 | 1000 | 5% | 79.7 / 82.8 | 7.3 / 8.0 | 10.9 / 11.7 | 6.60 | 11.4 |
+| 1000 | 10% | 79.7 / 79.9 | 13.5 / 14.3 | 20.1 / 20.8 | 5.06 | 12.7 |
 | 1000 | 20% | 79.7 / 83.7 | 23.3 / 25.9 | 34.6 / 37.5 | 6.45 | 16.2 |
 | 2000 | 20% | 79.7 / 79.4 | 23.3 / 24.9 | 34.6 / 35.8 | 8.92 | 20.2 |
 | 4000 | 20% | 79.7 / 76.2 | 23.3 / 24.1 | 34.6 / 34.5 | 10.93 | 26.7 |
-| 10000 | 20% | 79.7 / 61.7 | 23.3 / 18.5 | 34.6 / **27.2** | 12.44 | 36.4 |
+| 10000 | 20% | 79.7 / 61.4 | 23.3 / 18.4 | 34.6 / **27.0** | 12.55 | 36.5 |
 
-1.72 points RMS up to 4000, nothing fitted. The 5% row is the load-bearing one:
-dropping the share alone cuts reach threefold and the formula follows it.
+1.49 points RMS over the six configurations where the wave finishes, nothing
+fitted. The share series at N=1000 is the load-bearing part: 5%, 10% and 20%
+listening give 11.7%, 20.8% and 37.5% reach, a threefold range driven by the
+share alone, and the formula follows all three. Two 10,000-node seeds agree to
+within 0.6% of each other (3203 and 3185 holders), so the breakdown below is
+not seed noise.
 
 **10,000 nodes is where the assumption fails.** The model assumes the wave
 finishes; here the network is deeper than the clock allows. Mean arrival climbs
@@ -1890,7 +1895,12 @@ a steady ~20 s per hop through hop 24, which extrapolates to 12+ minutes by hop
 33 -- but hops 33-40 all measure a mean of 9.0-9.2 min and stop rising. They
 cannot cross the gate, so nothing reaches those depths on an average-speed
 chain; only chains that ran fast get there, and everything behind them is never
-told. Reach 27.2% against the formula's 34.6%.
+told. Reach 27.0% against the formula's 34.6%.
+
+Pooled over 40 announcements in two seeds: mean arrival rises 0.340 min (20 s)
+per hop from hop 1 to hop 24, which extrapolates to 10.92 min at hop 33 -- past
+the gate. Hops 33 to 37 measure 8.99, 9.04, 9.15, 9.22 and 9.32 min and stop
+rising. That flattening *is* the truncation, and it is what the drawing shows.
 
 Two things to keep straight at this size:
 
@@ -1908,3 +1918,10 @@ Two things to keep straight at this size:
 Re-measure with `scratchpad/addrmodel.sh` and `addr10k.sh`; `addrmodelstats.sh`
 tabulates, `addrpredict.sh` compares against the formula, `mk10k.sh` and
 `mkmodel.sh` build the chart data. 10,000 nodes is 872 s and 14 GB.
+
+**The 5% listening share is pathologically slow to simulate, not just slow to
+spread.** 50 listeners offer 6250 inbound slots against 9500 wanted, so nodes
+retry refused connections indefinitely. Two seeds of the same config took 79 s
+and 2090 s -- a 26x spread. The reach figures are sound (both seeds agree with
+the formula) but do not plan a sweep around that config; budget for it or skip
+it. 1000:100 and above are 35-50 s.
