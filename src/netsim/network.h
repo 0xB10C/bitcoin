@@ -161,8 +161,41 @@ public:
          * nothing for it. On, it is what keeps `ConsiderEviction` satisfied
          * without gating the check off. */
         bool mine{false};
+        /** Give every node its own ChainstateManager.
+         *
+         * Required to study block relay, and pointless otherwise. With one
+         * shared chain index `AlreadyHaveBlock` answers yes for every node the
+         * instant any of them has a header, so no block is ever requested and
+         * propagation cannot be observed. Costs 122,816 bytes per node. */
+        bool per_node_chain{false};
+        /** Where per-node block files go, one directory per node.
+         *
+         * Only read with `per_node_chain`. The databases are in memory; this
+         * is for `blk*.dat`, which `fast_prune` keeps to 16 kB chunks. */
+        fs::path datadir;
+        /** Record the instant every node adopted every block.
+         *
+         * One row per (block, node), which is a propagation curve. Needs
+         * `per_node_chain`: with one shared tip there is nothing to observe.
+         * Costs about 40 bytes per row, so a thousand nodes and six blocks is
+         * a quarter of a megabyte. */
+        bool record_block_arrivals{true};
         RegionLatency::Options latency{};
         uint256 rng_seed{uint256{1}};
+    };
+
+    /** When one node's tip first reached one block.
+     *
+     * The raw material of a propagation curve: one row per (block, node) pair,
+     * in the order the nodes got there. Recorded from each node's own
+     * `ValidationSignals`, so the instant is the one its chainstate actually
+     * advanced rather than anything the simulator inferred.
+     */
+    struct BlockArrival {
+        SimTime at{};
+        uint32_t node{0};
+        int height{0};
+        uint256 hash;
     };
 
     /** How widely one tracked address had spread, at one instant. */
@@ -253,13 +286,19 @@ public:
     uint32_t NumNetgroups() const;
 
     /** The chain the whole population shares. */
-    const Chain& GetChain() const { return m_chain; }
-    int ChainHeight() const { return m_chain.Height(); }
+    const Chain& GetChain() const { return *m_chain; }
+    /** The miner, for a test that wants to mine one block at a chosen instant. */
+    Chain& GetChain() { return *m_chain; }
+    int ChainHeight() const { return m_chain->Height(); }
 
     /** The nodes whose addresses were withheld from the bootstrap seeding. */
     const std::vector<uint32_t>& TrackedNodes() const { return m_tracked; }
     /** Every coverage sample taken over the run, in time order. */
     const std::vector<AddrSample>& AddrSamples() const { return m_addr_samples; }
+    /** Every per-node block arrival, in time order. Empty without
+     *  `per_node_chain`, where all nodes share one tip and there is nothing to
+     *  observe. */
+    const std::vector<BlockArrival>& BlockArrivals() const { return m_block_arrivals; }
 
 private:
     void ServiceEndpoint(size_t link_index, Direction outgoing)
@@ -292,7 +331,10 @@ private:
     SimClock m_clock;
     EventQueue m_queue;
     RegionLatency m_latency;
-    Chain m_chain;
+    /** Built after the nodes, because with a chain each the miner.s own
+     *  ChainstateManager does not exist until then. */
+    std::unique_ptr<node::BlockTemplateManager> m_miner_templates;
+    std::unique_ptr<Chain> m_chain;
     FastRandomContext m_rng;
 
     std::vector<std::unique_ptr<SimNode>> m_nodes;
@@ -304,6 +346,14 @@ private:
     std::map<CService, uint32_t> m_listeners;
     std::vector<uint32_t> m_tracked;
     std::vector<AddrSample> m_addr_samples;
+
+    /** One per node, subscribed to that node's own tip notifications.
+     *
+     * Defined in network.cpp: it is a CValidationInterface subclass and
+     * nothing outside needs its shape. */
+    class TipRecorder;
+    std::vector<std::unique_ptr<TipRecorder>> m_tip_recorders;
+    std::vector<BlockArrival> m_block_arrivals;
 
     NodeId m_next_node_id{0};
     uint64_t m_inbound_refusals{0};

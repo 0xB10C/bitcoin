@@ -57,6 +57,28 @@ std::string EdgeColumns()
     return "initiator,acceptor,conn_type,opened_us,bytes_to_acceptor,bytes_to_initiator";
 }
 
+std::string BlockArrivalColumns()
+{
+    return "height,hash,node,elapsed_us";
+}
+
+bool WriteBlockArrivals(const Network& net, const fs::path& path)
+{
+    std::ofstream out{path.std_path()};
+    if (!out.is_open()) return false;
+    out << BlockArrivalColumns() << "\n";
+
+    const SimTime start{net.StartTime()};
+    for (const Network::BlockArrival& arrival : net.BlockArrivals()) {
+        out << arrival.height << ','
+            << arrival.hash.ToString() << ','
+            << arrival.node << ','
+            << (arrival.at - start).count() << '\n';
+    }
+    out.flush();
+    return out.good();
+}
+
 std::string AddrSampleColumns()
 {
     return "elapsed_us,node,address,holders,in_tried,multiplicity";

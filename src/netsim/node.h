@@ -10,6 +10,7 @@
 #include <net_processing.h>
 #include <netaddress.h>
 #include <test/util/net.h>
+#include <util/fs.h>
 
 #include <cstdint>
 #include <memory>
@@ -18,8 +19,10 @@ class ChainstateManager;
 class CTxMemPool;
 class NetGroupManager;
 class ValidationSignals;
+namespace util { class SignalInterrupt; }
 namespace node {
 class BlockTemplateManager;
+class KernelNotifications;
 class Warnings;
 } // namespace node
 
@@ -36,10 +39,9 @@ static constexpr unsigned int SEND_BUFFER_BYTES{1 << 18};
 
 /** Everything one simulated node owns.
  *
- * AddrMan, CConnman and PeerManager are the real, unmodified classes. What a
- * node does not own is a ChainstateManager or a CTxMemPool: both are shared
- * across the whole simulation. An empty regtest chainstate costs tens of
- * megabytes, and the address-relay path only ever reads it.
+ * AddrMan, CConnman and PeerManager are the real, unmodified classes. A node
+ * shares the population's CTxMemPool, and shares its ChainstateManager unless
+ * the run asked for block relay, which needs one each: see `own_chainman`.
  */
 struct SimNode {
     uint32_t id{0};
@@ -66,6 +68,24 @@ struct SimNode {
      *  unsubscribe it. Null when tip notifications are not published. */
     ValidationSignals* subscribed{nullptr};
 
+    /** The chain this node validates against.
+     *
+     * Either `own_chainman` below or the population's shared one. Never null
+     * after MakeNode. */
+    ChainstateManager* chainman{nullptr};
+    /** This node's own chain, when the run gives each node one.
+     *
+     * Required for block relay and for nothing else: `AlreadyHaveBlock` asks
+     * only whether the header sits in its block index, so a population sharing
+     * one index has every block the instant any node does, and no block is
+     * ever requested. Measured at 122,816 bytes per node, and no extra
+     * threads provided the script-check pools are sized to zero.
+     *
+     * Declared after the members above so that it outlives them: the
+     * destructor tears down explicitly in any case. */
+    std::unique_ptr<ValidationSignals> own_signals;
+    std::unique_ptr<ChainstateManager> own_chainman;
+
     SimNode() = default;
     ~SimNode();
     SimNode(const SimNode&) = delete;
@@ -87,20 +107,43 @@ struct SharedContext {
     ValidationSignals* validation_signals{nullptr};
     /** Used by `Chain` to mine. Null means the chain cannot be extended. */
     node::BlockTemplateManager* block_templates{nullptr};
+    /** Needed only to build a node its own ChainstateManager and, for the
+     *  miner, its own BlockTemplateManager. Shared because neither carries
+     *  per-node state. */
+    node::KernelNotifications* kernel_notifications{nullptr};
+    const util::SignalInterrupt* interrupt{nullptr};
 };
 
-/** Build one node, with its own AddrMan keyspace and its own CConnman seeds.
- *
- * `blocks_only` advertises fRelay=false, as `-blocksonly` does. For a study of
- * topology or address relay that costs nothing in fidelity and saves a great
- * deal of memory: a peer offering transaction relay gets a `Peer::TxRelay`,
- * whose inventory filter is a 527 KiB rolling bloom allocated eagerly, and at
- * roughly sixteen peers per node that one structure is around 8.5 MB per node.
- * It dominates every other per-node cost, including AddrMan.
- */
-std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const CService& self, bool listening,
-                                  bool blocks_only = false,
-                                  int max_automatic_connections = DEFAULT_MAX_PEER_CONNECTIONS);
+/** What one simulated node needs to be built. */
+struct NodeOptions {
+    uint32_t id{0};
+    /** This node's own address, as its peers see it. */
+    CService self;
+    /** Whether anyone may open an inbound connection to it. */
+    bool listening{false};
+    /** Advertise fRelay=false, as `-blocksonly` does.
+     *
+     * For a study of topology or address relay that costs nothing in fidelity
+     * and saves a great deal of memory: a peer offering transaction relay gets
+     * a `Peer::TxRelay`, whose inventory filter is a 527 KiB rolling bloom
+     * allocated eagerly, and at roughly sixteen peers per node that one
+     * structure is around 8.5 MB. It dominates every other per-node cost,
+     * including AddrMan. */
+    bool blocks_only{false};
+    /** This node's connection budget, as `-maxconnections` sets it. */
+    int max_automatic_connections{DEFAULT_MAX_PEER_CONNECTIONS};
+    /** Give this node its own ChainstateManager. See `SimNode::own_chainman`. */
+    bool own_chain{false};
+    /** Where this node's block files go. Only read when `own_chain` is set.
+     *
+     * The databases are in memory, but BlockManager still wants a directory
+     * for `blk*.dat`, so this is the one part of a simulated node that touches
+     * a filesystem. `fast_prune` keeps the files to 16 kB chunks. */
+    fs::path datadir;
+};
+
+/** Build one node, with its own AddrMan keyspace and its own CConnman seeds. */
+std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, const NodeOptions& opts);
 
 /** The two CNode ends of one simulated connection.
  *

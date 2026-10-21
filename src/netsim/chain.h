@@ -12,10 +12,12 @@
 
 #include <chrono>
 #include <cstdint>
+#include <functional>
+#include <memory>
 
 namespace netsim {
 
-/** The chain every simulated node shares, and the miner that extends it.
+/** A chain that advances, and the miner that advances it.
  *
  * Why this exists at all: with a genesis-only chain no node ever announces
  * anything, and `ConsiderEviction` disconnects every outbound peer that has
@@ -24,23 +26,21 @@ namespace netsim {
  * twenty simulated minutes useless. A chain that advances removes the problem
  * at its source rather than gating the check off.
  *
- * ## The deviation worth knowing about
+ * ## One chain or one each
  *
- * There is **one** `ChainstateManager` for the whole population, so every node
- * sees the same tip at the same instant. Block *announcement* is therefore
- * real — each node's `PeerManager` is registered with the validation signals,
- * gets `UpdatedBlockTip`, and pushes headers to its own peers, which is what
+ * With `Network::Options::per_node_chain` off, the whole population shares a
+ * `ChainstateManager`, so every node sees the same tip at the same instant.
+ * Block *announcement* is real — each node's `PeerManager` gets
+ * `UpdatedBlockTip` and pushes headers to its own peers, which is what
  * advances `pindexBestKnownBlock` on the receiving side and keeps the
- * chain-sync timer satisfied. Block *transfer* is not: a peer offered a header
- * it already has will never ask for the block, so no `getdata`/`block`
- * exchange happens and initial block download cannot be simulated.
+ * chain-sync timer satisfied. Block *transfer* is not: `AlreadyHaveBlock` asks
+ * only whether the header sits in the block index, so every node already has
+ * every block and none is ever requested. Cheap, and enough for topology and
+ * address relay, which only need the tip to move.
  *
- * Making that real needs one `Chainstate` per node — separable in principle,
- * since assumeutxo already runs two over one `BlockManager`, but each still
- * wants its own `CCoinsViewDB`. At ten thousand nodes that is ten thousand
- * LevelDB instances, so it is out of reach at the sizes this simulator exists
- * for. For topology and address relay it costs nothing, because both only need
- * the tip to move.
+ * With it on, every node validates its own chain and a block genuinely has to
+ * travel: announce, `getdata`, `block`, validate, announce onward. That is
+ * what makes propagation measurable, and it costs 122,816 bytes per node.
  */
 class Chain
 {
@@ -63,10 +63,30 @@ public:
          * and it would hide exactly the clustering that makes a twenty-minute
          * timeout interesting. Off only to let a test pin the block count. */
         bool poisson{true};
+        /** Grow each block to about this many serialised bytes. Zero leaves it
+         *  at the natural ~250 of an empty regtest block.
+         *
+         * Propagation is the reason. A 250-byte block travels at the speed of
+         * latency alone, which is not how the real network behaves: for a
+         * megabyte block, transfer time dominates and is what a propagation
+         * curve is mostly made of. Padding gets the bytes onto the wire
+         * without a mempool and transaction relay to fill blocks honestly.
+         *
+         * The ceiling is about 1 MB. Filler is non-witness data and weight
+         * counts that four times, so a megabyte of it is already
+         * MAX_BLOCK_WEIGHT. */
+        size_t target_block_bytes{0};
         uint256 rng_seed{uint256{1}};
     };
 
-    Chain(const SharedContext& ctx, const Options& opts);
+    /** `chainman` and `templates` are where blocks are built.
+     *
+     * With one shared chain that is the population's; with a chain per node it
+     * is the miner's, and the blocks reach everyone else by relay. Either may
+     * be null: no templates means the chain cannot be extended, and no signals
+     * means nothing is announced. */
+    Chain(ChainstateManager& chainman, node::BlockTemplateManager* templates,
+          ValidationSignals* signals, const Options& opts);
 
     /** Build `Options::initial_blocks` blocks, the last landing on `end`.
      *
@@ -81,14 +101,16 @@ public:
      * Does nothing if the chain is already at least that tall, so whoever
      * needs it first may build it.
      */
-    void Prefill(std::chrono::seconds end);
+    void Prefill(std::chrono::seconds end, const std::function<void(const std::shared_ptr<const CBlock>&)>& also = nullptr);
 
     /** Mine one block on the tip, timestamped at the current mock time.
      *
-     * Returns false if the block was not accepted, which would be a bug rather
-     * than an expected outcome.
+     * Returns the block, or null if it was not accepted, which would be a bug
+     * rather than an expected outcome. The caller gets the block back so that
+     * a prefill can hand it to every other node directly, which is how a
+     * population with a chain each starts out synced.
      */
-    bool MineOne();
+    std::shared_ptr<const CBlock> MineOne();
 
     /** How long until the next block, drawn from `Options`. */
     std::chrono::seconds NextInterval();
@@ -98,7 +120,9 @@ public:
     uint64_t Mined() const { return m_mined - m_prefilled; }
 
 private:
-    const SharedContext& m_ctx;
+    ChainstateManager& m_chainman;
+    node::BlockTemplateManager* m_templates;
+    ValidationSignals* m_signals;
     const Options m_opts;
     FastRandomContext m_rng;
     uint64_t m_mined{0};

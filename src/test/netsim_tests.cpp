@@ -6,6 +6,11 @@
 #include <net_processing.h>
 #include <netaddress.h>
 #include <netgroup.h>
+// addrman.h first: addrman_impl.h uses AddressPosition without declaring it.
+#include <addrman.h>
+#include <addrman_impl.h>
+#include <chain.h>
+#include <common/bloom.h>
 #include <netsim/addresses.h>
 #include <netsim/chain.h>
 #include <netsim/clock.h>
@@ -74,7 +79,8 @@ struct SimTestingSetup : public TestingSetup {
         : TestingSetup{ChainType::REGTEST, netsim::SimTestOpts()},
           ctx{*m_node.chainman, *m_node.mempool, *m_node.warnings, netgroupman,
               with_chain ? m_node.validation_signals.get() : nullptr,
-              with_chain ? m_node.block_template_manager.get() : nullptr}
+              with_chain ? m_node.block_template_manager.get() : nullptr,
+              m_node.notifications.get(), m_node.shutdown_signal}
     {
         // MaybeSendAddr() refuses to advertise a node's own address while the
         // chainstate reports initial block download, and self-announcement is
@@ -430,8 +436,8 @@ BOOST_FIXTURE_TEST_CASE(netsim_two_node_handshake, SimTestingSetup)
     SimClock clock{SIM_START};
     const AddressUniverse universe{2, 8333};
 
-    auto dialer{netsim::MakeNode(ctx, /*id=*/0, universe.At(0), /*listening=*/false)};
-    auto listener{netsim::MakeNode(ctx, /*id=*/1, universe.At(1), /*listening=*/true)};
+    auto dialer{netsim::MakeNode(ctx, {.id = 0, .self = universe.At(0), .listening = false})};
+    auto listener{netsim::MakeNode(ctx, {.id = 1, .self = universe.At(1), .listening = true})};
 
     // One lock for the whole run, as the fuzz driver does. Every
     // ProcessMessages and SendMessages call requires it, and it is a single
@@ -485,8 +491,8 @@ BOOST_FIXTURE_TEST_CASE(netsim_getaddr_populates_addrman, SimTestingSetup)
     constexpr uint32_t UNIVERSE{64};
     const AddressUniverse universe{UNIVERSE, 8333};
 
-    auto dialer{netsim::MakeNode(ctx, /*id=*/0, universe.At(0), /*listening=*/false)};
-    auto listener{netsim::MakeNode(ctx, /*id=*/1, universe.At(1), /*listening=*/true)};
+    auto dialer{netsim::MakeNode(ctx, {.id = 0, .self = universe.At(0), .listening = false})};
+    auto listener{netsim::MakeNode(ctx, {.id = 1, .self = universe.At(1), .listening = true})};
 
     // Give the listener something worth asking for. The source is a third
     // address, so these do not look self-announced.
@@ -1092,7 +1098,8 @@ BOOST_FIXTURE_TEST_CASE(netsim_block_intervals_are_exponential, SimChainTestingS
     constexpr size_t DRAWS{20'000};
     netsim::Chain::Options opts;
     opts.spacing = 600s;
-    netsim::Chain chain{ctx, opts};
+    netsim::Chain chain{*m_node.chainman, m_node.block_template_manager.get(),
+                        m_node.validation_signals.get(), opts};
 
     std::vector<int64_t> gaps;
     gaps.reserve(DRAWS);
@@ -1120,9 +1127,62 @@ BOOST_FIXTURE_TEST_CASE(netsim_block_intervals_are_exponential, SimChainTestingS
 
     // And the knob that turns it off, which exists so a test can pin a count.
     opts.poisson = false;
-    netsim::Chain fixed{ctx, opts};
+    netsim::Chain fixed{*m_node.chainman, m_node.block_template_manager.get(),
+                        m_node.validation_signals.get(), opts};
     BOOST_CHECK(fixed.NextInterval() == 600s);
     BOOST_CHECK(fixed.NextInterval() == 600s);
+}
+
+/** A block really travels when every node validates its own chain.
+ *
+ * The load-bearing test for block relay. With one shared chainstate
+ * `AlreadyHaveBlock` answers yes for every node the instant the miner's header
+ * is in the index, so no `getdata` is ever sent and nothing propagates. With a
+ * chain each, node 1 has to be told the block exists, ask for it, receive it
+ * and validate it before its own tip moves.
+ */
+BOOST_FIXTURE_TEST_CASE(netsim_block_relay_moves_a_block, SimChainTestingSetup)
+{
+    netsim::Network::Options opts;
+    opts.num_nodes = 2;
+    opts.num_listening = 2;
+    opts.bootstrap_addrs = 1;
+    opts.per_node_chain = true;
+    opts.datadir = m_path_root / "blockrelay";
+    // Enough prefill to put every node's tip inside max_tip_age, so nobody
+    // starts in initial block download, where announcements are suppressed.
+    opts.chain.initial_blocks = 2;
+    opts.chain.poisson = false;
+    netsim::Network net{opts, ctx};
+
+    // Both nodes start on the same chain, each in its own index.
+    const auto height{[&](uint32_t id) {
+        return WITH_LOCK(::cs_main, return net.At(id).chainman->ActiveChain().Height());
+    }};
+    BOOST_REQUIRE_EQUAL(height(0), 2);
+    BOOST_REQUIRE_EQUAL(height(1), 2);
+    BOOST_REQUIRE(net.At(0).chainman != net.At(1).chainman);
+    BOOST_REQUIRE(!WITH_LOCK(::cs_main, return net.At(1).chainman->IsInitialBlockDownload()));
+
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        // Let them find each other first.
+        net.RunFor(std::chrono::duration_cast<SimTime>(30s));
+        BOOST_REQUIRE_GT(net.LiveLinks(), 0U);
+
+        const uint64_t bytes_before{net.BytesTransferred()};
+        BOOST_REQUIRE(net.GetChain().MineOne());
+        BOOST_REQUIRE_EQUAL(height(0), 3);
+        // Node 1 cannot know yet: nothing has been sent.
+        BOOST_CHECK_EQUAL(height(1), 2);
+
+        net.RunFor(std::chrono::duration_cast<SimTime>(60s));
+        BOOST_TEST_MESSAGE("heights " << height(0) << "/" << height(1)
+                                      << " bytes " << (net.BytesTransferred() - bytes_before));
+        // It arrived, by announcement, request and transfer.
+        BOOST_CHECK_EQUAL(height(1), 3);
+        BOOST_CHECK_GT(net.BytesTransferred(), bytes_before);
+    }
 }
 
 /** No chain means no announcements, which is why the gate exists. */
@@ -1212,6 +1272,116 @@ BOOST_FIXTURE_TEST_CASE(netsim_addr_sampling_is_opt_in, SimTestingSetup)
         net.RunFor(std::chrono::duration_cast<SimTime>(1min));
     }
     BOOST_CHECK(net.AddrSamples().empty());
+}
+
+/* ---------------------------------------------------------------------------
+ * Cost probes.
+ *
+ * Disabled by default, because they measure rather than assert: a number that
+ * drifts is a finding to look at, not a build to fail. ctest runs the suite
+ * with --run_test=netsim_tests, finds every probe disabled, and skips them.
+ *
+ * To take a reading, name one explicitly:
+ *
+ *   TMPDIR=/some/large/tmp build/bin/test_bitcoin \
+ *       --run_test=netsim_tests/probe_node_cost -l test_suite
+ *
+ * §5 of netsim-plan.md records what each of these last returned, on what
+ * machine, and what the numbers mean. Update it when you re-measure.
+ * ------------------------------------------------------------------------- */
+
+/** Compile-time size of the structures a node carries one of. */
+BOOST_AUTO_TEST_CASE(probe_type_sizes, *boost::unit_test::disabled())
+{
+    // AddrMan is a pimpl, so the 8 bytes of the handle are not the cost. The
+    // tables inside are what dominate an idle node.
+    BOOST_TEST_MESSAGE("sizeof(AddrManImpl)      = " << sizeof(AddrManImpl));
+    BOOST_TEST_MESSAGE("sizeof(CNode)            = " << sizeof(CNode));
+    BOOST_TEST_MESSAGE("sizeof(CBlockIndex)      = " << sizeof(CBlockIndex));
+    BOOST_TEST_MESSAGE("sizeof(CService)         = " << sizeof(CService));
+    BOOST_TEST_MESSAGE("sizeof(netsim::SimNode)  = " << sizeof(netsim::SimNode));
+    BOOST_TEST_MESSAGE("sizeof(netsim::Link)     = " << sizeof(netsim::Link));
+}
+
+namespace {
+/** Build N idle nodes and report what each cost in resident memory.
+ *
+ * Only ever called once per process, and the three probes below are separate
+ * test cases for exactly that reason: glibc does not return a freed arena to
+ * the kernel, so a second measurement in the same process sees a resident set
+ * that never shrank and reports nearly zero. Run them one at a time.
+ *
+ * Idle is the other operative word. A node with no peers has no
+ * `Peer::TxRelay`, so the 527 KiB per-peer inventory filter that dominates a
+ * transaction-relaying run does not appear here, and blocks-only measures the
+ * same as tx-relay. This is the fixed floor; §5's whole-run figures are the
+ * floor plus what the peers cost.
+ */
+void ReportNodeCost(const char* label, const netsim::SharedContext& ctx, const fs::path& root,
+                    bool blocks_only, bool own_chain)
+{
+    constexpr size_t N{64};
+    const AddressUniverse universe{N, 18444};
+
+    const uint64_t before{netsim::ResidentSetBytes().value_or(0)};
+    std::vector<std::unique_ptr<netsim::SimNode>> nodes;
+    nodes.reserve(N);
+    for (size_t i{0}; i < N; ++i) {
+        netsim::NodeOptions opts;
+        opts.id = static_cast<uint32_t>(i);
+        opts.self = universe.At(static_cast<uint32_t>(i));
+        opts.listening = true;
+        opts.blocks_only = blocks_only;
+        opts.own_chain = own_chain;
+        if (own_chain) {
+            opts.datadir = root / fs::u8path(std::string{"probe"} + util::ToString(i));
+        }
+        nodes.push_back(netsim::MakeNode(ctx, opts));
+    }
+    const uint64_t after{netsim::ResidentSetBytes().value_or(0)};
+    BOOST_TEST_MESSAGE(label << " = " << (after - before) / N << " bytes/node");
+}
+} // namespace
+
+BOOST_FIXTURE_TEST_CASE(probe_node_cost_blocksonly, SimChainTestingSetup, *boost::unit_test::disabled())
+{
+    ReportNodeCost("idle, blocks-only, shared chain", ctx, m_path_root,
+                   /*blocks_only=*/true, /*own_chain=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(probe_node_cost_txrelay, SimChainTestingSetup, *boost::unit_test::disabled())
+{
+    ReportNodeCost("idle, tx-relay, shared chain", ctx, m_path_root,
+                   /*blocks_only=*/false, /*own_chain=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(probe_node_cost_own_chain, SimChainTestingSetup, *boost::unit_test::disabled())
+{
+    ReportNodeCost("idle, blocks-only, own chain", ctx, m_path_root,
+                   /*blocks_only=*/true, /*own_chain=*/true);
+}
+
+/** The three lazily-allocated rolling bloom filters in TxDownloadManager.
+ *
+ * Two of them used to be allocated on the first tip change merely to be
+ * reset; see the fix in `TxDownloadManagerImpl::ActiveTipChange`. The third is
+ * real, because `BlockConnected` inserts the coinbase into it.
+ */
+BOOST_AUTO_TEST_CASE(probe_rolling_bloom_cost, *boost::unit_test::disabled())
+{
+    constexpr size_t N{200};
+    const auto measure{[](unsigned int elements) {
+        const uint64_t before{netsim::ResidentSetBytes().value_or(0)};
+        std::vector<std::unique_ptr<CRollingBloomFilter>> filters;
+        filters.reserve(N);
+        for (size_t i{0}; i < N; ++i) {
+            filters.push_back(std::make_unique<CRollingBloomFilter>(elements, 0.000001));
+        }
+        const uint64_t after{netsim::ResidentSetBytes().value_or(0)};
+        return (after - before) / N;
+    }};
+    BOOST_TEST_MESSAGE("recent_rejects / reconsiderable (120k, 1e-6) = " << measure(120'000) << " bytes each");
+    BOOST_TEST_MESSAGE("recent_confirmed_transactions   (48k,  1e-6) = " << measure(48'000) << " bytes each");
 }
 
 BOOST_AUTO_TEST_SUITE_END()

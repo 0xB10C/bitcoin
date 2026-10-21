@@ -7,9 +7,15 @@
 #include <net.h>
 #include <netgroup.h>
 #include <netsim/pump.h>
+#include <node/block_template_manager.h>
+#include <node/miner.h>
+#include <primitives/block.h>
+#include <validation.h>
+#include <validationinterface.h>
 #include <sync.h>
 #include <threadsafety.h>
 #include <util/check.h>
+#include <util/string.h>
 #include <util/time.h>
 
 #include <algorithm>
@@ -23,7 +29,36 @@ Direction Opposite(Direction d)
 {
     return d == Direction::ToAcceptor ? Direction::ToInitiator : Direction::ToAcceptor;
 }
+} // namespace
 
+/** Notes the instant one node's tip reaches a block.
+ *
+ * Subscribed to that one node's `ValidationSignals`, which only exists when
+ * the run gives each node its own chain. `UpdatedBlockTip` rather than
+ * `BlockConnected` because the question is when the node *adopted* the block,
+ * which is also the instant from which it will announce it onward.
+ */
+class Network::TipRecorder final : public CValidationInterface
+{
+public:
+    TipRecorder(uint32_t node, std::function<void(uint32_t, const CBlockIndex&)> note)
+        : m_node{node}, m_note{std::move(note)}
+    {
+    }
+
+protected:
+    void UpdatedBlockTip(const CBlockIndex* new_tip, const CBlockIndex* /*fork*/,
+                         bool /*initial_download*/) override
+    {
+        if (new_tip != nullptr) m_note(m_node, *new_tip);
+    }
+
+private:
+    const uint32_t m_node;
+    const std::function<void(uint32_t, const CBlockIndex&)> m_note;
+};
+
+namespace {
 Network::Options ResolveOptions(Network::Options opts)
 {
     if (opts.port == 0) opts.port = GetListenPort();
@@ -44,17 +79,22 @@ Network::Network(Options opts_in, const SharedContext& ctx)
       m_universe{m_opts.addresses},
       m_clock{m_opts.start},
       m_latency{m_opts.latency},
-      m_chain{m_ctx, m_opts.chain},
       m_rng{m_opts.rng_seed}
 {
     Assert(m_opts.num_listening <= m_opts.num_nodes);
     Assert(m_opts.num_tracked <= m_opts.num_listening);
+    Assert(m_opts.num_nodes > 0);
 
-    // Before any node exists, so the nodes come up on a chain that is already
-    // there rather than watching it appear. The tip lands on the instant the
-    // run starts, which is also what keeps them out of initial block download.
-    m_chain.Prefill(std::chrono::duration_cast<std::chrono::seconds>(m_opts.start));
-    m_clock.AdvanceTo(m_opts.start);
+    // With one shared chain, prefill before any node exists, so they come up on
+    // a chain that is already there rather than watching it appear. With a
+    // chain each, the miner's own does not exist yet and the prefill has to
+    // wait until after the node loop.
+    if (!m_opts.per_node_chain) {
+        m_chain = std::make_unique<Chain>(m_ctx.chainman, m_ctx.block_templates,
+                                          m_ctx.validation_signals, m_opts.chain);
+        m_chain->Prefill(std::chrono::duration_cast<std::chrono::seconds>(m_opts.start));
+        m_clock.AdvanceTo(m_opts.start);
+    }
 
     m_tracked.reserve(m_opts.num_tracked);
     for (uint32_t id{0}; id < m_opts.num_tracked; ++id) m_tracked.push_back(id);
@@ -64,7 +104,17 @@ Network::Network(Options opts_in, const SharedContext& ctx)
 
     for (uint32_t id{0}; id < m_opts.num_nodes; ++id) {
         const bool listening{id < m_opts.num_listening};
-        m_nodes.push_back(MakeNode(m_ctx, id, m_universe.At(id), listening, m_opts.blocks_only, m_opts.max_automatic_connections));
+        NodeOptions node_opts;
+        node_opts.id = id;
+        node_opts.self = m_universe.At(id);
+        node_opts.listening = listening;
+        node_opts.blocks_only = m_opts.blocks_only;
+        node_opts.max_automatic_connections = m_opts.max_automatic_connections;
+        node_opts.own_chain = m_opts.per_node_chain;
+        if (node_opts.own_chain) {
+            node_opts.datadir = m_opts.datadir / fs::u8path("node" + util::ToString(id));
+        }
+        m_nodes.push_back(MakeNode(m_ctx, node_opts));
         if (listening) m_listeners.emplace(m_universe.At(id), id);
 
         // Stagger the first tick of each kind across its interval. Without
@@ -78,6 +128,45 @@ Network::Network(Options opts_in, const SharedContext& ctx)
         ArmOpenConnTick(id, m_clock.Now() + stagger(m_opts.open_conn_interval) + m_opts.open_conn_interval);
     }
 
+    // One recorder per node, on that node's own signals, so a block's arrival
+    // is timed where it actually happened rather than inferred by polling.
+    if (m_opts.per_node_chain && m_opts.record_block_arrivals) {
+        m_tip_recorders.reserve(m_opts.num_nodes);
+        for (uint32_t id{0}; id < m_opts.num_nodes; ++id) {
+            m_tip_recorders.push_back(std::make_unique<TipRecorder>(
+                id, [this](uint32_t node, const CBlockIndex& tip) {
+                    m_block_arrivals.push_back(
+                        {m_clock.Now(), node, tip.nHeight, tip.GetBlockHash()});
+                }));
+            At(id).own_signals->RegisterValidationInterface(m_tip_recorders.back().get());
+        }
+    }
+
+    // Node 0 is the miner. Its chain is where blocks are built; everyone else
+    // has to be told, which is the whole point of the exercise.
+    if (m_opts.per_node_chain) {
+        m_miner_templates = std::make_unique<node::BlockTemplateManager>(
+            m_ctx.mempool, *At(0).chainman, *Assert(m_ctx.kernel_notifications), node::BlockCreateOptions{});
+        m_chain = std::make_unique<Chain>(*At(0).chainman, m_miner_templates.get(),
+                                          At(0).own_signals.get(), m_opts.chain);
+        // Handed to every other node directly rather than relayed, so the
+        // population starts synced and what follows measures one block's
+        // travel instead of a thousand nodes doing initial block download.
+        m_chain->Prefill(std::chrono::duration_cast<std::chrono::seconds>(m_opts.start),
+                         [this](const std::shared_ptr<const CBlock>& block) {
+                             for (uint32_t id{1}; id < m_opts.num_nodes; ++id) {
+                                 Assert(At(id).chainman->ProcessNewBlock(
+                                     block, /*force_processing=*/true, /*min_pow_checked=*/true,
+                                     /*new_block=*/nullptr));
+                             }
+                         });
+        m_clock.AdvanceTo(m_opts.start);
+        // The prefill was handed round rather than relayed, so its arrivals say
+        // nothing about propagation. Drop them and start the record at the
+        // first block that actually had to travel.
+        m_block_arrivals.clear();
+    }
+
     Bootstrap();
 
     // A baseline reading before anything has connected, so a plot of coverage
@@ -88,7 +177,7 @@ Network::Network(Options opts_in, const SharedContext& ctx)
     }
 
     if (m_opts.mine) {
-        ArmMineTick(m_clock.Now() + std::chrono::duration_cast<SimTime>(m_chain.NextInterval()));
+        ArmMineTick(m_clock.Now() + std::chrono::duration_cast<SimTime>(m_chain->NextInterval()));
     }
 }
 
@@ -125,7 +214,13 @@ void Network::Bootstrap()
     }
 }
 
-Network::~Network() = default;
+Network::~Network()
+{
+    // Before the nodes, whose signals the recorders are subscribed to.
+    for (size_t id{0}; id < m_tip_recorders.size(); ++id) {
+        At(static_cast<uint32_t>(id)).own_signals->UnregisterValidationInterface(m_tip_recorders[id].get());
+    }
+}
 
 SimNode& Network::At(uint32_t id)
 {
@@ -286,8 +381,21 @@ void Network::DeliverNow(size_t link_index, uint32_t gen, Direction outgoing, co
     SimNode& destination_node{At(to_acceptor ? link.acceptor : link.initiator)};
 
     Deliver(*destination_node.connman, *destination, wire);
-    // Let the receiver react immediately, and ship whatever it answers with.
-    ServiceEndpoint(link_index, Opposite(outgoing));
+
+    // Let the receiver react immediately, on *every* connection it holds and
+    // not only the one the bytes arrived on. This matters more than it looks:
+    // ThreadMessageHandler calls SendMessages for every peer on each pass, so a
+    // node that learns something from one peer forwards it to the others in the
+    // same pass. Servicing only the arriving link would leave the forward
+    // waiting for the next periodic tick, which quantised block propagation to
+    // one service interval per hop -- a measurement of the tick rather than of
+    // the network.
+    const uint32_t receiver{to_acceptor ? link.acceptor : link.initiator};
+    for (const size_t index : m_links_by_node[receiver]) {
+        const Link& other{m_links[index]};
+        if (other.closed) continue;
+        ServiceEndpoint(index, other.initiator == receiver ? Direction::ToAcceptor : Direction::ToInitiator);
+    }
 }
 
 void Network::ServiceNode(uint32_t id)
@@ -482,10 +590,10 @@ void Network::ArmMineTick(SimTime at)
         // expressible while the chainstate is shared: see chain.h. What
         // matters for the peers is that the tip moved, and that every node's
         // PeerManager heard about it.
-        Assert(m_chain.MineOne());
+        Assert(m_chain->MineOne());
         // The next gap is drawn fresh, so block arrivals are the Poisson
         // process they are on the real network rather than a metronome.
-        ArmMineTick(at + std::chrono::duration_cast<SimTime>(m_chain.NextInterval()));
+        ArmMineTick(at + std::chrono::duration_cast<SimTime>(m_chain->NextInterval()));
     });
 }
 

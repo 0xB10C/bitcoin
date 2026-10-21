@@ -5,6 +5,17 @@
 #include <netsim/node.h>
 
 #include <chainparams.h>
+#include <dbwrapper.h>
+#include <kernel/caches.h>
+#include <node/kernel_notifications.h>
+#include <node/blockstorage.h>
+#include <node/chainstate.h>
+#include <util/check.h>
+#include <util/fs.h>
+#include <util/signalinterrupt.h>
+#include <util/task_runner.h>
+#include <validation.h>
+#include <validationinterface.h>
 #include <hash.h>
 #include <netgroup.h>
 #include <protocol.h>
@@ -18,6 +29,14 @@
 namespace netsim {
 
 namespace {
+//! Cache budgets for a per-node chain.
+//!
+//! Small on purpose and not a tuning knob: LevelDB fills its block cache and
+//! write buffer lazily, so an in-memory database that is barely written costs
+//! the same at 4 KiB as at 1 MiB. Measured per node: 122,816 bytes.
+constexpr uint64_t BLOCK_TREE_DB_CACHE_BYTES{1 << 16};
+constexpr uint64_t CHAIN_CACHE_BYTES{1 << 18};
+
 //! Domain separators, so that the several values derived per node are independent.
 const std::string SEED_ADDRMAN{"netsim/addrman"};
 const std::string SEED_CONNMAN{"netsim/connman"};
@@ -38,6 +57,75 @@ uint64_t DeriveUint64(const std::string& domain, uint32_t id, uint32_t extra = 0
     return DeriveHash(domain, id, extra).GetUint64(0);
 }
 
+/** The signal queue this node publishes tip changes on.
+ *
+ * Its own when it has its own chain, because its PeerManager must hear about
+ * its own tip and nobody else.s. */
+ValidationSignals* Signals(const SharedContext& ctx, const SimNode& node)
+{
+    return node.own_signals ? node.own_signals.get() : ctx.validation_signals;
+}
+
+/** Build one node its own chain, independent of every other node's.
+ *
+ * Everything that can be held in memory is: the block tree database and the
+ * coins database both, so the only thing on a filesystem is `blk*.dat`, which
+ * `fast_prune` keeps to 16 kB chunks.
+ *
+ * Two settings are load-bearing at scale rather than merely tidy. The
+ * script-check and prevout-fetch pools are sized to zero, because the default
+ * of two apiece would be twenty thousand threads at ten thousand nodes. And
+ * the signal queue runs on an `ImmediateTaskRunner`, so a tip notification is
+ * delivered inside `ProcessNewBlock` rather than on a scheduler thread: the
+ * simulator is single-threaded and a callback arriving at an arbitrary point
+ * in the event loop would make the run unreproducible.
+ */
+void GiveOwnChain(SimNode& node, const NodeOptions& opts, node::KernelNotifications& notifications,
+                  const util::SignalInterrupt& interrupt)
+{
+    fs::create_directories(opts.datadir / "blocks");
+
+    node.own_signals = std::make_unique<ValidationSignals>(std::make_unique<util::ImmediateTaskRunner>());
+
+    ChainstateManager::Options cm_opts{
+        .chainparams = Params(),
+        .datadir = opts.datadir,
+        .notifications = notifications,
+        .signals = node.own_signals.get(),
+        .worker_threads_num = 0,
+        .prevoutfetch_threads_num = 0,
+    };
+    // Nothing here spends a coinbase, so a shared script cache would only
+    // let one node's validation answer for another's.
+    cm_opts.script_execution_cache_bytes = 0;
+    cm_opts.signature_cache_bytes = 0;
+
+    const node::BlockManager::Options bm_opts{
+        .chainparams = Params(),
+        .blocks_dir = opts.datadir / "blocks",
+        .notifications = cm_opts.notifications,
+        .block_tree_db_params = DBParams{
+            .path = opts.datadir / "blocks" / "index",
+            .cache_bytes = BLOCK_TREE_DB_CACHE_BYTES,
+            .memory_only = true,
+        },
+        .fast_prune = true,
+    };
+
+    node.own_chainman = std::make_unique<ChainstateManager>(interrupt, cm_opts, bm_opts);
+
+    node::ChainstateLoadOptions load_opts;
+    // Null on purpose: a shared mempool behind N chainstates would have every
+    // node calling removeForBlock on the same instance for the same block.
+    load_opts.mempool = nullptr;
+    load_opts.coins_db_in_memory = true;
+    auto [status, error] = node::LoadChainstate(*node.own_chainman, kernel::CacheSizes{CHAIN_CACHE_BYTES}, load_opts);
+    Assert(status == node::ChainstateLoadStatus::SUCCESS);
+
+    BlockValidationState state;
+    Assert(node.own_chainman->ActiveChainstate().ActivateBestChain(state));
+    node.chainman = node.own_chainman.get();
+}
 } // namespace
 
 SimNode::~SimNode()
@@ -57,15 +145,24 @@ SimNode::~SimNode()
     connman.reset();
     peerman.reset();
     addrman.reset();
+    // And the chain last, since the PeerManager held a reference to it.
+    own_chainman.reset();
+    own_signals.reset();
 }
 
-std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const CService& self, bool listening,
-                                  bool blocks_only, int max_automatic_connections)
+std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, const NodeOptions& opts)
 {
+    const uint32_t id{opts.id};
     auto node{std::make_unique<SimNode>()};
     node->id = id;
-    node->self = self;
-    node->listening = listening;
+    node->self = opts.self;
+    node->listening = opts.listening;
+
+    if (opts.own_chain) {
+        GiveOwnChain(*node, opts, *Assert(ctx.kernel_notifications), *Assert(ctx.interrupt));
+    } else {
+        node->chainman = &ctx.chainman;
+    }
 
     // A per-instance seed rather than `deterministic`: the latter would give
     // every node the bucketing key uint256{1} and a zero-keyed RNG, so the
@@ -89,7 +186,7 @@ std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const C
     // us, and so stops its 527 KiB inventory bloom filter being allocated
     // eagerly. At sixteen peers a node that is around 8.5 MB, which dominates
     // everything else including AddrMan's 640 KiB.
-    peerman_opts.ignore_incoming_txs = blocks_only;
+    peerman_opts.ignore_incoming_txs = opts.blocks_only;
     // Its own stream, for the same reason AddrMan gets one. m_rng drives the
     // Poisson address-send and inventory timers, so a shared stream would put
     // every node on the same schedule and an OS-seeded one would make the run
@@ -101,11 +198,11 @@ std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const C
     // at twenty simulated minutes. A run with a chain that advances needs no
     // such gate, so the gate follows whether tip notifications are published
     // at all.
-    peerman_opts.disable_chain_sync_timeout = ctx.validation_signals == nullptr;
+    peerman_opts.disable_chain_sync_timeout = Signals(ctx, *node) == nullptr;
     // banman is null on purpose: a per-node BanMan would cost 539 KiB for its
     // discouragement filter, and nothing here misbehaves.
     node->peerman = PeerManager::make(*node->connman, *node->addrman, /*banman=*/nullptr,
-                                      ctx.chainman, ctx.mempool, ctx.warnings, peerman_opts);
+                                      *node->chainman, ctx.mempool, ctx.warnings, peerman_opts);
 
     CConnman::Options conn_opts;
     conn_opts.m_msgproc = node->peerman.get();
@@ -116,8 +213,8 @@ std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const C
     // Per-node, rather than the process-global fListen. Without this every node
     // self-announces, including the ones nobody can reach, and most of the
     // addresses in circulation end up pointing nowhere.
-    conn_opts.m_listen = listening;
-    conn_opts.m_max_automatic_connections = max_automatic_connections;
+    conn_opts.m_listen = opts.listening;
+    conn_opts.m_max_automatic_connections = opts.max_automatic_connections;
     conn_opts.nSendBufferMaxSize = SEND_BUFFER_BYTES;
     conn_opts.nReceiveFloodSize = RECV_FLOOD_BYTES;
     // Init(), never Start(): Start() spawns four threads unconditionally, which
@@ -132,8 +229,8 @@ std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const C
     // addresses as all-zeros, so the peer-reported route an IPv4 node relies
     // on carries nothing. `add_even_if_unreachable` because -externalip is the
     // closest production analogue and says so outright.
-    if (listening) {
-        node->connman->LocalAddrs().Add(self, LOCAL_MANUAL, /*add_even_if_unreachable=*/true);
+    if (opts.listening) {
+        node->connman->LocalAddrs().Add(opts.self, LOCAL_MANUAL, /*add_even_if_unreachable=*/true);
     }
 
     // Arm the connection-opening timers from the same clock ThreadOpenConnections
@@ -144,9 +241,9 @@ std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const C
     // Subscribe to tip notifications, as init.cpp does for the single
     // production PeerManager. This is what makes a new block reach every
     // node's announcement path rather than only the miner's.
-    if (ctx.validation_signals != nullptr) {
-        ctx.validation_signals->RegisterValidationInterface(node->peerman.get());
-        node->subscribed = ctx.validation_signals;
+    if (ValidationSignals* signals{Signals(ctx, *node)}) {
+        signals->RegisterValidationInterface(node->peerman.get());
+        node->subscribed = signals;
     }
 
     return node;

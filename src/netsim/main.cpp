@@ -44,6 +44,7 @@
 #include <string_view>
 #include <functional>
 #include <limits>
+#include <map>
 #include <vector>
 
 namespace {
@@ -67,6 +68,10 @@ struct Args {
     uint32_t chain{0};
     uint32_t block_sec{600};
     bool mine{false};
+    bool per_node_chain{false};
+    std::string block_csv;
+    uint32_t block_bytes{0};
+    uint32_t bandwidth_mbit{0};
 };
 
 void PrintUsage()
@@ -101,7 +106,15 @@ void PrintUsage()
                  "                   nodes start out with something to announce\n"
                  "  --mine           mine blocks as a Poisson process, one every\n"
                  "                   --block-sec of simulated time on average\n"
-                 "  --block-sec=N    mean simulated seconds between blocks (default 600)\n");
+                 "  --block-sec=N    mean simulated seconds between blocks (default 600)\n"
+                 "  --blockrelay     give every node its own chainstate, so a block has to\n"
+                 "                   travel: announce, getdata, block, validate, announce\n"
+                 "                   on. Costs 123 KB per node; implies --mine and --chain\n"
+                 "  --block-csv=FILE write one row per (block, node) arrival there\n"
+                 "  --block-bytes=N  pad each block to about N serialised bytes, so that\n"
+                 "                   transfer time counts (ceiling ~1000000, see chain.h)\n"
+                 "  --bandwidth-mbit=N  per-link bandwidth, which is what turns block size\n"
+                 "                   into transfer time. Zero, the default, is unlimited\n");
 }
 
 bool ParseUint(std::string_view text, uint32_t& out)
@@ -127,6 +140,16 @@ bool ParseArgs(int argc, char* argv[], Args& args)
             args.mainnet_netgroups = true;
         } else if (arg == "--mine") {
             args.mine = true;
+        } else if (arg == "--blockrelay") {
+            args.per_node_chain = true;
+            args.mine = true;
+            if (args.chain == 0) args.chain = 10;
+        } else if (arg.starts_with("--block-csv=") && arg.size() > 12) {
+            args.block_csv = std::string{arg.substr(12)};
+        } else if (arg.starts_with("--block-bytes=") && ParseUint(arg.substr(14), value)) {
+            args.block_bytes = value;
+        } else if (arg.starts_with("--bandwidth-mbit=") && ParseUint(arg.substr(17), value)) {
+            args.bandwidth_mbit = value;
         } else if (arg.starts_with("--chain=") && ParseUint(arg.substr(8), value)) {
             args.chain = value;
         } else if (arg.starts_with("--block-sec=") && ParseUint(arg.substr(12), value) && value > 0) {
@@ -243,6 +266,48 @@ std::array<uint64_t, CSV_COLUMNS.size()> CsvValues(const Args& args, const netsi
             mem.peak / 1024};
 }
 
+/** How long each mined block took to reach a given share of the population. */
+struct Propagation {
+    int height{0};
+    uint32_t reached{0};
+    int64_t p50_us{0};
+    int64_t p90_us{0};
+    int64_t last_us{0};
+};
+
+/** One row per block that had to travel, in height order.
+ *
+ * The arrival list is already in time order, so for each block the kth
+ * arrival is the kth node to adopt it and the percentiles are just offsets
+ * into that run of rows. Timed from the first arrival, which is the miner's
+ * own, rather than from the start of the run.
+ */
+std::vector<Propagation> SummarisePropagation(const netsim::Network& net)
+{
+    std::map<int, std::vector<int64_t>> by_height;
+    std::map<int, int64_t> first_seen;
+    for (const auto& arrival : net.BlockArrivals()) {
+        const int64_t us{arrival.at.count()};
+        auto [it, fresh] = first_seen.try_emplace(arrival.height, us);
+        by_height[arrival.height].push_back(us - it->second);
+    }
+
+    std::vector<Propagation> out;
+    out.reserve(by_height.size());
+    for (auto& [height, offsets] : by_height) {
+        // Already ascending, since the arrivals were appended in time order.
+        const size_t n{offsets.size()};
+        Propagation p;
+        p.height = height;
+        p.reached = static_cast<uint32_t>(n);
+        p.p50_us = offsets[(n - 1) / 2];
+        p.p90_us = offsets[(n * 9 - 1) / 10];
+        p.last_us = offsets.back();
+        out.push_back(p);
+    }
+    return out;
+}
+
 /** How far the withheld addresses got, as the last sample of each. */
 struct Coverage {
     size_t tracked{0};
@@ -311,6 +376,10 @@ int main(int argc, char* argv[])
     auto netgroupman{NetGroupManager::NoAsmap()};
     netsim::SharedContext shared{*context->m_node.chainman, *context->m_node.mempool,
                                  *context->m_node.warnings, netgroupman};
+    // Always: a node needs these only to build its own chain, and whether it
+    // does is decided per run, but they cost nothing to hand over.
+    shared.kernel_notifications = context->m_node.notifications.get();
+    shared.interrupt = context->m_node.shutdown_signal;
     // Only when there is a chain. Subscribing ten thousand PeerManagers to tip
     // notifications costs nothing on a chain that never moves, but it is also
     // pointless, and leaving them unsubscribed is what selects the
@@ -330,7 +399,9 @@ int main(int argc, char* argv[])
         chain_opts.initial_blocks = args.chain;
         chain_opts.spacing = std::chrono::seconds{args.block_sec};
         chain_opts.rng_seed = uint256{args.seed};
-        netsim::Chain{shared, chain_opts}.Prefill(
+        netsim::Chain{*context->m_node.chainman, context->m_node.block_template_manager.get(),
+                      context->m_node.validation_signals.get(), chain_opts}
+            .Prefill(
             std::chrono::duration_cast<std::chrono::seconds>(netsim::Network::Options{}.start));
     }
 
@@ -352,6 +423,12 @@ int main(int argc, char* argv[])
     opts.chain.initial_blocks = args.chain;
     opts.chain.spacing = std::chrono::seconds{args.block_sec};
     opts.mine = args.mine;
+    opts.per_node_chain = args.per_node_chain;
+    opts.chain.target_block_bytes = args.block_bytes;
+    // Megabits per second to bytes per second.
+    opts.latency.bandwidth_bytes_per_second = uint64_t{args.bandwidth_mbit} * 1000000 / 8;
+    // Under the datadir TestingSetup already made, so it is cleaned up with it.
+    opts.datadir = context->m_args.GetDataDirNet() / "netsim-chains";
 
     netsim::Network net{opts, shared};
     {
@@ -365,6 +442,12 @@ int main(int argc, char* argv[])
         if (!netsim::WriteGraph(net, fs::PathFromString(args.export_prefix))) {
             std::fprintf(stderr, "failed to write the graph to %s-nodes.csv / -edges.csv\n",
                          args.export_prefix.c_str());
+            return EXIT_FAILURE;
+        }
+    }
+    if (!args.block_csv.empty()) {
+        if (!netsim::WriteBlockArrivals(net, fs::PathFromString(args.block_csv))) {
+            std::fprintf(stderr, "failed to write the block arrivals to %s\n", args.block_csv.c_str());
             return EXIT_FAILURE;
         }
     }
@@ -422,6 +505,12 @@ int main(int argc, char* argv[])
         line("addr relay", "%zu withheld addresses reached %llu nodes on average, "
                            "%llu at worst, %llu%% of those via tried",
              cov.tracked, u64(cov.mean), u64(cov.worst), u64(cov.tried_percent));
+    }
+    for (const Propagation& p : SummarisePropagation(net)) {
+        line("block propagation", "height %d reached %u nodes: 50%% in %lld ms, "
+                                  "90%% in %lld ms, last at %lld ms",
+             p.height, p.reached, static_cast<long long>(p.p50_us / 1000),
+             static_cast<long long>(p.p90_us / 1000), static_cast<long long>(p.last_us / 1000));
     }
     line("attempts", "%llu failed, %llu refused as duplicates, %llu turned away",
          u64(net.FailedAttempts()), u64(net.RejectedAttempts()), u64(net.InboundRefusals()));

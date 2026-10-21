@@ -41,10 +41,20 @@ bool WriteGraph(const Network& net, const fs::path& prefix);
  */
 bool WriteAddrSamples(const Network& net, const fs::path& path);
 
+/** Write every per-node block arrival to `path`, one row per (block, node).
+ *
+ * This is the propagation curve in raw form: sort by height then by
+ * `elapsed_us` and the nth row is the instant the nth node adopted that
+ * block. Empty unless the run gave each node its own chain, where there is
+ * something to observe. Returns false if the file could not be written.
+ */
+bool WriteBlockArrivals(const Network& net, const fs::path& path);
+
 /** Column headers, exposed so a test can assert the writer and the reader agree. */
 std::string NodeColumns();
 std::string EdgeColumns();
 std::string AddrSampleColumns();
+std::string BlockArrivalColumns();
 
 } // namespace netsim
 
