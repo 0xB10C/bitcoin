@@ -91,8 +91,13 @@ std::vector<TxOrphanage::OrphanInfo> TxDownloadManager::GetOrphanTransactions() 
 // TxDownloadManagerImpl
 void TxDownloadManagerImpl::ActiveTipChange()
 {
-    RecentRejectsFilter().reset();
-    RecentRejectsReconsiderableFilter().reset();
+    // Through the lazy pointers rather than the accessors. Resetting a filter
+    // that was never allocated is indistinguishable from not having one, and
+    // going through the accessor would commit 1.2 MiB apiece on the first tip
+    // change -- before the node has been asked about a single transaction, and
+    // for good on a -blocksonly node, which never is.
+    if (m_lazy_recent_rejects) m_lazy_recent_rejects->reset();
+    if (m_lazy_recent_rejects_reconsiderable) m_lazy_recent_rejects_reconsiderable->reset();
 }
 
 void TxDownloadManagerImpl::BlockConnected(const std::shared_ptr<const CBlock>& pblock)
