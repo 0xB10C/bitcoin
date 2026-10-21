@@ -19,25 +19,11 @@
 namespace netsim {
 
 namespace {
-/** Inbound slots a node has, for a given connection budget.
- *
- * Mirrors CConnman::Init(): m_max_inbound is the budget less the automatic
- * outbound reservation. Recomputed here because the member is private.
- */
-constexpr int InboundCapacity(int budget)
-{
-    const int full_relay{std::min(MAX_OUTBOUND_FULL_RELAY_CONNECTIONS, budget)};
-    const int block_relay{std::min(MAX_BLOCK_RELAY_ONLY_CONNECTIONS, budget - full_relay)};
-    return std::max(0, budget - (full_relay + block_relay + MAX_FEELER_CONNECTIONS));
-}
-
 Direction Opposite(Direction d)
 {
     return d == Direction::ToAcceptor ? Direction::ToInitiator : Direction::ToAcceptor;
 }
-} // namespace
 
-namespace {
 Network::Options ResolveOptions(Network::Options opts)
 {
     if (opts.port == 0) opts.port = GetListenPort();
@@ -176,7 +162,7 @@ bool Network::Connect(uint32_t from, uint32_t to, ConnectionType conn_type)
     // to, so ask it rather than tracking that separately.
     if (dialer.connman->AlreadyConnectedToAddressPublic(acceptor.self)) return false;
 
-    const auto capacity{static_cast<size_t>(InboundCapacity(m_opts.max_automatic_connections))};
+    const auto capacity{static_cast<size_t>(acceptor.connman->GetMaxInboundConnections())};
     if (acceptor.connman->GetNodeCount(ConnectionDirection::In) >= capacity) {
         // What CreateNodeFromAcceptedSocket does when the inbound slots are
         // full: try to evict an existing peer, and drop the new connection only
@@ -198,7 +184,7 @@ bool Network::Connect(uint32_t from, uint32_t to, ConnectionType conn_type)
 
     const NodeId out_id{m_next_node_id++};
     const NodeId in_id{m_next_node_id++};
-    const ConnPair pair{ConnectPair(m_ctx, dialer, acceptor, conn_type, out_id, in_id)};
+    const ConnPair pair{ConnectPair(dialer, acceptor, conn_type, out_id, in_id)};
     ++m_opened_by_type[conn_type];
 
     // Recycle a closed link's slot where one is free, so the vector is bounded

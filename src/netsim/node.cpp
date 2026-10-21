@@ -26,9 +26,6 @@ const std::string SEED_SCHEDULER{"netsim/scheduler"};
 const std::string SEED_NONCE{"netsim/nonce"};
 const std::string SEED_NETWORK_KEY{"netsim/networkkey"};
 
-//! Our own randomizer id for keyed netgroups. Any fixed value works; see KeyedNetGroup().
-constexpr uint64_t NETSIM_RANDOMIZER_ID_NETGROUP{0x6e7473696d6e6700ULL};
-
 uint256 DeriveHash(const std::string& domain, uint32_t id, uint32_t extra = 0)
 {
     HashWriter writer{};
@@ -41,19 +38,6 @@ uint64_t DeriveUint64(const std::string& domain, uint32_t id, uint32_t extra = 0
     return DeriveHash(domain, id, extra).GetUint64(0);
 }
 
-/** A keyed netgroup value for a peer.
- *
- * CConnman::CalculateKeyedNetGroup is private and the randomizer id it uses is
- * file-local to net.cpp, so this mirrors the intent rather than the exact
- * derivation: peers sharing a netgroup get the same value, and the mapping
- * differs per node. Only eviction grouping consumes it, and that only cares
- * about which peers collide.
- */
-uint64_t KeyedNetGroup(const ConnmanTestMsg& connman, const NetGroupManager& netgroupman, const CNetAddr& addr)
-{
-    const std::vector<unsigned char> group{netgroupman.GetGroup(addr)};
-    return connman.GetDeterministicRandomizer(NETSIM_RANDOMIZER_ID_NETGROUP).Write(group).Finalize();
-}
 } // namespace
 
 SimNode::~SimNode()
@@ -64,8 +48,9 @@ SimNode::~SimNode()
     // and the AddrMan has to outlive both because CConnman holds a reference
     // to it. Tearing down explicitly rather than relying on member
     // declaration order keeps that from breaking silently on a reorder.
-    // Unsubscribe before the PeerManager goes away, or the signal list keeps a
-    // dangling pointer and the next block tip calls into freed memory.
+    //
+    // Unsubscribing comes first, or the signal list keeps a dangling pointer
+    // and the next block tip calls into freed memory.
     if (subscribed != nullptr && peerman != nullptr) {
         subscribed->UnregisterValidationInterface(peerman.get());
     }
@@ -167,7 +152,7 @@ std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const C
     return node;
 }
 
-ConnPair ConnectPair(const SharedContext& ctx, SimNode& from, SimNode& to, ConnectionType conn_type, NodeId out_id,
+ConnPair ConnectPair(SimNode& from, SimNode& to, ConnectionType conn_type, NodeId out_id,
                      NodeId in_id)
 {
     constexpr auto SERVICES{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
@@ -185,11 +170,17 @@ ConnPair ConnectPair(const SharedContext& ctx, SimNode& from, SimNode& to, Conne
     // The sock is null throughout. CNode's constructor never dereferences it,
     // CConnman::SocketSendData explicitly bails out when it is absent, and we
     // never run SocketHandler.
+    //
+    // inbound_onion stays false even for an onion peer. The flag exists because
+    // a real inbound Tor connection arrives from the SOCKS proxy on loopback,
+    // so `addr` does not say which network it came over; here `addr` is the
+    // peer's actual onion address and ConnectedThroughNetwork() already answers
+    // NET_ONION from it.
     auto* out_side{new CNode{
         out_id,
         /*sock=*/nullptr,
         CAddress{to.self, SERVICES},
-        KeyedNetGroup(*from.connman, ctx.netgroupman, to.self),
+        from.connman->CalculateKeyedNetGroupPublic(to.self),
         DeriveUint64(SEED_NONCE, from.id, static_cast<uint32_t>(out_id)),
         /*addrBindIn=*/from.self,
         /*addrNameIn=*/"",
@@ -202,7 +193,7 @@ ConnPair ConnectPair(const SharedContext& ctx, SimNode& from, SimNode& to, Conne
         in_id,
         /*sock=*/nullptr,
         CAddress{from.self, SERVICES},
-        KeyedNetGroup(*to.connman, ctx.netgroupman, from.self),
+        to.connman->CalculateKeyedNetGroupPublic(from.self),
         DeriveUint64(SEED_NONCE, to.id, static_cast<uint32_t>(in_id)),
         /*addrBindIn=*/to.self,
         /*addrNameIn=*/"",

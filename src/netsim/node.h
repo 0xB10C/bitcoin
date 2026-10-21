@@ -122,7 +122,7 @@ struct ConnPair {
  * The node ids only have to be unique within each node's own CConnman, but the
  * caller is expected to keep them globally unique so that logs can be read.
  */
-ConnPair ConnectPair(const SharedContext& ctx, SimNode& from, SimNode& to, ConnectionType conn_type, NodeId out_id,
+ConnPair ConnectPair(SimNode& from, SimNode& to, ConnectionType conn_type, NodeId out_id,
                      NodeId in_id);
 
 } // namespace netsim

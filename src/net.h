@@ -1488,6 +1488,11 @@ public:
      *  an address worth advertising. See Options::m_listen. */
     bool IsListening() const { return m_listen; }
 
+    /** How many inbound connections this instance will hold before it has to
+     *  evict one, as `Options::m_max_automatic_connections` less the outbound
+     *  reservation. See `CreateNodeFromAcceptedSocket`. */
+    int GetMaxInboundConnections() const { return m_max_inbound; }
+
     /** The addresses this instance believes are its own.
      *
      * Exposed because the things that learn them live outside: the Tor control

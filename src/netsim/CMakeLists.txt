@@ -16,6 +16,7 @@ add_library(bitcoin_netsim STATIC EXCLUDE_FROM_ALL
   network.cpp
   node.cpp
   pump.cpp
+  setup.cpp
 )
 
 # test_util is a deliberate dependency, not an accident. It carries

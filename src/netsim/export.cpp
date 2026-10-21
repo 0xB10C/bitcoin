@@ -44,11 +44,6 @@ Degree LiveDegree(const SimNode& node)
     return degree;
 }
 
-int64_t RelativeMicros(SimTime when, SimTime start)
-{
-    if (when == SimTime::zero()) return -1; // "never", for a connection still up
-    return (when - start).count();
-}
 } // namespace
 
 std::string NodeColumns()
@@ -134,7 +129,7 @@ bool WriteGraph(const Network& net, const fs::path& prefix)
             out << link.initiator << ','
                 << link.acceptor << ','
                 << ConnectionTypeAsString(link.conn_type) << ','
-                << RelativeMicros(link.opened_at, start) << ','
+                << (link.opened_at - start).count() << ','
                 << link.bytes_to_acceptor << ','
                 << link.bytes_to_initiator << '\n';
         }

@@ -15,6 +15,7 @@
 #include <netsim/network.h>
 #include <netsim/node.h>
 #include <netsim/pump.h>
+#include <netsim/setup.h>
 #include <node/protocol_version.h>
 #include <protocol.h>
 #include <random.h>
@@ -51,18 +52,6 @@ namespace {
 //! An arbitrary but positive starting instant. Mock time reads zero as "not mocked".
 const SimTime SIM_START{std::chrono::duration_cast<SimTime>(1'700'000'000s)};
 
-//! Options a simulation wants from TestingSetup, as opposed to what a test wants.
-TestOpts SimTestOpts()
-{
-    TestOpts opts;
-    // Every node builds its own CConnman and PeerManager, so the fixture's
-    // single set would just be dead weight.
-    opts.setup_net = false;
-    // Otherwise ValidationCache eagerly allocates and touches 32.25 MiB.
-    opts.min_validation_cache = true;
-    return opts;
-}
-
 /** TestingSetup plus the shared context a simulated node needs.
  *
  * The ChainstateManager and CTxMemPool here are shared by every node in the
@@ -75,36 +64,52 @@ struct SimTestingSetup : public TestingSetup {
     NetGroupManager netgroupman{NetGroupManager::NoAsmap()};
     netsim::SharedContext ctx;
 
-    SimTestingSetup()
-        : TestingSetup{ChainType::REGTEST, SimTestOpts()},
-          ctx{*m_node.chainman, *m_node.mempool, *m_node.warnings, netgroupman}
+    /** `with_chain` hands over the validation signals and the block template
+     *  manager, which is what a run with a real chain needs: publishing tip
+     *  notifications is what makes a new block reach every node's announcement
+     *  path, and it is also what tells MakeNode not to gate off the chain-sync
+     *  timeout. See SimChainTestingSetup. */
+    explicit SimTestingSetup(bool with_chain = false)
+        : TestingSetup{ChainType::REGTEST, netsim::SimTestOpts()},
+          ctx{*m_node.chainman, *m_node.mempool, *m_node.warnings, netgroupman,
+              with_chain ? m_node.validation_signals.get() : nullptr,
+              with_chain ? m_node.block_template_manager.get() : nullptr}
     {
         // MaybeSendAddr() refuses to advertise a node's own address while the
         // chainstate reports initial block download, and self-announcement is
-        // the only thing that propagates addresses more than one hop.
-        static_cast<TestChainstateManager&>(*m_node.chainman).JumpOutOfIbd();
+        // the only thing that propagates addresses more than one hop. A run
+        // with a chain leaves IBD on its own, because its tip lands on the
+        // instant the run starts, and that is itself under test.
+        if (!with_chain) static_cast<TestChainstateManager&>(*m_node.chainman).JumpOutOfIbd();
     }
 };
 
-/** SimTestingSetup plus the pieces a run with a real chain needs.
+/** A simulation that mines on a real chain. See SimTestingSetup. */
+struct SimChainTestingSetup : public SimTestingSetup {
+    SimChainTestingSetup() : SimTestingSetup{/*with_chain=*/true} {}
+};
+
+/** How many nodes filled their full-relay slots, and how many filled none.
  *
- * Publishing tip notifications is what makes a new block reach every node's
- * announcement path, and it is also what tells MakeNode not to gate off the
- * chain-sync timeout. No JumpOutOfIbd() here: a chain whose tip lands on the
- * start of the run leaves initial block download on its own, which is the
- * behaviour under test.
+ * The pair almost every topology assertion is made against: `isolated == 0`
+ * says the population is connected, and a high `saturated` says Core's
+ * selection found enough distinct candidates to work with.
  */
-struct SimChainTestingSetup : public TestingSetup {
-    NetGroupManager netgroupman{NetGroupManager::NoAsmap()};
-    netsim::SharedContext ctx;
-
-    SimChainTestingSetup()
-        : TestingSetup{ChainType::REGTEST, SimTestOpts()},
-          ctx{*m_node.chainman, *m_node.mempool, *m_node.warnings, netgroupman,
-              m_node.validation_signals.get(), m_node.block_template_manager.get()}
-    {
-    }
+struct Saturation {
+    size_t saturated{0};
+    size_t isolated{0};
 };
+
+Saturation CountSaturation(const netsim::Network& net)
+{
+    Saturation out;
+    for (uint32_t id{0}; id < net.NumNodes(); ++id) {
+        const int outbound{net.At(id).connman->GetFullOutboundConnCount()};
+        if (outbound >= MAX_OUTBOUND_FULL_RELAY_CONNECTIONS) ++out.saturated;
+        if (outbound == 0) ++out.isolated;
+    }
+    return out;
+}
 
 /** Shuttle bytes between the two ends of one connection until both go quiet.
  *
@@ -432,7 +437,7 @@ BOOST_FIXTURE_TEST_CASE(netsim_two_node_handshake, SimTestingSetup)
     // process-global mutex rather than one per CConnman.
     LOCK(NetEventsInterface::g_msgproc_mutex);
 
-    const auto conn{netsim::ConnectPair(ctx, *dialer, *listener, ConnectionType::OUTBOUND_FULL_RELAY, /*out_id=*/0, /*in_id=*/1)};
+    const auto conn{netsim::ConnectPair(*dialer, *listener, ConnectionType::OUTBOUND_FULL_RELAY, /*out_id=*/0, /*in_id=*/1)};
     BOOST_REQUIRE(conn.out_side != nullptr);
     BOOST_REQUIRE(conn.in_side != nullptr);
 
@@ -498,7 +503,7 @@ BOOST_FIXTURE_TEST_CASE(netsim_getaddr_populates_addrman, SimTestingSetup)
     BOOST_REQUIRE_EQUAL(dialer->addrman->Size(), 0U);
 
     LOCK(NetEventsInterface::g_msgproc_mutex);
-    const auto conn{netsim::ConnectPair(ctx, *dialer, *listener, ConnectionType::OUTBOUND_FULL_RELAY, /*out_id=*/0, /*in_id=*/1)};
+    const auto conn{netsim::ConnectPair(*dialer, *listener, ConnectionType::OUTBOUND_FULL_RELAY, /*out_id=*/0, /*in_id=*/1)};
 
     // The ADDR response is queued against the dialer's m_next_addr_send timer,
     // which is Poisson with a 30 s mean, so step the clock forward between
@@ -667,15 +672,9 @@ BOOST_FIXTURE_TEST_CASE(netsim_hundred_node_topology, SimTestingSetup)
 
     LOCK(NetEventsInterface::g_msgproc_mutex);
 
-    [[maybe_unused]] size_t total_outbound{0};
-    size_t saturated{0};
-    size_t isolated{0};
+    const Saturation sat{CountSaturation(net)};
     size_t total_known{0};
     for (uint32_t id{0}; id < NODES; ++id) {
-        const int outbound{net.At(id).connman->GetFullOutboundConnCount()};
-        total_outbound += static_cast<size_t>(outbound);
-        if (outbound >= MAX_OUTBOUND_FULL_RELAY_CONNECTIONS) ++saturated;
-        if (outbound == 0) ++isolated;
         total_known += net.At(id).addrman->Size();
     }
 
@@ -731,7 +730,7 @@ BOOST_FIXTURE_TEST_CASE(netsim_hundred_node_topology, SimTestingSetup)
                                 << " block_relay=" << net.OpenedOfType(ConnectionType::BLOCK_RELAY)
                                 << " feeler=" << net.OpenedOfType(ConnectionType::FEELER)
                                 << " live_block_relay=" << live_block_relay << " inbound=" << total_inbound
-                                << " saturated=" << saturated << " isolated=" << isolated
+                                << " saturated=" << sat.saturated << " isolated=" << sat.isolated
                                 << " addrman_total=" << total_known << " failed=" << net.FailedAttempts()
                                 << " rejected=" << net.RejectedAttempts() << " evicted=" << net.Evictions()
                                 << " refused=" << net.InboundRefusals() << " bytes=" << net.BytesTransferred());
@@ -759,13 +758,13 @@ BOOST_FIXTURE_TEST_CASE(netsim_hundred_node_topology, SimTestingSetup)
     }
 
     // Nobody is stranded, and the listeners are all carrying traffic.
-    BOOST_CHECK_EQUAL(isolated, 0U);
+    BOOST_CHECK_EQUAL(sat.isolated, 0U);
     BOOST_CHECK_EQUAL(listeners_with_inbound, LISTENERS);
 
     // Most of the population fills all eight slots. It cannot be all of them:
     // a node needs eight listeners in distinct netgroups that it is not already
     // connected to, and there are only twenty listeners in total.
-    BOOST_CHECK_GT(saturated, NODES * 4 / 5);
+    BOOST_CHECK_GT(sat.saturated, NODES * 4 / 5);
 
     // Addresses spread past the seed set: four seeds each would be 400 in
     // total, so a materially larger figure means GETADDR responses landed.
@@ -1004,18 +1003,15 @@ BOOST_FIXTURE_TEST_CASE(netsim_multi_network_topology, SimTestingSetup)
         net.RunFor(std::chrono::duration_cast<SimTime>(5min));
     }
 
-    size_t saturated{0}, isolated{0};
+    const Saturation sat{CountSaturation(net)};
     std::set<Network> peer_nets;
     for (uint32_t id{0}; id < opts.num_nodes; ++id) {
-        const int outbound{net.At(id).connman->GetFullOutboundConnCount()};
-        if (outbound >= MAX_OUTBOUND_FULL_RELAY_CONNECTIONS) ++saturated;
-        if (outbound == 0) ++isolated;
         for (const CNode* peer : net.At(id).connman->TestNodes()) {
             peer_nets.insert(peer->addr.GetNetwork());
         }
     }
-    BOOST_TEST_MESSAGE("netgroups=" << net.NumNetgroups() << " saturated=" << saturated
-                                    << " isolated=" << isolated << " peer_nets=" << peer_nets.size());
+    BOOST_TEST_MESSAGE("netgroups=" << net.NumNetgroups() << " saturated=" << sat.saturated
+                                    << " isolated=" << sat.isolated << " peer_nets=" << peer_nets.size());
 
     // Connections were actually made on every one of the four networks, not
     // merely offered.
@@ -1024,8 +1020,8 @@ BOOST_FIXTURE_TEST_CASE(netsim_multi_network_topology, SimTestingSetup)
     BOOST_CHECK(peer_nets.contains(NET_ONION));
     BOOST_CHECK(peer_nets.contains(NET_I2P));
 
-    BOOST_CHECK_EQUAL(isolated, 0U);
-    BOOST_CHECK_GT(saturated, opts.num_nodes / 2);
+    BOOST_CHECK_EQUAL(sat.isolated, 0U);
+    BOOST_CHECK_GT(sat.saturated, opts.num_nodes / 2);
     // Fewer distinct netgroups than nodes, which is the point of the mainnet
     // occupancy, and nodes saturate anyway.
     BOOST_CHECK_LT(net.NumNetgroups(), opts.num_nodes);
@@ -1064,24 +1060,19 @@ BOOST_FIXTURE_TEST_CASE(netsim_mining_satisfies_the_chain_sync_timer, SimChainTe
         net.RunFor(std::chrono::duration_cast<SimTime>(50min));
     }
 
-    // Five blocks at the ten-minute default.
+    // Five blocks at the ten-minute interval.
     BOOST_CHECK_EQUAL(net.GetChain().Mined(), 5U);
     BOOST_CHECK_EQUAL(net.ChainHeight(), 25);
 
-    size_t saturated{0}, isolated{0};
-    for (uint32_t id{0}; id < opts.num_nodes; ++id) {
-        const int outbound{net.At(id).connman->GetFullOutboundConnCount()};
-        if (outbound >= MAX_OUTBOUND_FULL_RELAY_CONNECTIONS) ++saturated;
-        if (outbound == 0) ++isolated;
-    }
-    BOOST_TEST_MESSAGE("height=" << net.ChainHeight() << " saturated=" << saturated
-                                  << " isolated=" << isolated << " opened=" << net.TotalOpened()
+    const Saturation sat{CountSaturation(net)};
+    BOOST_TEST_MESSAGE("height=" << net.ChainHeight() << " saturated=" << sat.saturated
+                                  << " isolated=" << sat.isolated << " opened=" << net.TotalOpened()
                                   << " live=" << net.LiveLinks());
 
     // The nodes are not being told to ignore the timer here, so holding their
     // outbound peers past fifty simulated minutes is the result worth having.
-    BOOST_CHECK_EQUAL(isolated, 0U);
-    BOOST_CHECK_GT(saturated, opts.num_nodes * 3 / 4);
+    BOOST_CHECK_EQUAL(sat.isolated, 0U);
+    BOOST_CHECK_GT(sat.saturated, opts.num_nodes * 3 / 4);
 }
 
 /** No chain means no announcements, which is why the gate exists. */
@@ -1102,11 +1093,7 @@ BOOST_FIXTURE_TEST_CASE(netsim_static_chain_needs_the_gate, SimTestingSetup)
         net.RunFor(std::chrono::duration_cast<SimTime>(30min));
     }
 
-    size_t isolated{0};
-    for (uint32_t id{0}; id < opts.num_nodes; ++id) {
-        if (net.At(id).connman->GetFullOutboundConnCount() == 0) ++isolated;
-    }
-    BOOST_CHECK_EQUAL(isolated, 0U);
+    BOOST_CHECK_EQUAL(CountSaturation(net).isolated, 0U);
 }
 
 /** An onion listener's address spreads, which needs a per-node address table.

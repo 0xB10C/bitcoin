@@ -148,6 +148,13 @@ struct ConnmanTestMsg : public CConnman {
 
     bool AlreadyConnectedToAddressPublic(const CNetAddr& addr) { return AlreadyConnectedToAddress(addr); };
 
+    /** The keyed netgroup of `addr`, as eviction groups peers by.
+     *
+     * Exposed so a caller building CNodes outside CConnman gets the same
+     * value CConnman would have computed, rather than its own approximation:
+     * the randomizer id is file-local to net.cpp. */
+    uint64_t CalculateKeyedNetGroupPublic(const CNetAddr& addr) const { return CalculateKeyedNetGroup(addr); }
+
     CNode* ConnectNodePublic(PeerManager& peerman, const char* pszDest, ConnectionType conn_type)
         EXCLUSIVE_LOCKS_REQUIRED(!m_unused_i2p_sessions_mutex);
 };

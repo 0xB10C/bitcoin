@@ -26,6 +26,7 @@
 #include <netsim/metrics.h>
 #include <netsim/network.h>
 #include <netsim/node.h>
+#include <netsim/setup.h>
 #include <sync.h>
 #include <test/util/setup_common.h>
 #include <test/util/validation.h>
@@ -33,6 +34,7 @@
 #include <util/chaintype.h>
 #include <util/fs.h>
 
+#include <array>
 #include <charconv>
 #include <chrono>
 #include <cstdint>
@@ -168,10 +170,104 @@ bool ParseArgs(int argc, char* argv[], Args& args)
     return true;
 }
 
-constexpr const char* CSV_HEADER{
-    "nodes,listeners,blocks_only,minutes,links,outbound,saturated,isolated,"
-    "addrman_total,known_strangers,failed,rejected,refused,bytes,"
-    "rss_before_kb,rss_after_kb,sim_kb,bytes_per_node,peak_kb"};
+/** The machine-readable columns, in order.
+ *
+ * `CsvValues` returns an array sized from this, so a column added to one and
+ * not the other is a compile error rather than a silently shifted CSV.
+ */
+constexpr std::array CSV_COLUMNS{
+    "nodes", "listeners", "blocks_only", "minutes", "links", "outbound",
+    "saturated", "isolated", "addrman_total", "known_strangers", "failed",
+    "rejected", "refused", "bytes", "rss_before_kb", "rss_after_kb", "sim_kb",
+    "bytes_per_node", "peak_kb",
+};
+
+/** Whole-population aggregates, counted once and reported twice. */
+struct Totals {
+    uint64_t outbound{0};
+    uint64_t saturated{0};
+    uint64_t isolated{0};
+    uint64_t addrman{0};
+    /** Addresses held that name no listening node. Should be zero. */
+    uint64_t unreachable{0};
+};
+
+Totals CountTotals(const netsim::Network& net)
+{
+    Totals totals;
+    for (uint32_t id{0}; id < net.NumNodes(); ++id) {
+        const int outbound{net.At(id).connman->GetFullOutboundConnCount()};
+        totals.outbound += static_cast<uint64_t>(outbound);
+        if (outbound >= MAX_OUTBOUND_FULL_RELAY_CONNECTIONS) ++totals.saturated;
+        if (outbound == 0) ++totals.isolated;
+        for (const CAddress& addr : net.At(id).addrman->GetAddr(0, 0, std::nullopt, /*filtered=*/false)) {
+            ++totals.addrman;
+            if (!net.ListenerAt(addr).has_value()) ++totals.unreachable;
+        }
+    }
+    return totals;
+}
+
+/** Resident set either side of the population existing. */
+struct Memory {
+    uint64_t before{0};
+    uint64_t after{0};
+    uint64_t peak{0};
+
+    uint64_t Simulation() const { return after > before ? after - before : 0; }
+    uint64_t PerNode(uint32_t nodes) const { return nodes > 0 ? Simulation() / nodes : 0; }
+};
+
+std::array<uint64_t, CSV_COLUMNS.size()> CsvValues(const Args& args, const netsim::Network& net,
+                                                   const Totals& totals, const Memory& mem)
+{
+    return {args.nodes,
+            args.listeners,
+            args.blocks_only ? 1u : 0u,
+            args.minutes,
+            net.TotalOpened(),
+            totals.outbound,
+            totals.saturated,
+            totals.isolated,
+            totals.addrman,
+            totals.unreachable,
+            net.FailedAttempts(),
+            net.RejectedAttempts(),
+            net.InboundRefusals(),
+            net.BytesTransferred(),
+            mem.before / 1024,
+            mem.after / 1024,
+            mem.Simulation() / 1024,
+            mem.PerNode(args.nodes),
+            mem.peak / 1024};
+}
+
+/** How far the withheld addresses got, as the last sample of each. */
+struct Coverage {
+    size_t tracked{0};
+    uint64_t mean{0};
+    uint64_t worst{0};
+    uint64_t tried_percent{0};
+};
+
+Coverage SummariseCoverage(const netsim::Network& net)
+{
+    const auto& samples{net.AddrSamples()};
+    Coverage out;
+    out.tracked = net.TrackedNodes().size();
+    if (out.tracked == 0 || samples.size() < out.tracked) return out;
+
+    uint64_t holders{0}, in_tried{0};
+    out.worst = std::numeric_limits<uint64_t>::max();
+    for (size_t i{samples.size() - out.tracked}; i < samples.size(); ++i) {
+        holders += samples[i].holders;
+        in_tried += samples[i].in_tried;
+        out.worst = std::min<uint64_t>(out.worst, samples[i].holders);
+    }
+    out.mean = holders / out.tracked;
+    out.tried_percent = holders > 0 ? in_tried * 100 / holders : 0;
+    return out;
+}
 
 } // namespace
 
@@ -194,17 +290,14 @@ int main(int argc, char* argv[])
         return EXIT_FAILURE;
     }
     if (args.header) {
-        std::printf("%s\n", CSV_HEADER);
+        for (size_t i{0}; i < CSV_COLUMNS.size(); ++i) {
+            std::printf("%s%s", i == 0 ? "" : ",", CSV_COLUMNS[i]);
+        }
+        std::printf("\n");
         return EXIT_SUCCESS;
     }
 
-    TestOpts setup_opts;
-    // Every node builds its own CConnman and PeerManager.
-    setup_opts.setup_net = false;
-    // Otherwise ValidationCache eagerly allocates and touches 32.25 MiB, which
-    // would sit inside the memory figures below.
-    setup_opts.min_validation_cache = true;
-    auto context{MakeNoLogFileContext<TestingSetup>(ChainType::REGTEST, setup_opts)};
+    auto context{MakeNoLogFileContext<TestingSetup>(ChainType::REGTEST, netsim::SimTestOpts())};
 
     // Self-announcement is gated on not being in initial block download, and
     // it is the only thing that propagates an address more than one hop. A run
@@ -278,93 +371,58 @@ int main(int argc, char* argv[])
         }
     }
 
-    const uint64_t rss_after{netsim::ResidentSetBytes().value_or(0)};
-    const uint64_t peak{netsim::PeakResidentSetBytes().value_or(0)};
-    const uint64_t sim_bytes{rss_after > rss_before ? rss_after - rss_before : 0};
-
-    uint64_t total_outbound{0};
-    uint64_t saturated{0};
-    uint64_t isolated{0};
-    uint64_t addrman_total{0};
-    uint64_t known_strangers{0};
-    for (uint32_t id{0}; id < net.NumNodes(); ++id) {
-        const int outbound{net.At(id).connman->GetFullOutboundConnCount()};
-        total_outbound += static_cast<uint64_t>(outbound);
-        if (outbound >= MAX_OUTBOUND_FULL_RELAY_CONNECTIONS) ++saturated;
-        if (outbound == 0) ++isolated;
-        for (const CAddress& addr : net.At(id).addrman->GetAddr(0, 0, std::nullopt, /*filtered=*/false)) {
-            ++addrman_total;
-            if (!net.ListenerAt(addr).has_value()) ++known_strangers;
-        }
-    }
+    const Memory mem{.before = rss_before,
+                     .after = netsim::ResidentSetBytes().value_or(0),
+                     .peak = netsim::PeakResidentSetBytes().value_or(0)};
+    const Totals totals{CountTotals(net)};
 
     if (args.csv) {
-        std::printf("%u,%u,%d,%u,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
-                    args.nodes, args.listeners, args.blocks_only ? 1 : 0, args.minutes, static_cast<unsigned long long>(net.TotalOpened()),
-                    static_cast<unsigned long long>(total_outbound), static_cast<unsigned long long>(saturated),
-                    static_cast<unsigned long long>(isolated), static_cast<unsigned long long>(addrman_total),
-                    static_cast<unsigned long long>(known_strangers),
-                    static_cast<unsigned long long>(net.FailedAttempts()),
-                    static_cast<unsigned long long>(net.RejectedAttempts()),
-                    static_cast<unsigned long long>(net.InboundRefusals()),
-                    static_cast<unsigned long long>(net.BytesTransferred()),
-                    static_cast<unsigned long long>(rss_before / 1024),
-                    static_cast<unsigned long long>(rss_after / 1024),
-                    static_cast<unsigned long long>(sim_bytes / 1024),
-                    static_cast<unsigned long long>(args.nodes > 0 ? sim_bytes / args.nodes : 0),
-                    static_cast<unsigned long long>(peak / 1024));
+        const auto values{CsvValues(args, net, totals, mem)};
+        for (size_t i{0}; i < values.size(); ++i) {
+            std::printf("%s%llu", i == 0 ? "" : ",", static_cast<unsigned long long>(values[i]));
+        }
+        std::printf("\n");
         return EXIT_SUCCESS;
     }
 
-    std::printf("population      %u nodes, %u listening%s\n", args.nodes, args.listeners,
-                args.blocks_only ? ", blocks-only" : "");
+    // One labelled line per topic. `line` keeps the label column aligned in
+    // one place instead of in every format string.
+    const auto line{[](const char* label, const char* fmt, auto... values) {
+        std::printf("%-15s ", label);
+        std::printf(fmt, values...);
+        std::printf("\n");
+    }};
+    const auto u64{[](uint64_t v) { return static_cast<unsigned long long>(v); }};
+
+    line("population", "%u nodes, %u listening%s", args.nodes, args.listeners,
+         args.blocks_only ? ", blocks-only" : "");
     {
         using Net = netsim::AddressUniverse::Net;
         const auto& universe{net.Addresses()};
-        std::printf("addresses       %u ipv4, %u ipv6, %u onion, %u i2p, in %u netgroups\n",
-                    universe.CountOn(Net::IPv4), universe.CountOn(Net::IPv6),
-                    universe.CountOn(Net::Onion), universe.CountOn(Net::I2P),
-                    net.NumNetgroups());
+        line("addresses", "%u ipv4, %u ipv6, %u onion, %u i2p, in %u netgroups",
+             universe.CountOn(Net::IPv4), universe.CountOn(Net::IPv6),
+             universe.CountOn(Net::Onion), universe.CountOn(Net::I2P), net.NumNetgroups());
     }
-    std::printf("simulated       %u minutes\n", args.minutes);
+    line("simulated", "%u minutes", args.minutes);
     if (args.chain > 0 || args.mine) {
-        std::printf("chain           height %d, %llu blocks mined during the run\n",
-                    net.ChainHeight(), static_cast<unsigned long long>(net.GetChain().Mined()));
+        line("chain", "height %d, %llu blocks mined during the run",
+             net.ChainHeight(), u64(net.GetChain().Mined()));
     }
-    std::printf("connections     %llu opened, %llu still up, %llu saturated, %llu isolated\n",
-                static_cast<unsigned long long>(net.TotalOpened()),
-                static_cast<unsigned long long>(net.LiveLinks()),
-                static_cast<unsigned long long>(saturated), static_cast<unsigned long long>(isolated));
-    std::printf("link slots      %zu peak concurrent, %llu closed and recycled\n",
-                net.LinkSlots(), static_cast<unsigned long long>(net.ClosedLinks()));
-    std::printf("addrman         %llu held, %llu of them unreachable\n",
-                static_cast<unsigned long long>(addrman_total),
-                static_cast<unsigned long long>(known_strangers));
-    if (!net.TrackedNodes().empty()) {
-        // The last sample for each tracked address, which is where its
-        // propagation curve ended.
-        const size_t n{net.TrackedNodes().size()};
-        const auto& samples{net.AddrSamples()};
-        uint64_t holders{0}, in_tried{0}, worst{std::numeric_limits<uint64_t>::max()};
-        for (size_t i{samples.size() >= n ? samples.size() - n : 0}; i < samples.size(); ++i) {
-            holders += samples[i].holders;
-            in_tried += samples[i].in_tried;
-            worst = std::min<uint64_t>(worst, samples[i].holders);
-        }
-        std::printf("addr relay      %u withheld addresses reached %llu nodes on average, "
-                    "%llu at worst, %llu%% of those via tried\n",
-                    static_cast<unsigned>(n), static_cast<unsigned long long>(holders / n),
-                    static_cast<unsigned long long>(worst),
-                    static_cast<unsigned long long>(holders > 0 ? in_tried * 100 / holders : 0));
+    line("connections", "%llu opened, %llu still up, %llu saturated, %llu isolated",
+         u64(net.TotalOpened()), u64(net.LiveLinks()), u64(totals.saturated), u64(totals.isolated));
+    line("link slots", "%zu peak concurrent, %llu closed and recycled",
+         net.LinkSlots(), u64(net.ClosedLinks()));
+    line("addrman", "%llu held, %llu of them unreachable",
+         u64(totals.addrman), u64(totals.unreachable));
+    if (const Coverage cov{SummariseCoverage(net)}; cov.tracked > 0) {
+        line("addr relay", "%zu withheld addresses reached %llu nodes on average, "
+                           "%llu at worst, %llu%% of those via tried",
+             cov.tracked, u64(cov.mean), u64(cov.worst), u64(cov.tried_percent));
     }
-    std::printf("attempts        %llu failed, %llu refused as duplicates, %llu turned away\n",
-                static_cast<unsigned long long>(net.FailedAttempts()),
-                static_cast<unsigned long long>(net.RejectedAttempts()),
-                static_cast<unsigned long long>(net.InboundRefusals()));
-    std::printf("traffic         %llu bytes\n", static_cast<unsigned long long>(net.BytesTransferred()));
-    std::printf("memory          %llu KiB for the simulation, %llu bytes per node, %llu KiB peak\n",
-                static_cast<unsigned long long>(sim_bytes / 1024),
-                static_cast<unsigned long long>(args.nodes > 0 ? sim_bytes / args.nodes : 0),
-                static_cast<unsigned long long>(peak / 1024));
+    line("attempts", "%llu failed, %llu refused as duplicates, %llu turned away",
+         u64(net.FailedAttempts()), u64(net.RejectedAttempts()), u64(net.InboundRefusals()));
+    line("traffic", "%llu bytes", u64(net.BytesTransferred()));
+    line("memory", "%llu KiB for the simulation, %llu bytes per node, %llu KiB peak",
+         u64(mem.Simulation() / 1024), u64(mem.PerNode(args.nodes)), u64(mem.peak / 1024));
     return EXIT_SUCCESS;
 }
