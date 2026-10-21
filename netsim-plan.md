@@ -1681,3 +1681,52 @@ all of the receiver's links removed about 900 ms of pure artefact.
 The lesson for anything measured here: a number that does not vary between
 independent trials is more likely to be quantised by the simulator than to be
 a property of Bitcoin.
+
+### 17.4 The plateau in the curve is the latency model
+
+The propagation curve has a step in it: a burst, then a pause, then a steep
+ramp. It is worth writing down what causes it, because it looks like a protocol
+effect and is not.
+
+`RegionLatency` puts each node in one of six regions and uses two values: 12 ms
+within a region and 90 ms between, a 7.5x jump with nothing in between. A block
+transfer is three one-way legs -- the headers announcement, the `getdata`, then
+the block -- so:
+
+| | per leg | three legs | first arrival measured |
+|---|---|---|---|
+| within the region | 12 ms | 36 ms | 31.9 ms |
+| across regions | 90 ms | 270 ms | 212.5 ms |
+
+Jitter is plus or minus a quarter, which covers the difference. The block
+therefore saturates the miner's own region quickly and then nothing at all can
+happen until the first inter-region round trip completes.
+
+Checked rather than assumed, on a 100-node run where the `from` column gives
+the propagation tree. The miner was node 0 in region 4, and region 4 held
+exactly 18 nodes:
+
+```
+rank 1-18   all region 4,  0.0 -> 77.5 ms
+            <- 135 ms of nothing ->
+rank 19     region 3,    212.5 ms
+```
+
+All 18 of the first 18 arrivals were in the miner's region, and that region had
+18 nodes. Hop depth says the same thing from another angle: hop 1 reached 72
+nodes but spanned 31.9 to 317.7 ms, one hop containing both latency values.
+
+So the staircase has as many steps as the model has latency values, which is
+two, rather than one per hop. Real round-trip times are a continuum, so a real
+curve is smooth where this one has a cliff.
+
+**What this does and does not invalidate.** The medians and the logarithmic
+scaling in §17.1 are averages over all region pairs and stand. The *shape* of
+the curve does not: reading the plateau as a property of block relay would be
+wrong. The fix is a continuous distribution behind the existing `LatencyModel`
+interface -- a per-region-pair matrix, or a lognormal fitted to measured RTTs
+-- which `latency.h` has anticipated from the start.
+
+This is the second artefact of this kind, after the service-tick quantisation
+in §17.3, and both were caught the same way: a feature of the output that was
+too regular to be real.
