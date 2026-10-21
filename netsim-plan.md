@@ -1952,3 +1952,46 @@ retry refused connections indefinitely. Two seeds of the same config took 79 s
 and 2090 s -- a 26x spread. The reach figures are sound (both seeds agree with
 the formula) but do not plan a sweep around that config; budget for it or skip
 it. 1000:100 and above are 35-50 s.
+
+### 17.8 Two failed attempts at predicting time-limited reach
+
+The ceiling (§17.7) is derived and holds where the wave finishes. Predicting what
+it actually gets once the gate binds is unsolved, and the two attempts are worth
+recording so nobody repeats them.
+
+**A hop-by-hop recursion overshot by 12 points and never triggered the gate.**
+Two classes, mass-action saturation, two forwards per reached node. It predicted
+42.6% unlimited against the closed form's 34.6%, because it resamples targets
+every hop while the real picks are fixed for 24 h: a node nobody picked is never
+reached, *ever*. Mass action eventually covers everyone; the real digraph does
+not. `scratchpad/reachmodel.sh`.
+
+**A faithful simulation of the fixed digraph got reach close but still never
+triggered the gate.** Build the 2-out digraph, draw an Exponential(30 s) delay
+per link, take arrival as the shortest summed delay (first passage, which is why
+the real tree is deeper than mean-time/per-hop suggests), and forbid forwarding
+past 600 s. Reach lands within ~3 points for listening shares up to 20% across
+500-4000 nodes. But its waves finish in 7-9 minutes where the measured ones take
+12.5, so the gate never bites and it cannot reproduce the 10,000-node
+truncation. It also runs listener reach 8-15 points high everywhere. The most
+likely missing rule: `SetupAddressRelay` enables addr relay for an *inbound*
+peer only once that peer has sent an addr-related message, so a listener's
+effective peer count is lower than its degree. Unconfirmed.
+`scratchpad/reachsim.sh`.
+
+One real bug the attempts did find, worth ten points of reach: **nobody can dial
+the owner.** A withheld address is one nobody knows, so a tracked listener has
+almost no inbound (measured 5, 5 and 3 against 41-70 for other listeners). Let
+it accrue inbound like any listener and it announces to ~48 peers instead of 8.
+
+**And the gate's cost cannot be fitted from what exists.** The four runs that
+overran came in 0%, 5%, 25% and 22% below their ceilings; the implied slope of
+shortfall against overrun varies tenfold (0.027 to 0.27 per minute). Nine
+configurations is not enough. What *is* checkable is the binary question: depth
+~ 1.77 * reached^0.385 at 25 s a hop calls "does the clock bind" correctly for
+seven of nine, both misses within a minute of the threshold.
+
+So the playground ships the ceiling (exact), the time estimate (good to a hop,
+and a reliable verdict away from the boundary), and the measurements themselves
+-- and deliberately refuses to print a single predicted reach once the clock
+binds.
