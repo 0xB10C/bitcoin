@@ -18,15 +18,17 @@ in `src/test/netsim_tests.cpp`, driven by the `netsim_tests` suite.
 There is also a standalone driver, `bitcoin-netsim`, built with
 `cmake --build build --target bitcoin-netsim`. It takes `--nodes`,
 `--listeners`, `--minutes`, `--bootstrap`, `--blocksonly`, `--seed`,
-`--service-ms`, `--export`, `--tracked`, `--sample-sec`, `--addr-csv` and
+`--service-ms`, `--export`, `--tracked`, `--sample-sec`, `--addr-csv`,
+`--mainnet-mix`, `--mainnet-groups`, `--chain`, `--mine`, `--block-sec` and
 `--csv`, and reports what the run cost.
 
 What works: real `AddrMan`, `CConnman` and `PeerManager` per node, no sockets
 and no threads, a microsecond event queue with a region latency model and
 ordered per-direction delivery, Core's own ladder choosing what to open,
 full-relay plus block-relay-only plus feelers, connection teardown, inbound
-eviction, reproducible runs, a graph export, and an address-propagation
-measurement (§4.1).
+eviction, reproducible runs, a graph export, an address-propagation
+measurement (§4.1), a chain that advances (§13), and populations spread over
+IPv4, IPv6, Tor and I2P in measured mainnet proportions (§14).
 
 Measured over 100 nodes, 20 listening, 30 simulated minutes:
 
@@ -102,8 +104,7 @@ the sort of question the simulator exists to answer.
 The graph is rendered at https://claude.ai/artifact/MXqhkGfeoDNX7nG5e1t7q9,
 drawn from those two CSV files unchanged.
 
-Still to do: churn and the extra networks in §12, and the further
-production-fidelity steps in §11.
+Still to do: §15.
 
 ---
 
@@ -999,26 +1000,29 @@ behind the same interface.
 Roughly in order of how likely they are to cost a day.
 
 **Runs stopped being valid at 20 simulated minutes, and the graph export is
-what revealed it. Resolved.** Outbound full-relay peers started getting
+what revealed it. Resolved twice.** Outbound full-relay peers started getting
 disconnected in a wave at about minute 22. The cause is `ConsiderEviction`
 (`src/net_processing.cpp:5514`): an outbound peer that has not announced a
 block with as much work as our tip within `CHAIN_SYNC_TIMEOUT`, which is 20
-minutes, gets one `getheaders` and then a disconnect. Every node here sits on a
-genesis-only chain and never announces anything, so every unprotected outbound
+minutes, gets one `getheaders` and then a disconnect. Every node sat on a
+genesis-only chain and never announced anything, so every unprotected outbound
 peer timed out together.
 
 That was Core behaving correctly given a static chain, not a simulator bug, but
-it is an artefact of block relay being out of scope and it corrupted any
-long-horizon measurement: at 30 simulated minutes, 91 of 875 full-relay
-connections had been shed and reopened for this reason alone.
+it is an artefact of the absent chain and it corrupted any long-horizon
+measurement: at 30 simulated minutes, 91 of 875 full-relay connections had been
+shed and reopened for this reason alone.
 
-The fix is `PeerManager::Options::disable_chain_sync_timeout`, a test-only gate
-that returns from `ConsiderEviction` before it looks at the chain, set by
-`MakeNode`. The honest alternative is to give the shared chainstate a tip the
-nodes announce to each other, which belongs with block relay; this is the
-one-line stand-in and is enough for topology and address work. With it on,
+First fix, `PeerManager::Options::disable_chain_sync_timeout`: a test-only gate
+that returns from `ConsiderEviction` before it looks at the chain. With it on,
 1000 nodes over 60 simulated minutes hold all 10,000 persistent connections and
 isolate nobody, where before the hour contained three disconnection waves.
+
+Second fix, and the honest one: §13. `--chain=N --mine` gives the population a
+chain that advances, every node's PeerManager subscribes to tip notifications,
+and the announcements that follow satisfy the timer with the check left on.
+The gate now follows whether tip notifications are published at all, so a
+chainless run still works and a run with a chain needs no gate.
 
 **Per-node self-address state.** Covered in §3.2. It is the one blocker that
 cannot be worked around, because self-announcement is the only thing that
@@ -1268,25 +1272,144 @@ concurrent count rather than by history — a closed link's slot goes on a free
 list and is reused, guarded by a per-link generation counter so a delivery
 queued before the recycle cannot land on the connection that took the slot.
 
-**Support Tor, I2P and IPv6.** The address universe is IPv4-only today, and
-`NetGroupManager::NoAsmap()` groups IPv4 by /16. Three separate pieces of work:
+**Support Tor, I2P and IPv6.** *(done)* `--mainnet-mix` spreads the population
+over all four networks; see §14 for the shares and for what came alive as a
+result. One piece is still missing and is listed in §15: per-node
+reachability. `g_reachable_nets` is a process global, so a per-node `-onlynet`
+is not expressible, and every node here can reach every network. That is the
+right default for studying how a mixed network forms; it is wrong for asking
+what happens to a Tor-only node.
 
-- *IPv6* is the easy one. `AddressUniverse` needs to emit `CNetAddr` from
-  `in6_addr`, and the netgroup for IPv6 is a /32 rather than a /16, so the
-  "one netgroup per node" property needs rechecking.
-- *Tor and I2P* change the selection arithmetic, not just the addresses.
-  `CountOutboundSlots()` already separates them: addresses on those networks
-  increment `privacy_network_peers` instead of joining the netgroup set,
-  because their addrman groups are random and diversity is meaningless there.
-  That plumbing is in place and unexercised. What is missing is reachability,
-  since `g_reachable_nets` is a process global, so a per-node `-onlynet` is not
-  expressible yet; and the fact that onion and I2P addresses have no port in
-  the sense the listener map assumes.
-- *The extra-network peer branch* of the ladder calls
-  `MaybePickPreferredNetwork`, which exists to get one outbound peer on every
-  reachable network. It can never fire in an IPv4-only universe, so that path
-  is currently dead in the simulator and will come alive the moment a second
-  network appears.
+**Mine on a real chain.** *(done)* §13.
 
-Worth doing alongside an asmap, since real ASN grouping and multiple networks
-answer the same class of question.
+**Use real mainnet data.** *(done)* §14.
+
+---
+
+## 13. The shared chain
+
+`--chain=N` builds N blocks before the population exists; `--mine` extends the
+chain every `--block-sec` of simulated time, ten minutes by default. Both go
+through `BlockTemplateManager` and `ProcessNewBlock`, so the coinbase, the
+witness commitment, the difficulty and the timestamp rules are Core's rather
+than something reimplemented here.
+
+Two details that are load-bearing:
+
+- **Timestamps run up to the start of the run, not from it.**
+  `IsInitialBlockDownload` calls a tip older than `max_tip_age`, a day by
+  default, still-syncing, and a node in initial block download never announces
+  its own address. Building the chain forwards from the start instant would
+  leave every node silent. Built backwards, the nodes leave initial block
+  download on their own and `JumpOutOfIbd()` is no longer needed.
+- **Every node's PeerManager subscribes to tip notifications**, as `init.cpp`
+  does with the single production one. Without that a new block reaches only
+  the miner and nothing is announced. `Chain::MineOne` drains the validation
+  queue synchronously afterwards, because those callbacks arriving on the
+  scheduler thread at an arbitrary point in the event loop would make the run
+  unreproducible.
+
+### 13.1 What this does and does not simulate
+
+There is one `ChainstateManager` for the whole population, so every node sees
+the same tip at the same instant. Block **announcement** is real: each node
+gets `UpdatedBlockTip` and pushes headers to its own peers, which is what
+advances `pindexBestKnownBlock` on the receiving side. Block **transfer** is
+not: a peer offered a header it already has never asks for the block, so no
+`getdata`/`block` exchange happens and initial block download cannot be
+simulated.
+
+Making that real needs one `Chainstate` per node. Separable in principle —
+assumeutxo already runs two over one `BlockManager` — but each wants its own
+`CCoinsViewDB`, and ten thousand LevelDB instances is out of reach at the sizes
+this exists for. For topology and address relay it costs nothing, because both
+only need the tip to move.
+
+### 13.2 The memory it costs, and the 23 GB that it should not have
+
+Mining costs **518 KiB per node**: the recent-confirmed-transactions rolling
+bloom filter inside `TxDownloadManager`, which the coinbase lands in. That one
+is real.
+
+It was 2.96 MiB per node before the fix in
+`src/node/txdownloadman_impl.cpp`. `TxDownloadManagerImpl::ActiveTipChange`
+reset the recent-rejects and recent-rejects-reconsiderable filters *through
+their accessors*, and those accessors allocate on first use — so the first tip
+change committed 1.2 MiB apiece before the node had been asked about a single
+transaction, and permanently on a `-blocksonly` node, which never is. Resetting
+a filter that was never allocated is indistinguishable from not having one.
+Going through the lazy pointers instead saves 2.47 MiB per node here, and 23 GB
+of the 24 GB the first block cost at ten thousand nodes.
+
+---
+
+## 14. Real mainnet data
+
+From a btcnodes.io snapshot taken 2026-10-21 covering 25,636 reachable nodes.
+Two things were taken from it, both as *shape* rather than as a node list, so
+that any population size can use them.
+
+**The network mix**, behind `--mainnet-mix`:
+
+| Network | Nodes | Share |
+|---|---|---|
+| Tor | 12,612 | 49.2% |
+| IPv4 | 7,514 | 29.3% |
+| I2P | 4,288 | 16.7% |
+| IPv6 | 1,222 | 4.8% |
+| CJDNS | 2 | — |
+
+Tor is half the reachable network and IPv4 under a third, so an IPv4-only
+simulation has the composition upside down. Onion and I2P addresses are built
+through `CNetAddr::SetSpecial`, checksum included, so what the simulator holds
+is whatever Core's own parser produced. IPv6 addresses live in 2a00::/8 because
+the obvious alternatives are all special-cased: 2001:db8::/32 is documentation
+space Core calls unroutable, 2001:470::/32 is he.net and gets /36 groups
+instead of /32, and 2002::/16 and 2001::/32 are 6to4 and Teredo, which
+`GetGroup` unwraps to the encapsulated IPv4 address.
+
+**The netgroup occupancy**, behind `--mainnet-groups`: 7,514 IPv4 nodes in
+4,236 distinct /16s, and 1,222 IPv6 nodes in only 384 /32s. Both are a long
+tail of singletons under a short, heavy head — IPv4 is 72% singletons with a
+top group of 107, IPv6 is 70% singletons with a top /32 holding 156 of 1,222.
+Group sizes are drawn from the empirical distribution rather than replayed in
+order, which is what makes it work at any scale: a 200-node population is then
+a plausible random subsample of mainnet's groups, and 4,000 nodes land on
+1.7786 per netgroup against mainnet's 1.7740.
+
+### 14.1 What came alive, and the first result
+
+Two parts of Core could never fire in a single-network population:
+
+- `MaybePickPreferredNetwork`, the extra-network branch of the ladder, which
+  exists to put one outbound peer on every reachable network.
+- The `privacy_network_peers` branch of `CountOutboundSlots`, which files Tor
+  and I2P peers separately from the netgroup diversity set, because
+  `GetGroup` gives those addresses only four bits — sixteen possible groups per
+  network, so diversity there would be meaningless.
+
+The exemption is visible immediately: **120 nodes on the mainnet mix fill every
+outbound slot across just 55 distinct netgroups.** On an IPv4-only population
+each node needs ten netgroups it is not already connected to; with half the
+population on Tor, most of its outbound peers do not count against that rule at
+all. Any conclusion about eclipse exposure drawn from an IPv4-only simulation
+is therefore drawn from the wrong network.
+
+---
+
+## 15. Still open
+
+- **Per-node reachability.** `g_reachable_nets` is a process global, so
+  `-onlynet` cannot differ between nodes. Needed to ask what a Tor-only node
+  experiences, as opposed to how a mixed network forms.
+- **An asmap.** `NetGroupManager` takes one and the simulator passes
+  `NoAsmap()`. Real ASN grouping is the same class of question as the netgroup
+  occupancy above and would supersede the /16 approximation.
+- **Initial block download**, which needs §13.1's per-node chainstates.
+- **Duplicate address volume and rate-limiter binding**, which need counters
+  inside `ProcessAddrs` rather than anything observable from outside.
+- **Churn**: nodes joining and leaving mid-run.
+- **The AddrMan occupancy bitmap** from §5.3, the one remaining large memory
+  win.
+- `OpenOutboundConnectionsOnce`, so the simulator calls one extracted function
+  per attempt rather than reassembling the ladder; see §11.
