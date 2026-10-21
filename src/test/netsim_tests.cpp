@@ -30,6 +30,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <fstream>
 #include <sstream>
 #include <memory>
@@ -305,6 +306,95 @@ BOOST_AUTO_TEST_CASE(netsim_address_universe)
     // netgroup with an existing outbound peer, so a crowded universe would cap
     // every node's outbound count far below its slot count.
     BOOST_CHECK_EQUAL(netgroups.size(), NUM);
+}
+
+/** Addresses on all four networks, in the measured mainnet proportions. */
+BOOST_AUTO_TEST_CASE(netsim_address_universe_mainnet_mix)
+{
+    using Net = AddressUniverse::Net;
+
+    AddressUniverse::Options opts;
+    opts.num_nodes = 4000;
+    opts.port = 8333;
+    opts.UseMainnetMix();
+    const AddressUniverse universe{opts};
+    BOOST_REQUIRE_EQUAL(universe.Size(), opts.num_nodes);
+
+    // Every network is represented, and in the proportion asked for. The
+    // apportionment is deterministic, so this is exact to within one node.
+    const uint64_t total{uint64_t{opts.weight_ipv4} + opts.weight_ipv6 + opts.weight_onion + opts.weight_i2p};
+    const auto expected{[&](uint32_t weight) {
+        return static_cast<uint32_t>(uint64_t{opts.num_nodes} * weight / total);
+    }};
+    BOOST_CHECK_LE(std::abs(int64_t{universe.CountOn(Net::IPv4)} - expected(opts.weight_ipv4)), 1);
+    BOOST_CHECK_LE(std::abs(int64_t{universe.CountOn(Net::IPv6)} - expected(opts.weight_ipv6)), 1);
+    BOOST_CHECK_LE(std::abs(int64_t{universe.CountOn(Net::Onion)} - expected(opts.weight_onion)), 1);
+    BOOST_CHECK_LE(std::abs(int64_t{universe.CountOn(Net::I2P)} - expected(opts.weight_i2p)), 1);
+
+    // The networks are interleaved rather than laid end to end. That matters
+    // because the first node ids are the listeners: a block layout would make
+    // every listener IPv4 and the privacy networks unreachable.
+    std::set<Net> among_first;
+    for (uint32_t id{0}; id < 100; ++id) among_first.insert(universe.NetOf(id));
+    BOOST_CHECK_EQUAL(among_first.size(), AddressUniverse::NUM_NETS);
+
+    std::set<CService> distinct;
+    for (uint32_t id{0}; id < opts.num_nodes; ++id) {
+        const CService& addr{universe.At(id)};
+        distinct.insert(addr);
+        BOOST_REQUIRE_MESSAGE(addr.IsRoutable(), addr.ToStringAddrPort() + " is not routable");
+        BOOST_CHECK_EQUAL(addr.GetPort(), 8333);
+
+        // Each address really is on the network it is filed under. The onion
+        // and I2P ones went through CNetAddr::SetSpecial, so Core's own parser
+        // accepted them, checksum included.
+        switch (universe.NetOf(id)) {
+        case Net::IPv4: BOOST_CHECK(addr.IsIPv4()); break;
+        case Net::IPv6: BOOST_CHECK(addr.IsIPv6()); break;
+        case Net::Onion: BOOST_CHECK(addr.IsTor()); break;
+        case Net::I2P: BOOST_CHECK(addr.IsI2P()); break;
+        }
+
+        // And it survives a round trip through its text form, which is how it
+        // reaches a log or an export.
+        CNetAddr reparsed;
+        if (addr.IsTor() || addr.IsI2P()) {
+            BOOST_REQUIRE(reparsed.SetSpecial(addr.ToStringAddr()));
+            BOOST_CHECK(reparsed == static_cast<const CNetAddr&>(addr));
+        }
+    }
+    BOOST_CHECK_EQUAL(distinct.size(), opts.num_nodes);
+}
+
+/** Netgroup occupancy drawn from the measured mainnet distribution. */
+BOOST_AUTO_TEST_CASE(netsim_address_universe_mainnet_netgroups)
+{
+    const auto netgroupman{NetGroupManager::NoAsmap()};
+    const auto count_groups{[&](const AddressUniverse& universe) {
+        std::set<std::vector<unsigned char>> groups;
+        for (uint32_t id{0}; id < universe.Size(); ++id) {
+            groups.insert(netgroupman.GetGroup(universe.At(id)));
+        }
+        return groups.size();
+    }};
+
+    AddressUniverse::Options opts;
+    opts.num_nodes = 4000;
+    opts.port = 8333;
+
+    // The historical default: one node per /16, which is the most favourable
+    // case Core's outbound diversity rule will ever see.
+    BOOST_CHECK_EQUAL(count_groups(AddressUniverse{opts}), opts.num_nodes);
+
+    // With mainnet occupancy the same population crowds into roughly half as
+    // many groups. The measured snapshot had 7,514 IPv4 nodes in 4,236 /16s,
+    // or 1.77 per group, and sampling that distribution should land near it.
+    opts.mainnet_netgroups = true;
+    const AddressUniverse crowded{opts};
+    const double per_group{double(opts.num_nodes) / double(count_groups(crowded))};
+    BOOST_TEST_MESSAGE("nodes per netgroup = " << per_group);
+    BOOST_CHECK_GT(per_group, 1.4);
+    BOOST_CHECK_LT(per_group, 2.4);
 }
 
 /** The load-bearing test: two real nodes complete a real handshake with no sockets. */
@@ -777,10 +867,10 @@ BOOST_FIXTURE_TEST_CASE(netsim_graph_export, SimTestingSetup)
     size_t inbound_sum{0};
     for (size_t i{1}; i < nodes.size(); ++i) {
         const auto row{fields(nodes[i])};
-        BOOST_REQUIRE_EQUAL(row.size(), 11U);
+        BOOST_REQUIRE_EQUAL(row.size(), 12U);
         BOOST_CHECK_EQUAL(row[0], util::ToString(i - 1));
         BOOST_CHECK_EQUAL(row[1], net.At(static_cast<uint32_t>(i - 1)).self.ToStringAddrPort());
-        inbound_sum += static_cast<size_t>(std::stoul(row[10]));
+        inbound_sum += static_cast<size_t>(std::stoul(row[11]));
     }
 
     for (size_t i{1}; i < edges.size(); ++i) {
@@ -858,6 +948,66 @@ BOOST_FIXTURE_TEST_CASE(netsim_addr_relay_reaches_the_population, SimTestingSetu
     BOOST_REQUIRE_EQUAL(lines.size(), samples.size() + 1);
     BOOST_CHECK_EQUAL(lines[0], netsim::AddrSampleColumns());
     BOOST_CHECK_EQUAL(lines[1], "0,0," + net.At(0).self.ToStringAddrPort() + ",0,0,0");
+}
+
+/** A population spread over IPv4, IPv6, Tor and I2P still forms a topology.
+ *
+ * Two parts of Core only come alive here. `MaybePickPreferredNetwork` exists
+ * to put one outbound peer on every reachable network and can never fire in a
+ * single-network population. And `CountOutboundSlots` files Tor and I2P peers
+ * under `privacy_network_peers` instead of the netgroup set, because
+ * `GetGroup` gives those addresses only four bits, so a Tor-heavy population
+ * fills its outbound slots on far fewer distinct netgroups than it has peers.
+ */
+BOOST_FIXTURE_TEST_CASE(netsim_multi_network_topology, SimTestingSetup)
+{
+    using Net = AddressUniverse::Net;
+
+    netsim::Network::Options opts;
+    opts.num_nodes = 120;
+    opts.num_listening = 40;
+    opts.bootstrap_addrs = 12;
+    opts.blocks_only = true;
+    opts.addresses.UseMainnetMix();
+    opts.addresses.mainnet_netgroups = true;
+    netsim::Network net{opts, ctx};
+
+    const auto& universe{net.Addresses()};
+    BOOST_REQUIRE_GT(universe.CountOn(Net::IPv4), 0U);
+    BOOST_REQUIRE_GT(universe.CountOn(Net::IPv6), 0U);
+    BOOST_REQUIRE_GT(universe.CountOn(Net::Onion), 0U);
+    BOOST_REQUIRE_GT(universe.CountOn(Net::I2P), 0U);
+
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        net.RunFor(std::chrono::duration_cast<SimTime>(5min));
+    }
+
+    size_t saturated{0}, isolated{0};
+    std::set<Network> peer_nets;
+    for (uint32_t id{0}; id < opts.num_nodes; ++id) {
+        const int outbound{net.At(id).connman->GetFullOutboundConnCount()};
+        if (outbound >= MAX_OUTBOUND_FULL_RELAY_CONNECTIONS) ++saturated;
+        if (outbound == 0) ++isolated;
+        for (const CNode* peer : net.At(id).connman->TestNodes()) {
+            peer_nets.insert(peer->addr.GetNetwork());
+        }
+    }
+    BOOST_TEST_MESSAGE("netgroups=" << net.NumNetgroups() << " saturated=" << saturated
+                                    << " isolated=" << isolated << " peer_nets=" << peer_nets.size());
+
+    // Connections were actually made on every one of the four networks, not
+    // merely offered.
+    BOOST_CHECK(peer_nets.contains(NET_IPV4));
+    BOOST_CHECK(peer_nets.contains(NET_IPV6));
+    BOOST_CHECK(peer_nets.contains(NET_ONION));
+    BOOST_CHECK(peer_nets.contains(NET_I2P));
+
+    BOOST_CHECK_EQUAL(isolated, 0U);
+    BOOST_CHECK_GT(saturated, opts.num_nodes / 2);
+    // Fewer distinct netgroups than nodes, which is the point of the mainnet
+    // occupancy, and nodes saturate anyway.
+    BOOST_CHECK_LT(net.NumNetgroups(), opts.num_nodes);
 }
 
 /** Without tracking, nothing is withheld and nothing is sampled. */

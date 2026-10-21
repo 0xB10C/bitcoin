@@ -5,6 +5,7 @@
 #include <netsim/network.h>
 
 #include <net.h>
+#include <netgroup.h>
 #include <netsim/pump.h>
 #include <sync.h>
 #include <threadsafety.h>
@@ -40,6 +41,9 @@ namespace {
 Network::Options ResolveOptions(Network::Options opts)
 {
     if (opts.port == 0) opts.port = GetListenPort();
+    opts.addresses.num_nodes = opts.num_nodes;
+    opts.addresses.port = opts.port;
+    opts.addresses.seed = opts.rng_seed;
     return opts;
 }
 } // namespace
@@ -47,7 +51,7 @@ Network::Options ResolveOptions(Network::Options opts)
 Network::Network(Options opts_in, const SharedContext& ctx)
     : m_opts{ResolveOptions(opts_in)},
       m_ctx{ctx},
-      m_universe{m_opts.num_nodes, m_opts.port},
+      m_universe{m_opts.addresses},
       m_clock{m_opts.start},
       m_latency{m_opts.latency},
       m_rng{m_opts.rng_seed}
@@ -449,6 +453,15 @@ void Network::ArmOpenConnTick(uint32_t id, SimTime at)
         TryOpenOutbound(id);
         ArmOpenConnTick(id, at + m_opts.open_conn_interval);
     });
+}
+
+uint32_t Network::NumNetgroups() const
+{
+    std::set<std::vector<unsigned char>> groups;
+    for (uint32_t id{0}; id < m_opts.num_nodes; ++id) {
+        groups.insert(m_ctx.netgroupman.GetGroup(m_universe.At(id)));
+    }
+    return static_cast<uint32_t>(groups.size());
 }
 
 void Network::ArmAddrSample(SimTime at)

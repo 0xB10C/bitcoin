@@ -6,6 +6,7 @@
 
 #include <net.h>
 #include <netgroup.h>
+#include <netsim/addresses.h>
 #include <netsim/network.h>
 #include <netsim/node.h>
 #include <node/connection_types.h>
@@ -52,7 +53,7 @@ int64_t RelativeMicros(SimTime when, SimTime start)
 
 std::string NodeColumns()
 {
-    return "id,address,listening,region,netgroup,addrman_total,addrman_tried,"
+    return "id,address,network,listening,region,netgroup,addrman_total,addrman_tried,"
            "out_full_relay,out_block_relay,out_feeler,inbound";
 }
 
@@ -106,6 +107,7 @@ bool WriteGraph(const Network& net, const fs::path& prefix)
 
             out << id << ','
                 << node.self.ToStringAddrPort() << ','
+                << AddressUniverse::NetName(net.Addresses().NetOf(id)) << ','
                 << (node.listening ? 1 : 0) << ','
                 << net.Latency().Region(id) << ','
                 << netgroup << ','

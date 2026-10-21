@@ -144,6 +144,11 @@ public:
          * is small, but it is also a whole-population scan that the nodes
          * cannot see, so it does not belong on a fine schedule. */
         SimTime addr_sample_interval{std::chrono::duration_cast<SimTime>(std::chrono::minutes{1})};
+        /** Network mix and netgroup shape of the population's addresses.
+         *
+         * Its `num_nodes`, `port` and `seed` are overwritten from the fields
+         * above, so there is one source of truth for each. */
+        AddressUniverse::Options addresses{};
         RegionLatency::Options latency{};
         uint256 rng_seed{uint256{1}};
     };
@@ -225,6 +230,15 @@ public:
     uint64_t Evictions() const { return m_evictions; }
     /** Connections opened, by connection type. */
     uint64_t OpenedOfType(ConnectionType type) const;
+
+    /** Distinct netgroups across the population, as Core computes them.
+     *
+     * Worth reporting rather than assuming. A node needs ten distinct
+     * netgroups among its candidates to fill ten outbound slots, except that
+     * Tor and I2P peers are exempt, so a Tor-heavy population saturates on
+     * far fewer groups than it appears to have.
+     */
+    uint32_t NumNetgroups() const;
 
     /** The nodes whose addresses were withheld from the bootstrap seeding. */
     const std::vector<uint32_t>& TrackedNodes() const { return m_tracked; }

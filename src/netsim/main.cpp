@@ -18,6 +18,7 @@
 #include <chainparams.h>
 #include <net.h>
 #include <netgroup.h>
+#include <netsim/addresses.h>
 #include <netsim/clock.h>
 #include <netsim/export.h>
 #include <netsim/latency.h>
@@ -58,6 +59,8 @@ struct Args {
     uint32_t tracked{0};
     uint32_t sample_sec{60};
     std::string addr_csv;
+    bool mainnet_mix{false};
+    bool mainnet_netgroups{false};
 };
 
 void PrintUsage()
@@ -82,7 +85,12 @@ void PrintUsage()
                  "                   they can spread, and measure how far they get\n"
                  "  --sample-sec=N   how often to count who holds a tracked address\n"
                  "                   (default 60)\n"
-                 "  --addr-csv=FILE  write the coverage samples there\n");
+                 "  --addr-csv=FILE  write the coverage samples there\n"
+                 "  --mainnet-mix    spread addresses over IPv4, IPv6, Tor and I2P in the\n"
+                 "                   measured mainnet proportions instead of IPv4 only\n"
+                 "  --mainnet-groups draw /16 and /32 occupancy from the measured mainnet\n"
+                 "                   distribution instead of one node per netgroup\n"
+                 "  --mainnet        both of the above\n");
 }
 
 bool ParseUint(std::string_view text, uint32_t& out)
@@ -99,6 +107,13 @@ bool ParseArgs(int argc, char* argv[], Args& args)
 
         if (arg == "--blocksonly") {
             args.blocks_only = true;
+        } else if (arg == "--mainnet-mix") {
+            args.mainnet_mix = true;
+        } else if (arg == "--mainnet-groups") {
+            args.mainnet_netgroups = true;
+        } else if (arg == "--mainnet") {
+            args.mainnet_mix = true;
+            args.mainnet_netgroups = true;
         } else if (arg == "--csv") {
             args.csv = true;
         } else if (arg == "--csv-header") {
@@ -198,6 +213,8 @@ int main(int argc, char* argv[])
     opts.service_interval = std::chrono::duration_cast<netsim::SimTime>(std::chrono::milliseconds{args.service_ms});
     opts.num_tracked = args.tracked;
     opts.addr_sample_interval = std::chrono::duration_cast<netsim::SimTime>(std::chrono::seconds{args.sample_sec});
+    if (args.mainnet_mix) opts.addresses.UseMainnetMix();
+    opts.addresses.mainnet_netgroups = args.mainnet_netgroups;
 
     netsim::Network net{opts, shared};
     {
@@ -261,6 +278,14 @@ int main(int argc, char* argv[])
 
     std::printf("population      %u nodes, %u listening%s\n", args.nodes, args.listeners,
                 args.blocks_only ? ", blocks-only" : "");
+    {
+        using Net = netsim::AddressUniverse::Net;
+        const auto& universe{net.Addresses()};
+        std::printf("addresses       %u ipv4, %u ipv6, %u onion, %u i2p, in %u netgroups\n",
+                    universe.CountOn(Net::IPv4), universe.CountOn(Net::IPv6),
+                    universe.CountOn(Net::Onion), universe.CountOn(Net::I2P),
+                    net.NumNetgroups());
+    }
     std::printf("simulated       %u minutes\n", args.minutes);
     std::printf("connections     %llu opened, %llu still up, %llu saturated, %llu isolated\n",
                 static_cast<unsigned long long>(net.TotalOpened()),
@@ -268,7 +293,7 @@ int main(int argc, char* argv[])
                 static_cast<unsigned long long>(saturated), static_cast<unsigned long long>(isolated));
     std::printf("link slots      %zu peak concurrent, %llu closed and recycled\n",
                 net.LinkSlots(), static_cast<unsigned long long>(net.ClosedLinks()));
-    std::printf("addresses       %llu held, %llu of them unreachable\n",
+    std::printf("addrman         %llu held, %llu of them unreachable\n",
                 static_cast<unsigned long long>(addrman_total),
                 static_cast<unsigned long long>(known_strangers));
     if (!net.TrackedNodes().empty()) {
