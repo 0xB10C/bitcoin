@@ -212,12 +212,23 @@ public:
         int32_t from{-1};
     };
 
-    /** When one node first held one tracked address.
+    /** How an address got to a node. See `AddrArrival::path`. */
+    enum class AddrPath {
+        /** Forwarded by `RelayAddress`, which is what the ten-minute
+         *  freshness gate and the two-peer cap apply to. */
+        Pushed,
+        /** Served in bulk out of a peer's table, answering GETADDR. Not
+         *  age-limited, so it keeps working long after no push can. */
+        Pulled,
+    };
+
+    /** When one node was first told one tracked address, and by whom.
      *
-     * The address-relay counterpart of `BlockArrival`, and the same shape, so
-     * the two can be drawn the same way. Resolution is the sampling interval
-     * rather than the instant itself, which is ample: addresses spread over
-     * minutes where blocks spread over milliseconds.
+     * The address-relay counterpart of `BlockArrival`, and now the same kind
+     * of evidence: read off the ADDR message as it is handled, so the instant
+     * is the real one and the sender is exact. It used to be recovered by
+     * polling AddrMan, which could only place an arrival within the sampling
+     * interval and could not tell the two paths apart at all.
      */
     struct AddrArrival {
         SimTime at{};
@@ -225,14 +236,17 @@ public:
         uint32_t node{0};
         /** The tracked node whose address it is. */
         uint32_t address_of{0};
-        /** The node that told this one about it, or -1 when unknown.
-         *
-         * AddrMan's own record: the peer it first heard the address from,
-         * which is one edge of the relay tree. Unlike a block's `from` this is
-         * not the instant of delivery but the holder's stored attribution, so
-         * it survives the sampling delay. -1 when `record_addr_sources` is
-         * off, and when the stored source is not a node of this network. */
+        /** The peer that sent it, or -1 if that peer is not a node here. */
         int32_t from{-1};
+        /** Which of the two mechanisms delivered it.
+         *
+         * Taken from the size of the message it arrived in, which is the same
+         * test `ProcessAddrs` itself applies: at most ten addresses is a
+         * forwarded announcement, more than that is a table dump. */
+        AddrPath path{AddrPath::Pushed};
+        /** Whether this node went on to forward it. False once the
+         *  announcement is past the ten-minute gate. */
+        bool relayed{false};
     };
 
     /** How widely one tracked address had spread, at one instant. */
@@ -364,8 +378,8 @@ private:
     void ArmMineTick(SimTime at);
     /** Count, for each tracked address, how many nodes now hold it. */
     void SampleAddrCoverage();
-    /** Which node told `holder` about `addr`, per AddrMan's own record. */
-    int32_t AddrSourceOf(uint32_t holder, const CAddress& addr) const;
+    /** One address arriving at one node, straight off the message. */
+    void NoteAddrReceived(uint32_t receiver, const AddrReceipt& receipt);
 
     const Options m_opts;
     const SharedContext m_ctx;
@@ -386,11 +400,13 @@ private:
     std::vector<size_t> m_free_links;
     std::vector<std::vector<size_t>> m_links_by_node;
     std::map<CService, uint32_t> m_listeners;
-    /** Every node keyed by host, because AddrMan stores a source as a bare
-     *  `CNetAddr`. Not just the listeners: a node that only dials out is still
-     *  the source its peers record for what it relays. Only filled when
-     *  sources are recorded. */
+    /** Every node keyed by host, for turning the address of the peer that
+     *  sent a message back into a node id. Not just the listeners: a node that
+     *  only dials out still sends ADDR messages. */
     std::map<CNetAddr, uint32_t> m_nodes_by_host;
+    /** The tracked addresses, keyed by host, so the arrival hook can decide in
+     *  one lookup whether an address is one it cares about. */
+    std::map<CNetAddr, uint32_t> m_tracked_by_host;
     std::vector<uint32_t> m_tracked;
     std::vector<AddrSample> m_addr_samples;
 

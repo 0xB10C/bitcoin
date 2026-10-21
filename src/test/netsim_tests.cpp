@@ -1017,8 +1017,15 @@ BOOST_FIXTURE_TEST_CASE(netsim_addr_sources_form_a_relay_tree, SimTestingSetup)
 
     size_t attributed{0};
     size_t from_the_owner{0};
+    size_t pushed{0};
+    size_t pulled{0};
     for (const auto& a : arrivals) {
         BOOST_CHECK_EQUAL(a.address_of, 0U);
+        if (a.path == netsim::Network::AddrPath::Pushed) ++pushed; else ++pulled;
+        // Nothing can be forwarded that was not itself forwarded to us: a
+        // table dump is never passed on, because ProcessAddrs requires a
+        // message of ten addresses or fewer.
+        if (a.relayed) BOOST_CHECK(a.path == netsim::Network::AddrPath::Pushed);
         if (a.from < 0) continue; // a source outside the population
         ++attributed;
         const uint32_t from{static_cast<uint32_t>(a.from)};
@@ -1026,8 +1033,10 @@ BOOST_FIXTURE_TEST_CASE(netsim_addr_sources_form_a_relay_tree, SimTestingSetup)
         BOOST_CHECK_NE(from, a.node);
         BOOST_CHECK_LT(from, opts.num_nodes);
         if (from == 0) {
-            // The owner announcing itself, which is the root of the tree.
+            // The owner announcing itself, which is the root of the tree. A
+            // self-announcement is always its own small message.
             ++from_the_owner;
+            BOOST_CHECK(a.path == netsim::Network::AddrPath::Pushed);
             continue;
         }
         // Anyone else can only pass on an address they already had, and they
@@ -1038,11 +1047,25 @@ BOOST_FIXTURE_TEST_CASE(netsim_addr_sources_form_a_relay_tree, SimTestingSetup)
     }
 
     BOOST_TEST_MESSAGE("arrivals=" << arrivals.size() << " attributed=" << attributed
-                                   << " from_the_owner=" << from_the_owner);
-    // The lookup works at all, and the spread is rooted at the node whose
+                                   << " from_the_owner=" << from_the_owner
+                                   << " pushed=" << pushed << " pulled=" << pulled);
+    // The hook fires at all, and the spread is rooted at the node whose
     // address it is rather than appearing from nowhere.
     BOOST_CHECK_GT(attributed, 0U);
     BOOST_CHECK_GT(from_the_owner, 0U);
+    // Every arrival is one or the other, and the forward path is the one that
+    // carries a withheld address at the start.
+    BOOST_CHECK_EQUAL(pushed + pulled, arrivals.size());
+    BOOST_CHECK_GT(pushed, 0U);
+
+    // Timing now comes off the message rather than the sampler, so arrivals
+    // are not quantised to the sampling interval. With a 30 s interval and a
+    // spread that finishes in minutes, polling put every arrival on one of a
+    // handful of instants; these should be spread over many more.
+    std::set<int64_t> instants;
+    for (const auto& a : arrivals) instants.insert(a.at.count());
+    BOOST_TEST_MESSAGE("distinct arrival instants=" << instants.size());
+    BOOST_CHECK_GT(instants.size(), arrivals.size() / 4);
 
     // And the writer carries the column.
     const fs::path path{m_path_root / "addr-arrivals.csv"};
@@ -1052,7 +1075,7 @@ BOOST_FIXTURE_TEST_CASE(netsim_addr_sources_form_a_relay_tree, SimTestingSetup)
     std::string header;
     BOOST_REQUIRE(std::getline(in, header));
     BOOST_CHECK_EQUAL(header, netsim::AddrArrivalColumns());
-    BOOST_CHECK(header.ends_with(",from"));
+    BOOST_CHECK(header.ends_with(",path,relayed"));
 }
 
 /** A population spread over IPv4, IPv6, Tor and I2P still forms a topology.

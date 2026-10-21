@@ -6041,9 +6041,15 @@ void PeerManagerImpl::ProcessAddrs(std::string_view msg_type, CNode& pfrom, Peer
         }
         ++num_proc;
         const bool reachable{g_reachable_nets.Contains(addr)};
+        bool relayed{false};
         if (addr.nTime > current_time - 10min && vAddr.size() <= 10 && addr.IsRoutable()) {
             // Relay to a limited number of other nodes
             RelayAddress(pfrom.GetId(), addr, reachable);
+            relayed = true;
+        }
+        // Test-only, and empty in every build that does not ask for it.
+        if (m_opts.on_addr_received) {
+            m_opts.on_addr_received(AddrReceipt{addr, pfrom.addr, vAddr.size(), relayed});
         }
         // Do not store addresses outside our network
         if (reachable) {

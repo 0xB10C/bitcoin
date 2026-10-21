@@ -119,10 +119,16 @@ Network::Network(Options opts_in, const SharedContext& ctx)
         if (node_opts.own_chain) {
             node_opts.datadir = m_opts.datadir / fs::u8path("node" + util::ToString(id));
         }
+        if (m_opts.record_addr_sources) {
+            node_opts.on_addr_received = [this, id](const AddrReceipt& receipt) {
+                NoteAddrReceived(id, receipt);
+            };
+        }
         m_nodes.push_back(MakeNode(m_ctx, node_opts));
         if (listening) m_listeners.emplace(m_universe.At(id), id);
         if (m_opts.record_addr_sources) {
             m_nodes_by_host.emplace(CNetAddr{m_universe.At(id)}, id);
+            if (id < m_opts.num_tracked) m_tracked_by_host.emplace(CNetAddr{m_universe.At(id)}, id);
         }
 
         // Stagger the first tick of each kind across its interval. Without
@@ -613,21 +619,30 @@ void Network::ArmMineTick(SimTime at)
     });
 }
 
-int32_t Network::AddrSourceOf(uint32_t holder, const CAddress& addr) const
+void Network::NoteAddrReceived(uint32_t receiver, const AddrReceipt& receipt)
 {
-    // `FindAddressEntry` answers where the entry sits, not where it came from,
-    // and the source lives on `AddrInfo`, which only `GetEntries` hands out.
-    // So this is a walk of the holder's tables. Both of them: an address
-    // promoted to `tried` keeps the source it was created with.
-    const AddrMan& table{*At(holder).addrman};
-    for (const bool tried : {false, true}) {
-        for (const auto& [info, pos] : table.GetEntries(tried)) {
-            if (static_cast<const CService&>(info) != static_cast<const CService&>(addr)) continue;
-            const auto it{m_nodes_by_host.find(info.source)};
-            return it == m_nodes_by_host.end() ? -1 : static_cast<int32_t>(it->second);
-        }
-    }
-    return -1;
+    // Called for every address in every ADDR message in the run, so it has to
+    // be cheap: one lookup to reject the overwhelming majority.
+    const auto tracked{m_tracked_by_host.find(receipt.addr)};
+    if (tracked == m_tracked_by_host.end()) return;
+    if (tracked->second == receiver) return; // its own address is not news
+
+    const size_t index{tracked->second};
+    m_addr_seen.resize(m_tracked.size());
+    if (index >= m_addr_seen.size()) return;
+    m_addr_seen[index].resize(m_opts.num_nodes, false);
+    if (m_addr_seen[index][receiver]) return; // only the first time counts
+    m_addr_seen[index][receiver] = true;
+
+    const auto sender{m_nodes_by_host.find(receipt.from)};
+    // `ProcessAddrs` forwards at most ten addresses at a time; anything larger
+    // is a table dump answering GETADDR. The same test the code uses.
+    m_addr_arrivals.push_back({m_clock.Now(), receiver, static_cast<uint32_t>(index),
+                               sender == m_nodes_by_host.end()
+                                   ? -1
+                                   : static_cast<int32_t>(sender->second),
+                               receipt.batch <= 10 ? AddrPath::Pushed : AddrPath::Pulled,
+                               receipt.relayed});
 }
 
 void Network::SampleAddrCoverage()
@@ -635,10 +650,8 @@ void Network::SampleAddrCoverage()
     constexpr auto SERVICES{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
     const SimTime now{m_clock.Now()};
 
-    m_addr_seen.resize(m_tracked.size());
     for (size_t t{0}; t < m_tracked.size(); ++t) {
         const uint32_t tracked{m_tracked[t]};
-        m_addr_seen[t].resize(m_opts.num_nodes, false);
         const CAddress addr{m_universe.At(tracked), SERVICES};
         AddrSample sample;
         sample.at = now;
@@ -651,14 +664,11 @@ void Network::SampleAddrCoverage()
             const auto found{At(id).addrman->FindAddressEntry(addr)};
             if (!found) continue;
             ++sample.holders;
-            // First time this node has held it, so it is an arrival. The one
-            // place the table walk for the source is affordable: once per
-            // (address, node), not once per sample.
-            if (!m_addr_seen[t][id]) {
-                m_addr_seen[t][id] = true;
-                const int32_t from{m_opts.record_addr_sources ? AddrSourceOf(id, addr) : -1};
-                m_addr_arrivals.push_back({now, id, tracked, from});
-            }
+            // Arrivals are not recorded here any more: an ADDR message says
+            // exactly when and from whom, where polling could only place an
+            // arrival somewhere inside the sampling interval. See
+            // `NoteAddrReceived`. What polling is still good for is the
+            // standing picture below, which no message carries.
             if (found->tried) {
                 ++sample.in_tried;
                 ++sample.multiplicity;

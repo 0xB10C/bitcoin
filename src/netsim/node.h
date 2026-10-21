@@ -13,6 +13,7 @@
 #include <util/fs.h>
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 class ChainstateManager;
@@ -134,6 +135,13 @@ struct NodeOptions {
     int max_automatic_connections{DEFAULT_MAX_PEER_CONNECTIONS};
     /** Give this node its own ChainstateManager. See `SimNode::own_chainman`. */
     bool own_chain{false};
+    /** Called for each address this node accepts from an ADDR message.
+     *
+     * The only way to observe address relay as it happens rather than by
+     * polling AddrMan afterwards, and the only way to tell a forwarded
+     * announcement from a bulk GETADDR reply. See
+     * `PeerManager::Options::on_addr_received`. */
+    std::function<void(const AddrReceipt&)> on_addr_received{};
     /** Where this node's block files go. Only read when `own_chain` is set.
      *
      * The databases are in memory, but BlockManager still wants a directory

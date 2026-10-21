@@ -19,6 +19,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -87,6 +88,25 @@ struct PeerManagerInfo {
     InvBucketInfo outbound_bucket;
 };
 
+/** One address arriving in one ADDR or ADDRV2 message.
+ *
+ * See `PeerManager::Options::on_addr_received`. Everything here is read off
+ * the message as it is handled, so nothing is inferred after the fact.
+ */
+struct AddrReceipt {
+    //! The address that arrived, carrying the stamp the sender forwarded.
+    const CAddress& addr;
+    //! The peer that sent it.
+    const CAddress& from;
+    //! How many addresses that message carried. This is what separates the
+    //! two paths: `RelayAddress` forwards at most ten at a time, while a
+    //! GETADDR reply is a bulk sample of a whole table.
+    size_t batch;
+    //! Whether this node went on to forward it. False once the announcement
+    //! is over ten minutes old, which is what ends the forward path.
+    bool relayed;
+};
+
 class PeerManager : public CValidationInterface, public NetEventsInterface
 {
 public:
@@ -129,6 +149,20 @@ public:
         bool private_broadcast{DEFAULT_PRIVATE_BROADCAST};
         //! Maximum per-second rate for sending transaction inventory to peers.
         unsigned int tx_send_rate{DEFAULT_TX_SEND_RATE};
+        //! Called for each address this node accepts from an ADDR or ADDRV2
+        //! message (this is a test-only option; empty by default and then
+        //! never called).
+        //!
+        //! Addresses reach a node two ways that behave nothing alike. They are
+        //! forwarded by RelayAddress to at most two peers, and only while the
+        //! announcement is under ten minutes old; or they are served in bulk
+        //! out of a peer's table in answer to GETADDR, at any age. Observing
+        //! the spread from AddrMan afterwards cannot separate those, and can
+        //! only see it as often as it polls. This fires at the instant the
+        //! message is processed, so a simulation can record the real arrival
+        //! and tell the two paths apart by `batch`, which is the condition the
+        //! code itself uses.
+        std::function<void(const AddrReceipt&)> on_addr_received{};
     };
 
     static std::unique_ptr<PeerManager> make(CConnman& connman, AddrMan& addrman,

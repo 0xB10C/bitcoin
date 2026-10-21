@@ -199,6 +199,7 @@ std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, const NodeOptions& o
     // such gate, so the gate follows whether tip notifications are published
     // at all.
     peerman_opts.disable_chain_sync_timeout = Signals(ctx, *node) == nullptr;
+    peerman_opts.on_addr_received = opts.on_addr_received;
     // banman is null on purpose: a per-node BanMan would cost 539 KiB for its
     // discouragement filter, and nothing here misbehaves.
     node->peerman = PeerManager::make(*node->connman, *node->addrman, /*banman=*/nullptr,
