@@ -17,7 +17,9 @@
 class ChainstateManager;
 class CTxMemPool;
 class NetGroupManager;
+class ValidationSignals;
 namespace node {
+class BlockTemplateManager;
 class Warnings;
 } // namespace node
 
@@ -60,6 +62,10 @@ struct SimNode {
      *  because FastRandomContext is neither copyable nor movable. */
     std::unique_ptr<FastRandomContext> rng;
 
+    /** Where this node's PeerManager is subscribed, so the destructor can
+     *  unsubscribe it. Null when tip notifications are not published. */
+    ValidationSignals* subscribed{nullptr};
+
     SimNode() = default;
     ~SimNode();
     SimNode(const SimNode&) = delete;
@@ -72,6 +78,15 @@ struct SharedContext {
     CTxMemPool& mempool;
     node::Warnings& warnings;
     const NetGroupManager& netgroupman;
+    /** Where block-tip notifications are published.
+     *
+     * Every node's PeerManager subscribes, exactly as `init.cpp` does with the
+     * single production one, so a new block reaches every node's announcement
+     * path. Null leaves the nodes unsubscribed, in which case nothing is ever
+     * announced and the chain-sync timer in §8 has to be gated off instead. */
+    ValidationSignals* validation_signals{nullptr};
+    /** Used by `Chain` to mine. Null means the chain cannot be extended. */
+    node::BlockTemplateManager* block_templates{nullptr};
 };
 
 /** Build one node, with its own AddrMan keyspace and its own CConnman seeds.

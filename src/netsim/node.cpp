@@ -64,6 +64,11 @@ SimNode::~SimNode()
     // and the AddrMan has to outlive both because CConnman holds a reference
     // to it. Tearing down explicitly rather than relying on member
     // declaration order keeps that from breaking silently on a reorder.
+    // Unsubscribe before the PeerManager goes away, or the signal list keeps a
+    // dangling pointer and the next block tip calls into freed memory.
+    if (subscribed != nullptr && peerman != nullptr) {
+        subscribed->UnregisterValidationInterface(peerman.get());
+    }
     connman.reset();
     peerman.reset();
     addrman.reset();
@@ -105,12 +110,13 @@ std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const C
     // every node on the same schedule and an OS-seeded one would make the run
     // unrepeatable.
     peerman_opts.rng_seed = DeriveHash(SEED_PEERMAN, id);
-    // No node here ever produces a block, so no node ever announces one, and
-    // ConsiderEviction would disconnect every node's headers-sync peer every
-    // twenty minutes. In production blocks keep arriving inside that window.
-    // Leaving it on caps a usable run at twenty simulated minutes, which is
-    // shorter than the address-relay behaviour under study.
-    peerman_opts.disable_chain_sync_timeout = true;
+    // With no block ever mined, no node announces one, and ConsiderEviction
+    // disconnects every node's headers-sync peer every twenty minutes. That is
+    // Core behaving correctly given a static chain, and it caps a usable run
+    // at twenty simulated minutes. A run with a chain that advances needs no
+    // such gate, so the gate follows whether tip notifications are published
+    // at all.
+    peerman_opts.disable_chain_sync_timeout = ctx.validation_signals == nullptr;
     // banman is null on purpose: a per-node BanMan would cost 539 KiB for its
     // discouragement filter, and nothing here misbehaves.
     node->peerman = PeerManager::make(*node->connman, *node->addrman, /*banman=*/nullptr,
@@ -137,6 +143,14 @@ std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const C
     // uses, so comparisons against GetTime<microseconds>() line up.
     node->rng = std::make_unique<FastRandomContext>(DeriveHash(SEED_SCHEDULER, id));
     node->timers.Arm(GetTime<std::chrono::microseconds>(), *node->rng);
+
+    // Subscribe to tip notifications, as init.cpp does for the single
+    // production PeerManager. This is what makes a new block reach every
+    // node's announcement path rather than only the miner's.
+    if (ctx.validation_signals != nullptr) {
+        ctx.validation_signals->RegisterValidationInterface(node->peerman.get());
+        node->subscribed = ctx.validation_signals;
+    }
 
     return node;
 }

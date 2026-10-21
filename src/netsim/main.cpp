@@ -19,6 +19,7 @@
 #include <net.h>
 #include <netgroup.h>
 #include <netsim/addresses.h>
+#include <netsim/chain.h>
 #include <netsim/clock.h>
 #include <netsim/export.h>
 #include <netsim/latency.h>
@@ -61,6 +62,9 @@ struct Args {
     std::string addr_csv;
     bool mainnet_mix{false};
     bool mainnet_netgroups{false};
+    uint32_t chain{0};
+    uint32_t block_sec{600};
+    bool mine{false};
 };
 
 void PrintUsage()
@@ -90,7 +94,11 @@ void PrintUsage()
                  "                   measured mainnet proportions instead of IPv4 only\n"
                  "  --mainnet-groups draw /16 and /32 occupancy from the measured mainnet\n"
                  "                   distribution instead of one node per netgroup\n"
-                 "  --mainnet        both of the above\n");
+                 "  --mainnet        both of the above\n"
+                 "  --chain=N        build a chain of N blocks before the run, so the\n"
+                 "                   nodes start out with something to announce\n"
+                 "  --mine           mine a block every --block-sec of simulated time\n"
+                 "  --block-sec=N    simulated seconds between blocks (default 600)\n");
 }
 
 bool ParseUint(std::string_view text, uint32_t& out)
@@ -114,6 +122,12 @@ bool ParseArgs(int argc, char* argv[], Args& args)
         } else if (arg == "--mainnet") {
             args.mainnet_mix = true;
             args.mainnet_netgroups = true;
+        } else if (arg == "--mine") {
+            args.mine = true;
+        } else if (arg.starts_with("--chain=") && ParseUint(arg.substr(8), value)) {
+            args.chain = value;
+        } else if (arg.starts_with("--block-sec=") && ParseUint(arg.substr(12), value) && value > 0) {
+            args.block_sec = value;
         } else if (arg == "--csv") {
             args.csv = true;
         } else if (arg == "--csv-header") {
@@ -193,12 +207,35 @@ int main(int argc, char* argv[])
     auto context{MakeNoLogFileContext<TestingSetup>(ChainType::REGTEST, setup_opts)};
 
     // Self-announcement is gated on not being in initial block download, and
-    // it is the only thing that propagates an address more than one hop.
-    static_cast<TestChainstateManager&>(*context->m_node.chainman).JumpOutOfIbd();
+    // it is the only thing that propagates an address more than one hop. A run
+    // with a chain leaves initial block download on its own, because its tip
+    // lands on the instant the run starts; one without needs to be told.
+    if (args.chain == 0) {
+        static_cast<TestChainstateManager&>(*context->m_node.chainman).JumpOutOfIbd();
+    }
 
     auto netgroupman{NetGroupManager::NoAsmap()};
-    const netsim::SharedContext shared{*context->m_node.chainman, *context->m_node.mempool,
-                                       *context->m_node.warnings, netgroupman};
+    netsim::SharedContext shared{*context->m_node.chainman, *context->m_node.mempool,
+                                 *context->m_node.warnings, netgroupman};
+    // Only when there is a chain. Subscribing ten thousand PeerManagers to tip
+    // notifications costs nothing on a chain that never moves, but it is also
+    // pointless, and leaving them unsubscribed is what selects the
+    // chain-sync-timeout gate in MakeNode.
+    if (args.chain > 0 || args.mine) {
+        shared.validation_signals = context->m_node.validation_signals.get();
+        shared.block_templates = context->m_node.block_template_manager.get();
+    }
+
+    // Built here rather than left to the Network, so that the block index,
+    // the block files and LevelDB's caches for a thousand blocks sit outside
+    // the memory baseline below instead of being charged to the nodes. The
+    // Network's own prefill then finds the chain already at height and does
+    // nothing.
+    const netsim::SimTime sim_start{netsim::Network::Options{}.start};
+    if (args.chain > 0) {
+        netsim::Chain{shared}.Prefill(args.chain, std::chrono::seconds{args.block_sec},
+                                      std::chrono::duration_cast<std::chrono::seconds>(sim_start));
+    }
 
     // Read before the population exists, so the host process and its shared
     // chainstate are excluded from the delta.
@@ -215,6 +252,9 @@ int main(int argc, char* argv[])
     opts.addr_sample_interval = std::chrono::duration_cast<netsim::SimTime>(std::chrono::seconds{args.sample_sec});
     if (args.mainnet_mix) opts.addresses.UseMainnetMix();
     opts.addresses.mainnet_netgroups = args.mainnet_netgroups;
+    opts.chain.initial_blocks = args.chain;
+    opts.chain.spacing = std::chrono::seconds{args.block_sec};
+    opts.mine = args.mine;
 
     netsim::Network net{opts, shared};
     {
@@ -287,6 +327,10 @@ int main(int argc, char* argv[])
                     net.NumNetgroups());
     }
     std::printf("simulated       %u minutes\n", args.minutes);
+    if (args.chain > 0 || args.mine) {
+        std::printf("chain           height %d, %llu blocks mined during the run\n",
+                    net.ChainHeight(), static_cast<unsigned long long>(net.GetChain().Mined()));
+    }
     std::printf("connections     %llu opened, %llu still up, %llu saturated, %llu isolated\n",
                 static_cast<unsigned long long>(net.TotalOpened()),
                 static_cast<unsigned long long>(net.LiveLinks()),

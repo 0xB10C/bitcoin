@@ -8,6 +8,7 @@
 #include <net.h>
 #include <netaddress.h>
 #include <netsim/addresses.h>
+#include <netsim/chain.h>
 #include <netsim/clock.h>
 #include <netsim/eventqueue.h>
 #include <netsim/latency.h>
@@ -149,6 +150,17 @@ public:
          * Its `num_nodes`, `port` and `seed` are overwritten from the fields
          * above, so there is one source of truth for each. */
         AddressUniverse::Options addresses{};
+        /** The shared chain: how long it starts out and how fast it grows.
+         *
+         * Needs `SharedContext::block_templates` and, to be announced at all,
+         * `SharedContext::validation_signals`. */
+        Chain::Options chain{};
+        /** Mine a block every `chain.spacing` of simulated time.
+         *
+         * Off by default so that a run measuring topology or addresses pays
+         * nothing for it. On, it is what keeps `ConsiderEviction` satisfied
+         * without gating the check off. */
+        bool mine{false};
         RegionLatency::Options latency{};
         uint256 rng_seed{uint256{1}};
     };
@@ -240,6 +252,10 @@ public:
      */
     uint32_t NumNetgroups() const;
 
+    /** The chain the whole population shares. */
+    const Chain& GetChain() const { return m_chain; }
+    int ChainHeight() const { return m_chain.Height(); }
+
     /** The nodes whose addresses were withheld from the bootstrap seeding. */
     const std::vector<uint32_t>& TrackedNodes() const { return m_tracked; }
     /** Every coverage sample taken over the run, in time order. */
@@ -266,6 +282,7 @@ private:
     void ArmServiceTick(uint32_t id, SimTime at);
     void ArmOpenConnTick(uint32_t id, SimTime at);
     void ArmAddrSample(SimTime at);
+    void ArmMineTick(SimTime at);
     /** Count, for each tracked address, how many nodes now hold it. */
     void SampleAddrCoverage();
 
@@ -275,6 +292,7 @@ private:
     SimClock m_clock;
     EventQueue m_queue;
     RegionLatency m_latency;
+    Chain m_chain;
     FastRandomContext m_rng;
 
     std::vector<std::unique_ptr<SimNode>> m_nodes;

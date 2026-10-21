@@ -54,10 +54,18 @@ Network::Network(Options opts_in, const SharedContext& ctx)
       m_universe{m_opts.addresses},
       m_clock{m_opts.start},
       m_latency{m_opts.latency},
+      m_chain{m_ctx},
       m_rng{m_opts.rng_seed}
 {
     Assert(m_opts.num_listening <= m_opts.num_nodes);
     Assert(m_opts.num_tracked <= m_opts.num_listening);
+
+    // Before any node exists, so the nodes come up on a chain that is already
+    // there rather than watching it appear. The tip lands on the instant the
+    // run starts, which is also what keeps them out of initial block download.
+    m_chain.Prefill(m_opts.chain.initial_blocks, m_opts.chain.spacing,
+                    std::chrono::duration_cast<std::chrono::seconds>(m_opts.start));
+    m_clock.AdvanceTo(m_opts.start);
 
     m_tracked.reserve(m_opts.num_tracked);
     for (uint32_t id{0}; id < m_opts.num_tracked; ++id) m_tracked.push_back(id);
@@ -88,6 +96,10 @@ Network::Network(Options opts_in, const SharedContext& ctx)
     if (!m_tracked.empty() && m_opts.addr_sample_interval.count() > 0) {
         SampleAddrCoverage();
         ArmAddrSample(m_clock.Now() + m_opts.addr_sample_interval);
+    }
+
+    if (m_opts.mine) {
+        ArmMineTick(m_clock.Now() + std::chrono::duration_cast<SimTime>(m_opts.chain.spacing));
     }
 }
 
@@ -470,6 +482,20 @@ void Network::ArmAddrSample(SimTime at)
     m_queue.Post(at, [this, at] {
         SampleAddrCoverage();
         ArmAddrSample(at + m_opts.addr_sample_interval);
+    });
+}
+
+void Network::ArmMineTick(SimTime at)
+{
+    const auto spacing{std::chrono::duration_cast<SimTime>(m_opts.chain.spacing)};
+    if (spacing <= SimTime::zero()) return;
+    m_queue.Post(at, [this, at, spacing] {
+        // One block per interval, from nobody in particular. Which node mined
+        // it is not expressible while the chainstate is shared: see chain.h.
+        // What matters for the peers is that the tip moved, and that every
+        // node's PeerManager heard about it.
+        Assert(m_chain.MineOne());
+        ArmMineTick(at + spacing);
     });
 }
 

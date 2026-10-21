@@ -85,6 +85,26 @@ struct SimTestingSetup : public TestingSetup {
     }
 };
 
+/** SimTestingSetup plus the pieces a run with a real chain needs.
+ *
+ * Publishing tip notifications is what makes a new block reach every node's
+ * announcement path, and it is also what tells MakeNode not to gate off the
+ * chain-sync timeout. No JumpOutOfIbd() here: a chain whose tip lands on the
+ * start of the run leaves initial block download on its own, which is the
+ * behaviour under test.
+ */
+struct SimChainTestingSetup : public TestingSetup {
+    NetGroupManager netgroupman{NetGroupManager::NoAsmap()};
+    netsim::SharedContext ctx;
+
+    SimChainTestingSetup()
+        : TestingSetup{ChainType::REGTEST, SimTestOpts()},
+          ctx{*m_node.chainman, *m_node.mempool, *m_node.warnings, netgroupman,
+              m_node.validation_signals.get(), m_node.block_template_manager.get()}
+    {
+    }
+};
+
 /** Shuttle bytes between the two ends of one connection until both go quiet.
  *
  * Returns the number of rounds used. A round is one pass of "let both sides
@@ -1008,6 +1028,84 @@ BOOST_FIXTURE_TEST_CASE(netsim_multi_network_topology, SimTestingSetup)
     // Fewer distinct netgroups than nodes, which is the point of the mainnet
     // occupancy, and nodes saturate anyway.
     BOOST_CHECK_LT(net.NumNetgroups(), opts.num_nodes);
+}
+
+/** A chain that advances keeps peers from being shed every twenty minutes.
+ *
+ * `ConsiderEviction` disconnects an outbound peer that has not announced a
+ * chain as long as ours within `CHAIN_SYNC_TIMEOUT`, which is 20 minutes. On a
+ * static chain nobody ever announces anything, so every node sheds its
+ * headers-sync peers on a twenty-minute cycle. This is the honest fix rather
+ * than the gate: give them a tip that moves, and the announcements that follow
+ * satisfy the timer on their own.
+ */
+BOOST_FIXTURE_TEST_CASE(netsim_mining_satisfies_the_chain_sync_timer, SimChainTestingSetup)
+{
+    netsim::Network::Options opts;
+    opts.num_nodes = 40;
+    opts.num_listening = 16;
+    opts.bootstrap_addrs = 8;
+    opts.blocks_only = true;
+    opts.chain.initial_blocks = 20;
+    opts.mine = true;
+    netsim::Network net{opts, ctx};
+
+    // The chain was built before any node existed, and its tip landed on the
+    // instant the run starts, which is what keeps the nodes out of initial
+    // block download without being told.
+    BOOST_REQUIRE_EQUAL(net.ChainHeight(), 20);
+    BOOST_REQUIRE_EQUAL(net.GetChain().Mined(), 0U);
+    BOOST_CHECK(!WITH_LOCK(cs_main, return m_node.chainman->IsInitialBlockDownload()));
+
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        // Well past the twenty-minute timeout, which is the whole point.
+        net.RunFor(std::chrono::duration_cast<SimTime>(50min));
+    }
+
+    // Five blocks at the ten-minute default.
+    BOOST_CHECK_EQUAL(net.GetChain().Mined(), 5U);
+    BOOST_CHECK_EQUAL(net.ChainHeight(), 25);
+
+    size_t saturated{0}, isolated{0};
+    for (uint32_t id{0}; id < opts.num_nodes; ++id) {
+        const int outbound{net.At(id).connman->GetFullOutboundConnCount()};
+        if (outbound >= MAX_OUTBOUND_FULL_RELAY_CONNECTIONS) ++saturated;
+        if (outbound == 0) ++isolated;
+    }
+    BOOST_TEST_MESSAGE("height=" << net.ChainHeight() << " saturated=" << saturated
+                                  << " isolated=" << isolated << " opened=" << net.TotalOpened()
+                                  << " live=" << net.LiveLinks());
+
+    // The nodes are not being told to ignore the timer here, so holding their
+    // outbound peers past fifty simulated minutes is the result worth having.
+    BOOST_CHECK_EQUAL(isolated, 0U);
+    BOOST_CHECK_GT(saturated, opts.num_nodes * 3 / 4);
+}
+
+/** No chain means no announcements, which is why the gate exists. */
+BOOST_FIXTURE_TEST_CASE(netsim_static_chain_needs_the_gate, SimTestingSetup)
+{
+    // SimTestingSetup publishes no tip notifications, so MakeNode turns the
+    // chain-sync timeout off. Without that this run would shed peers.
+    netsim::Network::Options opts;
+    opts.num_nodes = 30;
+    opts.num_listening = 10;
+    opts.bootstrap_addrs = 8;
+    opts.blocks_only = true;
+    netsim::Network net{opts, ctx};
+    BOOST_CHECK_EQUAL(net.ChainHeight(), 0);
+
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        net.RunFor(std::chrono::duration_cast<SimTime>(30min));
+    }
+
+    size_t isolated{0};
+    for (uint32_t id{0}; id < opts.num_nodes; ++id) {
+        if (net.At(id).connman->GetFullOutboundConnCount() == 0) ++isolated;
+    }
+    BOOST_CHECK_EQUAL(isolated, 0U);
 }
 
 /** Without tracking, nothing is withheld and nothing is sampled. */

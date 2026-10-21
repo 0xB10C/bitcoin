@@ -7,6 +7,7 @@
 # test/netsim_tests.cpp.
 add_library(bitcoin_netsim STATIC EXCLUDE_FROM_ALL
   addresses.cpp
+  chain.cpp
   clock.cpp
   eventqueue.cpp
   export.cpp
