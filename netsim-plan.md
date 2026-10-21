@@ -1788,3 +1788,53 @@ Three loose ends worth keeping:
   5's copy landed first, so node 54's edge points at node 5; six other peers of
   node 0 are attributed elsewhere the same way. AddrMan never revises `source`.
 
+
+### 17.6 How long a self-announcement is actually worth anything
+
+The spread stopping is not the tables filling up and not the run ending. Two
+rules in `ProcessAddrs` set it, and they are not the same rule:
+
+- `net_processing.cpp:6044` gates *forwarding* on `addr.nTime > current_time -
+  10min && vAddr.size() <= 10`. The forwarded `CAddress` carries the owner's
+  original stamp through every hop, nothing refreshes it, and
+  `AddrMan::Add(..., time_penalty=2h)` backdates the stored copy, so a stored
+  address can never be re-forwarded either.
+- Storing is **not** gated. `vAddrOk.push_back(addr)` sits outside that `if`,
+  so a bulk GETADDR reply still creates holders at any age.
+
+And the owner stamps a fresh one only once:
+`AVG_LOCAL_ADDRESS_BROADCAST_INTERVAL` is 24 h, so within a 20-minute run
+there is exactly one burst. Measured over 203,780 arrivals: every arrival whose
+recorded source was the address owner itself landed within the first 10
+seconds. Zero later ones, in any run.
+
+The distribution, one sample per (seed, withheld address), 20 withheld
+addresses per run, 20 simulated minutes, sampled every 10 s:
+
+| Nodes | Samples | min | p25 | median | p75 | p90 | max | mean | sd | gained after the gate |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1000 | 240 | 3.8 | 5.8 | 6.5 | 7.2 | 7.8 | 10.2 | 6.51 | 1.02 | 1 of 240 |
+| 5000 | 60 | 9.8 | 10.8 | 11.3 | 11.7 | 12.2 | 13.0 | 11.27 | 0.66 | 59 of 60 |
+
+At 1000 nodes the push wave exhausts after about 6.5 of its 10 available
+minutes -- it runs out of peers that do not already know, not out of time. At
+5000 it is still going when the gate shuts, and then keeps gaining holders
+anyway through the ungated storage path, which is why the window runs past 10.
+Reach is the same fraction at both rungs: 381/1000 and 1871/5000, both 38%.
+
+Two things I got wrong on the way, both worth keeping:
+
+- **The window is not depth times per-hop delay.** The per-hop cost does come
+  out near `AVG_ADDRESS_BROADCAST_INTERVAL` (24.3 s measured against a 30 s
+  exponential mean, lower because a node forwards to two peers and the earlier
+  flush continues the chain). But within a population, depth and window do not
+  co-vary: r = 0.09 at 1000 nodes, r = 0.03 at 5000. Branches run in parallel,
+  so the window is an exhaustion time, not a path length.
+- **Do not pool the populations to compute that r.** Pooled it is 0.84, which
+  would have supported exactly the wrong conclusion; depth and window both rise
+  with population, so pooling two groups manufactures the correlation. A
+  Simpson paradox, and the kind of mistake this kind of sweep invites.
+
+Re-measure with `scratchpad/addrdist.sh` (runs) and `addrdiststats.sh`
+(samples plus quantiles plus the within-population r); `mkdist.sh` folds the
+samples into the chart data. 1000 nodes is ~47 s per seed, 5000 is ~370 s.
