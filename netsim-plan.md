@@ -1777,16 +1777,25 @@ relayers passed each address to exactly one node or two.
 
 Three loose ends worth keeping:
 
-- The three relayers at 8 are the address owners. Hop 1 is exactly the owner's
-  eight *outbound full-relay* peers -- not its two block-relay-only outbounds,
-  not its inbound ones.
-- Eight relayers reached 3 or 4, which a two-peer cap cannot produce. The
-  likely second path is the GETADDR reply, which returns a bulk sample of the
-  table, but this data cannot separate the two. Unproven.
+- **The two-peer cap does not apply to a node's own address.** Announcing
+  yourself is `MaybeSendAddr`, called from `SendMessages` once per peer, with no
+  selection of two anywhere in it; the cap lives only in `RelayAddress`, which
+  handles other nodes' addresses. So an owner tells every addr-relay-enabled
+  peer it has -- here the 8 full-relay outbound it dialled, since
+  block-relay-only and feeler peers are excluded by `SetupAddressRelay`
+  (net_processing.cpp:5964). That is why hop 1 is always exactly 8, and why the
+  reach model below uses 8 for the owner and 2 thereafter.
+- Eight relayers reached 3 or 4. **Not GETADDR** -- an earlier version of this
+  section guessed that and was wrong; with the message hook every one of these
+  arrivals is a push. The cap is two *per received copy*: `RelayAddress` skips
+  the peer that sent it (`id != originator`), so the chosen pair moves with the
+  sender, and the candidate list churns underneath it (1535 connections opened
+  to end with 976). Their targets land tens of seconds apart rather than
+  together, and all eight are listeners, where churn is greatest.
 - Both trees are *first-arrival* trees over a denser gossip graph. Node 54 had
   been connected to node 0 since 4.0 s and node 0 does self-announce, but node
   5's copy landed first, so node 54's edge points at node 5; six other peers of
-  node 0 are attributed elsewhere the same way. AddrMan never revises `source`.
+  node 0 are attributed elsewhere the same way.
 
 
 ### 17.6 How long a self-announcement is actually worth anything
