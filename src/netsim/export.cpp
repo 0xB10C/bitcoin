@@ -59,7 +59,7 @@ std::string EdgeColumns()
 
 std::string BlockArrivalColumns()
 {
-    return "height,hash,node,elapsed_us";
+    return "height,hash,node,elapsed_us,from";
 }
 
 bool WriteBlockArrivals(const Network& net, const fs::path& path)
@@ -72,6 +72,28 @@ bool WriteBlockArrivals(const Network& net, const fs::path& path)
     for (const Network::BlockArrival& arrival : net.BlockArrivals()) {
         out << arrival.height << ','
             << arrival.hash.ToString() << ','
+            << arrival.node << ','
+            << (arrival.at - start).count() << ','
+            << arrival.from << '\n';
+    }
+    out.flush();
+    return out.good();
+}
+
+std::string AddrArrivalColumns()
+{
+    return "address_of,node,elapsed_us";
+}
+
+bool WriteAddrArrivals(const Network& net, const fs::path& path)
+{
+    std::ofstream out{path.std_path()};
+    if (!out.is_open()) return false;
+    out << AddrArrivalColumns() << "\n";
+
+    const SimTime start{net.StartTime()};
+    for (const Network::AddrArrival& arrival : net.AddrArrivals()) {
+        out << arrival.address_of << ','
             << arrival.node << ','
             << (arrival.at - start).count() << '\n';
     }

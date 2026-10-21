@@ -136,7 +136,7 @@ Network::Network(Options opts_in, const SharedContext& ctx)
             m_tip_recorders.push_back(std::make_unique<TipRecorder>(
                 id, [this](uint32_t node, const CBlockIndex& tip) {
                     m_block_arrivals.push_back(
-                        {m_clock.Now(), node, tip.nHeight, tip.GetBlockHash()});
+                        {m_clock.Now(), node, tip.nHeight, tip.GetBlockHash(), m_attributed_peer});
                 }));
             At(id).own_signals->RegisterValidationInterface(m_tip_recorders.back().get());
         }
@@ -334,7 +334,15 @@ void Network::ServiceEndpoint(size_t link_index, Direction outgoing)
     if (source == nullptr) return; // this end has already been reaped
     SimNode& source_node{At(from_initiator ? link.initiator : link.acceptor)};
 
+    // Attribution for the propagation tree. Anything this node adopts while
+    // handling bytes from this peer came from this peer, and that is exact
+    // rather than inferred: everything here is single-threaded, and
+    // UpdatedBlockTip fires inside ProcessNewBlock on the immediate task
+    // runner, so the marker is still set when the recorder reads it.
+    m_attributed_peer = static_cast<int32_t>(from_initiator ? link.acceptor : link.initiator);
     Process(source_node, *source);
+    m_attributed_peer = -1;
+
     auto wire{Drain(*source)};
     if (wire.empty()) return;
     ScheduleDelivery(link_index, outgoing, std::move(wire));
@@ -602,7 +610,10 @@ void Network::SampleAddrCoverage()
     constexpr auto SERVICES{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
     const SimTime now{m_clock.Now()};
 
-    for (const uint32_t tracked : m_tracked) {
+    m_addr_seen.resize(m_tracked.size());
+    for (size_t t{0}; t < m_tracked.size(); ++t) {
+        const uint32_t tracked{m_tracked[t]};
+        m_addr_seen[t].resize(m_opts.num_nodes, false);
         const CAddress addr{m_universe.At(tracked), SERVICES};
         AddrSample sample;
         sample.at = now;
@@ -615,6 +626,11 @@ void Network::SampleAddrCoverage()
             const auto found{At(id).addrman->FindAddressEntry(addr)};
             if (!found) continue;
             ++sample.holders;
+            // First time this node has held it, so it is an arrival.
+            if (!m_addr_seen[t][id]) {
+                m_addr_seen[t][id] = true;
+                m_addr_arrivals.push_back({now, id, tracked});
+            }
             if (found->tried) {
                 ++sample.in_tried;
                 ++sample.multiplicity;

@@ -70,6 +70,7 @@ struct Args {
     bool mine{false};
     bool per_node_chain{false};
     std::string block_csv;
+    std::string addr_arrivals_csv;
     uint32_t block_bytes{0};
     uint32_t bandwidth_mbit{0};
 };
@@ -146,6 +147,8 @@ bool ParseArgs(int argc, char* argv[], Args& args)
             if (args.chain == 0) args.chain = 10;
         } else if (arg.starts_with("--block-csv=") && arg.size() > 12) {
             args.block_csv = std::string{arg.substr(12)};
+        } else if (arg.starts_with("--addr-arrivals=") && arg.size() > 16) {
+            args.addr_arrivals_csv = std::string{arg.substr(16)};
         } else if (arg.starts_with("--block-bytes=") && ParseUint(arg.substr(14), value)) {
             args.block_bytes = value;
         } else if (arg.starts_with("--bandwidth-mbit=") && ParseUint(arg.substr(17), value)) {
@@ -448,6 +451,12 @@ int main(int argc, char* argv[])
     if (!args.block_csv.empty()) {
         if (!netsim::WriteBlockArrivals(net, fs::PathFromString(args.block_csv))) {
             std::fprintf(stderr, "failed to write the block arrivals to %s\n", args.block_csv.c_str());
+            return EXIT_FAILURE;
+        }
+    }
+    if (!args.addr_arrivals_csv.empty()) {
+        if (!netsim::WriteAddrArrivals(net, fs::PathFromString(args.addr_arrivals_csv))) {
+            std::fprintf(stderr, "failed to write the address arrivals to %s\n", args.addr_arrivals_csv.c_str());
             return EXIT_FAILURE;
         }
     }

@@ -196,6 +196,27 @@ public:
         uint32_t node{0};
         int height{0};
         uint256 hash;
+        /** The peer it came from, or -1 for the node that mined it.
+         *
+         * Exact rather than inferred: a node adopts a block while handling
+         * bytes from one particular peer, and the simulator knows which link
+         * it was servicing. Together these are the propagation tree. */
+        int32_t from{-1};
+    };
+
+    /** When one node first held one tracked address.
+     *
+     * The address-relay counterpart of `BlockArrival`, and the same shape, so
+     * the two can be drawn the same way. Resolution is the sampling interval
+     * rather than the instant itself, which is ample: addresses spread over
+     * minutes where blocks spread over milliseconds.
+     */
+    struct AddrArrival {
+        SimTime at{};
+        /** The node that now holds it. */
+        uint32_t node{0};
+        /** The tracked node whose address it is. */
+        uint32_t address_of{0};
     };
 
     /** How widely one tracked address had spread, at one instant. */
@@ -299,6 +320,9 @@ public:
      *  `per_node_chain`, where all nodes share one tip and there is nothing to
      *  observe. */
     const std::vector<BlockArrival>& BlockArrivals() const { return m_block_arrivals; }
+    /** Every first-time address acquisition, in time order. Empty unless the
+     *  run tracked addresses. */
+    const std::vector<AddrArrival>& AddrArrivals() const { return m_addr_arrivals; }
 
 private:
     void ServiceEndpoint(size_t link_index, Direction outgoing)
@@ -354,6 +378,13 @@ private:
     class TipRecorder;
     std::vector<std::unique_ptr<TipRecorder>> m_tip_recorders;
     std::vector<BlockArrival> m_block_arrivals;
+    std::vector<AddrArrival> m_addr_arrivals;
+    /** Which nodes already held each tracked address, so a sample can emit
+     *  only what is new. Indexed [tracked][node]. */
+    std::vector<std::vector<bool>> m_addr_seen;
+    /** The peer whose messages are being handled right now, or -1. Read by
+     *  the tip recorders to attribute an arrival. See ServiceEndpoint. */
+    int32_t m_attributed_peer{-1};
 
     NodeId m_next_node_id{0};
     uint64_t m_inbound_refusals{0};

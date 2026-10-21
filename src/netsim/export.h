@@ -50,11 +50,20 @@ bool WriteAddrSamples(const Network& net, const fs::path& path);
  */
 bool WriteBlockArrivals(const Network& net, const fs::path& path);
 
+/** Write every first-time address acquisition to `path`.
+ *
+ * The address-relay counterpart of `WriteBlockArrivals`: one row per (tracked
+ * address, node), carrying when that node first held it. Resolution is the
+ * sampling interval. Returns false if the file could not be written.
+ */
+bool WriteAddrArrivals(const Network& net, const fs::path& path);
+
 /** Column headers, exposed so a test can assert the writer and the reader agree. */
 std::string NodeColumns();
 std::string EdgeColumns();
 std::string AddrSampleColumns();
 std::string BlockArrivalColumns();
+std::string AddrArrivalColumns();
 
 } // namespace netsim
 
