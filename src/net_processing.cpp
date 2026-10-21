@@ -5515,6 +5515,8 @@ void PeerManagerImpl::ConsiderEviction(CNode& pto, Peer& peer, std::chrono::seco
 {
     AssertLockHeld(cs_main);
 
+    if (m_opts.disable_chain_sync_timeout) return;
+
     CNodeState &state = *State(pto.GetId());
 
     if (!state.m_chain_sync.m_protect && pto.IsOutboundOrBlockRelayConn() && state.fSyncStarted) {

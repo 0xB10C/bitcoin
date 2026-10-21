@@ -104,6 +104,18 @@ public:
         //! a test-only option). Every instance built this way shares one
         //! zero-keyed stream, so they are interchangeable.
         bool deterministic_rng{false};
+        //! Do not disconnect an outbound peer for failing to announce a chain
+        //! with as much work as our tip (this is a test-only option).
+        //!
+        //! ConsiderEviction() gives such a peer one getheaders and then
+        //! disconnects it once CHAIN_SYNC_TIMEOUT has passed. In production a
+        //! live peer always announces something inside that window, because
+        //! blocks keep arriving. A simulation with no block production has
+        //! nothing to announce, so every node sheds its headers-sync peer on a
+        //! twenty-minute cycle: an artefact of the absent chain rather than a
+        //! property of the protocol, and one that makes any longer run
+        //! unusable.
+        bool disable_chain_sync_timeout{false};
         //! Seed for the internal RNG, giving this instance its own reproducible
         //! stream. Takes precedence over `deterministic_rng`. Intended for
         //! simulations that run many non-identical PeerManagers in one process,

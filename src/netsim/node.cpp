@@ -105,6 +105,12 @@ std::unique_ptr<SimNode> MakeNode(const SharedContext& ctx, uint32_t id, const C
     // every node on the same schedule and an OS-seeded one would make the run
     // unrepeatable.
     peerman_opts.rng_seed = DeriveHash(SEED_PEERMAN, id);
+    // No node here ever produces a block, so no node ever announces one, and
+    // ConsiderEviction would disconnect every node's headers-sync peer every
+    // twenty minutes. In production blocks keep arriving inside that window.
+    // Leaving it on caps a usable run at twenty simulated minutes, which is
+    // shorter than the address-relay behaviour under study.
+    peerman_opts.disable_chain_sync_timeout = true;
     // banman is null on purpose: a per-node BanMan would cost 539 KiB for its
     // discouragement filter, and nothing here misbehaves.
     node->peerman = PeerManager::make(*node->connman, *node->addrman, /*banman=*/nullptr,
