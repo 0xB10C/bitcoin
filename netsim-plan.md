@@ -2381,3 +2381,25 @@ and worth knowing. The magnitude measured here is not transferable to mainnet,
 because the volume is inflated by the simultaneous start. Do not quote the
 turnover as a property of Bitcoin Core. Quoting it as a property of a network
 that all booted at once is fair, and is also a real scenario.
+
+#### Twenty thousand nodes, run alone
+
+The configuration killed for memory in §17.10 completed once it had the box to
+itself: 29.2 GB peak, 1,492,571 bytes per node, 1,902 s wall for 20 simulated
+minutes. It extends every trend above and breaks none.
+
+| N at 20% | reach | ceiling | too big | too old |
+|---|---|---|---|---|
+| 1,000 | 38.3 | 37.5 | 2.0% | 0.0% |
+| 2,000 | 38.3 | 38.9 | 6.6% | 0.0% |
+| 4,000 | 38.1 | 39.6 | 9.4% | 0.2% |
+| 10,000 | 32.3 | 40.0 | 16.2% | 3.7% |
+| 14,000 | 25.4 | 40.0 | 19.3% | 6.8% |
+| 20,000 | 17.9 | 40.1 | 22.8% | 8.0% |
+
+The ceiling does not move off 40% because it cannot: it is a function of the
+listening share alone. All of the decay is in the loss column, and the loss
+grows with size at a fixed share for the reason §17.12 gives -- the storm is
+proportional to the number of listeners, which at 20% of twenty thousand is
+four thousand nodes all announcing at once. "Too old" is still a third of "too
+big" at the largest size measured.
