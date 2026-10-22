@@ -615,6 +615,7 @@ public:
         m_best_block_time = time;
     };
     void UnitTestMisbehaving(NodeId peer_id) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex) { Misbehaving(*Assert(GetPeerRef(peer_id)), ""); };
+    AddrRelayPlan GetAddrRelayPlan(const CAddress& addr, NodeId originator, size_t runners_up) override EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex);
     void UpdateLastBlockAnnounceTime(NodeId node, NodeClock::time_point time) override;
     ServiceFlags GetDesirableServiceFlags(ServiceFlags services) const override;
 
@@ -837,6 +838,11 @@ private:
      *                         addresses less.
      */
     void RelayAddress(NodeId originator, const CAddress& addr, bool fReachable) EXCLUSIVE_LOCKS_REQUIRED(!m_peer_mutex, g_msgproc_mutex);
+
+    /** Pick the peers `RelayAddress` forwards to. The selection, without the
+     *  sending, so that `GetAddrRelayPlan` can answer for an address that
+     *  never arrived without keeping a second copy of the rule. */
+    AddrRelayPlan PlanAddrRelay(const CAddress& addr, NodeId originator, bool fReachable, size_t runners_up) EXCLUSIVE_LOCKS_REQUIRED(m_peer_mutex);
 
     /** Send `feefilter` message. */
     void MaybeSendFeefilter(CNode& node, Peer& peer, std::chrono::microseconds current_time) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
@@ -2526,9 +2532,10 @@ node::TransactionError PeerManagerImpl::InitiateTxBroadcastPrivate(const CTransa
     assert(false);
 }
 
-void PeerManagerImpl::RelayAddress(NodeId originator,
-                                   const CAddress& addr,
-                                   bool fReachable)
+AddrRelayPlan PeerManagerImpl::PlanAddrRelay(const CAddress& addr,
+                                             NodeId originator,
+                                             bool fReachable,
+                                             size_t runners_up)
 {
     // We choose the same nodes within a given 24h window (if the list of connected
     // nodes does not change) and we don't relay to nodes that already know an
@@ -2536,7 +2543,8 @@ void PeerManagerImpl::RelayAddress(NodeId originator,
     // prevent a peer from unjustly giving their address better propagation by sending
     // it to us repeatedly.
 
-    if (!fReachable && !addr.IsRelayable()) return;
+    AddrRelayPlan plan;
+    if (!fReachable && !addr.IsRelayable()) return plan;
 
     // Relay to a limited number of other nodes
     // Use deterministic randomness to send to the same nodes for 24 hours
@@ -2551,19 +2559,24 @@ void PeerManagerImpl::RelayAddress(NodeId originator,
 
     // Relay reachable addresses to 2 peers. Unreachable addresses are relayed randomly to 1 or 2 peers.
     unsigned int nRelayNodes = (fReachable || (hasher.Finalize() & 1)) ? 2 : 1;
+    plan.relay_count = nRelayNodes;
 
-    std::array<std::pair<uint64_t, Peer*>, 2> best{{{0, nullptr}, {0, nullptr}}};
+    // The ranking is one list however many of it are used, so asking for a
+    // runner-up only lengthens it. Every bound below is nRelayNodes, never the
+    // array's own size, so the peers actually pushed to are the same either
+    // way.
+    std::array<std::pair<uint64_t, NodeId>, 3> best{{{0, 0}, {0, 0}, {0, 0}}};
+    nRelayNodes += static_cast<unsigned int>(std::min<size_t>(runners_up, best.size() - nRelayNodes));
     assert(nRelayNodes <= best.size());
-
-    LOCK(m_peer_mutex);
 
     for (auto& [id, peer] : m_peer_map) {
         if (peer->m_addr_relay_enabled && id != originator && IsAddrCompatible(*peer, addr)) {
+            ++plan.candidates;
             uint64_t hashKey = CSipHasher(hasher).Write(id).Finalize();
             for (unsigned int i = 0; i < nRelayNodes; i++) {
                  if (hashKey > best[i].first) {
                      std::copy(best.begin() + i, best.begin() + nRelayNodes - 1, best.begin() + i + 1);
-                     best[i] = std::make_pair(hashKey, peer.get());
+                     best[i] = std::make_pair(hashKey, id);
                      break;
                  }
             }
@@ -2571,7 +2584,29 @@ void PeerManagerImpl::RelayAddress(NodeId originator,
     };
 
     for (unsigned int i = 0; i < nRelayNodes && best[i].first != 0; i++) {
-        PushAddress(*best[i].second, addr);
+        plan.targets.push_back(best[i].second);
+    }
+    plan.relay_count = std::min(plan.relay_count, plan.targets.size());
+    return plan;
+}
+
+AddrRelayPlan PeerManagerImpl::GetAddrRelayPlan(const CAddress& addr, NodeId originator, size_t runners_up)
+{
+    LOCK(m_peer_mutex);
+    return PlanAddrRelay(addr, originator, g_reachable_nets.Contains(addr), runners_up);
+}
+
+void PeerManagerImpl::RelayAddress(NodeId originator,
+                                   const CAddress& addr,
+                                   bool fReachable)
+{
+    LOCK(m_peer_mutex);
+
+    for (const NodeId target : PlanAddrRelay(addr, originator, fReachable, /*runners_up=*/0).targets) {
+        const auto it{m_peer_map.find(target)};
+        // Nothing can remove a peer while m_peer_mutex is held, so this is
+        // only ever the hit.
+        if (it != m_peer_map.end()) PushAddress(*it->second, addr);
     }
 }
 

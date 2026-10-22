@@ -107,6 +107,30 @@ struct AddrReceipt {
     bool relayed;
 };
 
+/** What `RelayAddress` would do with one address.
+ *
+ * Forwarding is deterministic: within one `ROTATE_ADDR_RELAY_DEST_INTERVAL` a
+ * node picks the same peers for the same address every time it sees it. The
+ * plan can therefore be asked for without the address having to arrive, which
+ * is what it takes to reconstruct the whole forwarding graph rather than only
+ * the part of it some announcement happened to travel.
+ */
+struct AddrRelayPlan {
+    //! The chosen peers, best first. The first `relay_count` are the ones it
+    //! would really push to; any after that are runners-up the caller asked
+    //! for.
+    std::vector<NodeId> targets;
+    //! How many of `targets` it would push to: two for a reachable address,
+    //! one or two otherwise, and fewer still if there were not that many
+    //! candidates.
+    size_t relay_count{0};
+    //! How many peers were eligible to be picked, which is not the same as the
+    //! peer count: block-relay-only and feeler connections never relay
+    //! addresses, and an inbound peer only becomes eligible once it has sent
+    //! an addr-related message of its own.
+    size_t candidates{0};
+};
+
 class PeerManager : public CValidationInterface, public NetEventsInterface
 {
 public:
@@ -228,6 +252,19 @@ public:
 
     /* Public for unit testing. */
     virtual void UnitTestMisbehaving(NodeId peer_id) = 0;
+
+    /** Which peers `RelayAddress` would forward `addr` to, had it arrived from
+     *  `originator` (-1 for no originator).
+     *
+     * `runners_up` asks for that many more peers beyond the ones it would
+     * really push to. One of them is enough to work out what the node would
+     * have picked had the address arrived from a different peer, since the
+     * only effect the sender has on the choice is to be excluded from it.
+     *
+     * Public for unit testing and simulation. It shares its implementation
+     * with the relay path itself, so the answer cannot drift from what the
+     * node would really do. */
+    virtual AddrRelayPlan GetAddrRelayPlan(const CAddress& addr, NodeId originator, size_t runners_up = 0) = 0;
 
     /**
      * Evict extra outbound peers. If we think our tip may be stale, connect to an extra outbound.
