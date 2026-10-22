@@ -82,7 +82,7 @@ bool WriteBlockArrivals(const Network& net, const fs::path& path)
 
 std::string AddrArrivalColumns()
 {
-    return "address_of,node,elapsed_us,from,path,relayed";
+    return "address_of,node,elapsed_us,from,path,relayed,batch";
 }
 
 bool WriteAddrArrivals(const Network& net, const fs::path& path)
@@ -98,7 +98,31 @@ bool WriteAddrArrivals(const Network& net, const fs::path& path)
             << (arrival.at - start).count() << ','
             << arrival.from << ','
             << (arrival.path == Network::AddrPath::Pushed ? "push" : "pull") << ','
-            << (arrival.relayed ? 1 : 0) << '\n';
+            << (arrival.relayed ? 1 : 0) << ','
+            << arrival.batch << '\n';
+    }
+    out.flush();
+    return out.good();
+}
+
+std::string RelayEdgeColumns()
+{
+    return "address_of,from,to,rank,relay_count,candidates";
+}
+
+bool WriteRelayGraph(const Network& net, const fs::path& path)
+{
+    std::ofstream out{path.std_path()};
+    if (!out.is_open()) return false;
+    out << RelayEdgeColumns() << "\n";
+
+    for (const Network::RelayEdge& edge : net.RelayGraph()) {
+        out << edge.address_of << ','
+            << edge.from << ','
+            << edge.to << ','
+            << static_cast<unsigned>(edge.rank) << ','
+            << static_cast<unsigned>(edge.relay_count) << ','
+            << edge.candidates << '\n';
     }
     out.flush();
     return out.good();

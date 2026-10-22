@@ -39,6 +39,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <sstream>
 #include <memory>
@@ -1075,7 +1076,127 @@ BOOST_FIXTURE_TEST_CASE(netsim_addr_sources_form_a_relay_tree, SimTestingSetup)
     std::string header;
     BOOST_REQUIRE(std::getline(in, header));
     BOOST_CHECK_EQUAL(header, netsim::AddrArrivalColumns());
-    BOOST_CHECK(header.ends_with(",path,relayed"));
+    BOOST_CHECK(header.ends_with(",path,relayed,batch"));
+}
+
+/** The forwarding graph a withheld address travels in.
+ *
+ * Arrivals record the edges an announcement used, which is only the part of
+ * the graph it happened to travel; the plan records the whole thing, including
+ * the edges of nodes it never reached. Two properties are worth holding on to.
+ *
+ * Every edge really used must appear in the plan, or the plan is describing
+ * some other graph. And a node's candidate count is its addr-relay degree,
+ * which is a different number from its peer count: two of ten outbound slots
+ * are block-relay-only and never carry addresses, and a node whose address was
+ * withheld cannot be dialled at all, so it has an eighth of a listener's
+ * candidates and is not a listener in any sense address relay cares about.
+ * That last one is the whole reason this export exists.
+ */
+BOOST_FIXTURE_TEST_CASE(netsim_relay_plan_covers_the_edges_used, SimTestingSetup)
+{
+    netsim::Network::Options opts;
+    opts.num_nodes = 60;
+    opts.num_listening = 20;
+    opts.num_tracked = 2;
+    opts.bootstrap_addrs = 6;
+    opts.blocks_only = true;
+    opts.addr_sample_interval = std::chrono::duration_cast<SimTime>(60s);
+    opts.record_addr_sources = true;
+    netsim::Network net{opts, ctx};
+
+    {
+        LOCK(NetEventsInterface::g_msgproc_mutex);
+        net.RunFor(std::chrono::duration_cast<SimTime>(8min));
+    }
+    net.SampleRelayGraph();
+
+    const auto& edges{net.RelayGraph()};
+    BOOST_REQUIRE_GT(edges.size(), 0U);
+
+    // (address, from) -> the nodes it would pick, best first.
+    std::map<std::pair<uint32_t, uint32_t>, std::vector<int32_t>> plan;
+    std::map<uint32_t, uint32_t> candidates;
+    for (const auto& e : edges) {
+        BOOST_CHECK_LT(e.address_of, opts.num_tracked);
+        BOOST_CHECK_LT(e.from, opts.num_nodes);
+        // A node is never its own target, and never plans for its own address.
+        BOOST_CHECK_NE(e.to, static_cast<int32_t>(e.from));
+        BOOST_CHECK_NE(e.from, net.TrackedNodes().at(e.address_of));
+        // At most two real targets plus the one runner-up that was asked for.
+        BOOST_CHECK_LE(e.relay_count, 2);
+        BOOST_CHECK_LT(e.rank, 3);
+        candidates[e.from] = e.candidates;
+        if (e.to >= 0) plan[{e.address_of, e.from}].push_back(e.to);
+    }
+
+    // A node that was asked about every tracked address got one plan each.
+    BOOST_CHECK_GT(plan.size(), opts.num_nodes);
+
+    size_t checked{0};
+    size_t covered{0};
+    for (const auto& a : net.AddrArrivals()) {
+        // Only a forwarded announcement is RelayAddress's doing. A GETADDR
+        // reply comes out of a table and has nothing to do with the plan.
+        if (a.path != netsim::Network::AddrPath::Pushed) continue;
+        if (a.from < 0) continue;
+        const uint32_t from{static_cast<uint32_t>(a.from)};
+        // The owner announces itself to every addr-relay peer it has, uncapped
+        // by MaybeSendAddr, so its edges are deliberately not in the plan.
+        if (from == net.TrackedNodes().at(a.address_of)) continue;
+        const auto it{plan.find({a.address_of, from})};
+        BOOST_REQUIRE(it != plan.end());
+        // The peer that sent an address is struck out of the choice for it, so
+        // a node can use its runner-up: the ranking is what has to contain the
+        // edge, not the top two of it.
+        if (std::find(it->second.begin(), it->second.end(),
+                      static_cast<int32_t>(a.node)) != it->second.end()) {
+            ++covered;
+        }
+        ++checked;
+    }
+    BOOST_TEST_MESSAGE("edges=" << edges.size() << " plans=" << plan.size()
+                                << " used edges " << covered << "/" << checked);
+    BOOST_CHECK_GT(checked, 0U);
+    // Not all of them, and the shortfall is the snapshot rather than the
+    // selection. A plan is taken when the run ends and is a function of the
+    // peer set then; a node that has since gained or lost a peer ranks a
+    // different list from the one it ranked when it forwarded. Eight minutes
+    // into a 60-node population the topology is still forming, so the
+    // agreement here is the worst it gets -- it is what a longer run on a
+    // settled topology has to be compared against, which is why the number is
+    // reported rather than just bounded.
+    BOOST_CHECK_GT(covered * 10, checked * 6);
+
+    // The three classes of node, by addr-relay degree. Withheld nodes listen
+    // but cannot be dialled, which makes them dialers as far as this is
+    // concerned.
+    uint32_t withheld_max{0}, dialer_max{0}, listener_min{std::numeric_limits<uint32_t>::max()};
+    for (const auto& [id, count] : candidates) {
+        if (id < opts.num_tracked) withheld_max = std::max(withheld_max, count);
+        else if (id < opts.num_listening) listener_min = std::min(listener_min, count);
+        else dialer_max = std::max(dialer_max, count);
+    }
+    BOOST_TEST_MESSAGE("candidates: withheld<=" << withheld_max << " listener>=" << listener_min
+                                                << " dialer<=" << dialer_max);
+    // Eight of the ten outbound slots relay addresses; the other two are
+    // block-relay-only, which SetupAddressRelay refuses.
+    BOOST_CHECK_LE(dialer_max, 8U);
+    BOOST_CHECK_GT(listener_min, dialer_max);
+    // The point of the whole measurement: a withheld node's addr-relay degree
+    // is a dialer's, not a listener's. Not exactly a dialer's -- the
+    // announcement under study is itself what makes the node diallable, so a
+    // few peers do arrive, late and in proportion to how far it spread -- but
+    // nowhere near the least-connected real listener.
+    BOOST_CHECK_LT(withheld_max, listener_min);
+
+    const fs::path path{m_path_root / "relay-graph.csv"};
+    BOOST_REQUIRE(netsim::WriteRelayGraph(net, path));
+    std::ifstream in{path.std_path()};
+    BOOST_REQUIRE(in.is_open());
+    std::string header;
+    BOOST_REQUIRE(std::getline(in, header));
+    BOOST_CHECK_EQUAL(header, netsim::RelayEdgeColumns());
 }
 
 /** A population spread over IPv4, IPv6, Tor and I2P still forms a topology.

@@ -642,7 +642,62 @@ void Network::NoteAddrReceived(uint32_t receiver, const AddrReceipt& receipt)
                                    ? -1
                                    : static_cast<int32_t>(sender->second),
                                receipt.batch <= 10 ? AddrPath::Pushed : AddrPath::Pulled,
-                               receipt.relayed});
+                               receipt.relayed, static_cast<uint32_t>(receipt.batch)});
+}
+
+void Network::SampleRelayGraph()
+{
+    constexpr auto SERVICES{ServiceFlags(NODE_NETWORK | NODE_WITNESS)};
+
+    std::vector<CAddress> addrs;
+    addrs.reserve(m_tracked.size());
+    for (const uint32_t tracked : m_tracked) addrs.emplace_back(m_universe.At(tracked), SERVICES);
+
+    // A plan names peers by the node id its CConnman gave them, which is
+    // meaningful only inside that node. Every live link carries both CNode
+    // ends, so the translation is a walk over the node's own links.
+    std::map<NodeId, uint32_t> remote;
+
+    for (uint32_t id{0}; id < m_opts.num_nodes; ++id) {
+        remote.clear();
+        for (const size_t li : m_links_by_node[id]) {
+            const Link& link{m_links[li]};
+            if (link.closed) continue;
+            const CNode* near_end{link.initiator == id ? link.out_side : link.in_side};
+            if (near_end == nullptr) continue;
+            remote.emplace(near_end->GetId(), link.initiator == id ? link.acceptor : link.initiator);
+        }
+
+        for (size_t t{0}; t < m_tracked.size(); ++t) {
+            // The owner is left out on purpose. It does not forward its own
+            // address through RelayAddress at all: MaybeSendAddr announces it
+            // to every addr-relay peer, uncapped, so a two-peer plan would
+            // misdescribe the one node whose behaviour is already known.
+            if (m_tracked[t] == id) continue;
+
+            const AddrRelayPlan plan{
+                At(id).peerman->GetAddrRelayPlan(addrs[t], /*originator=*/-1, /*runners_up=*/1)};
+
+            RelayEdge edge;
+            edge.address_of = static_cast<uint32_t>(t);
+            edge.from = id;
+            edge.relay_count = static_cast<uint8_t>(plan.relay_count);
+            edge.candidates = static_cast<uint32_t>(plan.candidates);
+            if (plan.targets.empty()) {
+                // Still worth a row: a node with no eligible peer is a dead
+                // end, and knowing how many of those there are is half the
+                // question.
+                m_relay_graph.push_back(edge);
+                continue;
+            }
+            for (size_t rank{0}; rank < plan.targets.size(); ++rank) {
+                const auto found{remote.find(plan.targets[rank])};
+                edge.rank = static_cast<uint8_t>(rank);
+                edge.to = found == remote.end() ? -2 : static_cast<int32_t>(found->second);
+                m_relay_graph.push_back(edge);
+            }
+        }
+    }
 }
 
 void Network::SampleAddrCoverage()

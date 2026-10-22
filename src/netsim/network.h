@@ -182,11 +182,10 @@ public:
         bool record_block_arrivals{true};
         /** Also record which peer each tracked address first came from.
          *
-         * AddrMan keeps the source of every entry, so the address relay tree
-         * is already there to be read; it just is not reachable through
-         * `FindAddressEntry`. Reading it means walking the holder's tables,
-         * which is why this is off by default, and why it is done only on the
-         * one sample where a node first appears as a holder. */
+         * Read off each ADDR message as it is handled, through
+         * `PeerManager::Options::on_addr_received`, which is the only place
+         * the sender and the instant are both exact and the push and pull
+         * paths are still distinguishable. */
         bool record_addr_sources{false};
         RegionLatency::Options latency{};
         uint256 rng_seed{uint256{1}};
@@ -247,6 +246,47 @@ public:
         /** Whether this node went on to forward it. False once the
          *  announcement is past the ten-minute gate. */
         bool relayed{false};
+        /** How many addresses the message carried.
+         *
+         * `path` is only the sign of `batch <= 10`, and the two cases that
+         * test lumps together behave nothing alike: a thousand-address GETADDR
+         * reply, and a forwarded announcement that happened to be queued
+         * alongside eleven others and so loses its right to be passed on. A
+         * run that tracks twenty addresses at once creates the second kind by
+         * itself, which is a property of the experiment. */
+        uint32_t batch{0};
+    };
+
+    /** One edge of the forwarding graph a tracked address travels in.
+     *
+     * `RelayAddress` is deterministic: for a given address and rotation
+     * interval a node always picks the same peers out of those eligible for
+     * addr relay. The whole graph is therefore knowable, including the edges
+     * of nodes the announcement never reached, which an arrival log cannot
+     * show. Whether reach is bounded by the graph or by the clock is decided
+     * by comparing the two.
+     */
+    struct RelayEdge {
+        /** The tracked node whose address this plan is for. */
+        uint32_t address_of{0};
+        /** The node that would forward it. */
+        uint32_t from{0};
+        /** The node it would forward to; -1 when it would pick nobody, and
+         *  -2 for a peer that is no longer a live link here. */
+        int32_t to{-1};
+        /** Where this target sits in `from`'s ranking, best first.
+         *
+         * The ranks below `relay_count` are the ones it would really push to.
+         * The one above is a runner-up, and it is needed because the sender is
+         * excluded from the choice: had the address come from one of the real
+         * targets, the runner-up would have taken its place. */
+        uint8_t rank{0};
+        uint8_t relay_count{0};
+        /** How many of `from`'s peers were eligible to be picked. Repeated on
+         *  each of its edges: it belongs to the node, not the edge, but it is
+         *  the quantity that says whether addr-relay eligibility is narrower
+         *  than the degree. */
+        uint32_t candidates{0};
     };
 
     /** How widely one tracked address had spread, at one instant. */
@@ -353,6 +393,19 @@ public:
     /** Every first-time address acquisition, in time order. Empty unless the
      *  run tracked addresses. */
     const std::vector<AddrArrival>& AddrArrivals() const { return m_addr_arrivals; }
+    /** Every forwarding edge every node would use for every tracked address.
+     *  Empty until `SampleRelayGraph` is called. */
+    const std::vector<RelayEdge>& RelayGraph() const { return m_relay_graph; }
+
+    /** Ask every node which peers it would forward each tracked address to.
+     *
+     * A snapshot, so the driver takes it when the run ends. Two things make it
+     * one rather than a history: the plan only changes when the peer set does
+     * or when a 24 h rotation boundary passes, and the arrivals already record
+     * the edges that were really used, so any drift between the two is
+     * measurable instead of assumed. Does nothing unless the run tracked
+     * addresses. */
+    void SampleRelayGraph() NO_THREAD_SAFETY_ANALYSIS;
 
 private:
     void ServiceEndpoint(size_t link_index, Direction outgoing)
@@ -418,6 +471,7 @@ private:
     std::vector<std::unique_ptr<TipRecorder>> m_tip_recorders;
     std::vector<BlockArrival> m_block_arrivals;
     std::vector<AddrArrival> m_addr_arrivals;
+    std::vector<RelayEdge> m_relay_graph;
     /** Which nodes already held each tracked address, so a sample can emit
      *  only what is new. Indexed [tracked][node]. */
     std::vector<std::vector<bool>> m_addr_seen;

@@ -58,12 +58,24 @@ bool WriteBlockArrivals(const Network& net, const fs::path& path);
  */
 bool WriteAddrArrivals(const Network& net, const fs::path& path);
 
+/** Write the forwarding graph the tracked addresses travel in to `path`.
+ *
+ * One row per (tracked address, node, rank). Where `WriteAddrArrivals` records
+ * the edges an announcement actually used, this records the edges that were
+ * there to use, including those of nodes the announcement never reached — the
+ * difference between a part of the network that could not be reached and one
+ * that was merely reached late. Empty unless `Network::SampleRelayGraph` was
+ * called. Returns false if the file could not be written.
+ */
+bool WriteRelayGraph(const Network& net, const fs::path& path);
+
 /** Column headers, exposed so a test can assert the writer and the reader agree. */
 std::string NodeColumns();
 std::string EdgeColumns();
 std::string AddrSampleColumns();
 std::string BlockArrivalColumns();
 std::string AddrArrivalColumns();
+std::string RelayEdgeColumns();
 
 } // namespace netsim
 

@@ -71,6 +71,7 @@ struct Args {
     bool per_node_chain{false};
     std::string block_csv;
     std::string addr_arrivals_csv;
+    std::string relay_graph_csv;
     uint32_t block_bytes{0};
     uint32_t bandwidth_mbit{0};
 };
@@ -113,8 +114,11 @@ void PrintUsage()
                  "                   on. Costs 123 KB per node; implies --mine and --chain\n"
                  "  --block-csv=FILE write one row per (block, node) arrival there\n"
                  "  --addr-arrivals=FILE  the same for addresses: one row per\n"
-                 "                   (tracked address, node), with the peer AddrMan\n"
-                 "                   recorded it from, which is the relay tree\n"
+                 "                   (tracked address, node), with the peer it came\n"
+                 "                   from and which path brought it\n"
+                 "  --relay-graph=FILE  write where every node would forward every\n"
+                 "                   tracked address, reached or not, which is the\n"
+                 "                   graph the arrivals above travelled in\n"
                  "  --block-bytes=N  pad each block to about N serialised bytes, so that\n"
                  "                   transfer time counts (ceiling ~1000000, see chain.h)\n"
                  "  --bandwidth-mbit=N  per-link bandwidth, which is what turns block size\n"
@@ -152,6 +156,8 @@ bool ParseArgs(int argc, char* argv[], Args& args)
             args.block_csv = std::string{arg.substr(12)};
         } else if (arg.starts_with("--addr-arrivals=") && arg.size() > 16) {
             args.addr_arrivals_csv = std::string{arg.substr(16)};
+        } else if (arg.starts_with("--relay-graph=") && arg.size() > 14) {
+            args.relay_graph_csv = std::string{arg.substr(14)};
         } else if (arg.starts_with("--block-bytes=") && ParseUint(arg.substr(14), value)) {
             args.block_bytes = value;
         } else if (arg.starts_with("--bandwidth-mbit=") && ParseUint(arg.substr(17), value)) {
@@ -463,6 +469,16 @@ int main(int argc, char* argv[])
     if (!args.addr_arrivals_csv.empty()) {
         if (!netsim::WriteAddrArrivals(net, fs::PathFromString(args.addr_arrivals_csv))) {
             std::fprintf(stderr, "failed to write the address arrivals to %s\n", args.addr_arrivals_csv.c_str());
+            return EXIT_FAILURE;
+        }
+    }
+    if (!args.relay_graph_csv.empty()) {
+        // Taken here rather than during the run: the plan is a function of the
+        // peer set, which is settled now, and the arrivals already say what
+        // was really used, so the two can be compared.
+        net.SampleRelayGraph();
+        if (!netsim::WriteRelayGraph(net, fs::PathFromString(args.relay_graph_csv))) {
+            std::fprintf(stderr, "failed to write the relay graph to %s\n", args.relay_graph_csv.c_str());
             return EXIT_FAILURE;
         }
     }
