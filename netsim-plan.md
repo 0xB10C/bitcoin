@@ -1995,3 +1995,48 @@ So the playground ships the ceiling (exact), the time estimate (good to a hop,
 and a reliable verdict away from the boundary), and the measurements themselves
 -- and deliberately refuses to print a single predicted reach once the clock
 binds.
+
+### 17.9 theta is measured, not derived -- the derivation in 17.7 is wrong
+
+§17.7 presents `theta = 1 - exp(-2 theta) = 0.7968` as a derived prediction of
+listener reach with nothing fitted. The number is right for listening shares up
+to about 20%. The derivation is not.
+
+It assumes each listener collects about two in-edges in the forwarding digraph,
+which is where the Poisson(2) giant component comes from. Count them instead. A
+listener has `d = 8 + 8N/L` addr-relay peers, of which 16 are listeners, and it
+spends 2 picks among all `d`. Every *non-listener* spends both of its picks on
+listeners, because all 8 of its peers are listeners. So per listener:
+
+    in-degree from listeners      = 2 * 16/d
+    in-degree from non-listeners  = 2 (N-L)/L
+    total at 20% share            = 8.67, not 2
+
+Solving the real two-class fixed point
+
+    x = 1 - exp(-a x - b y),  y = 1 - exp(-c x)
+    a = 32/d,  b = 2(N-L)/L,  c = 2L(d-16)/(d(N-L))
+
+gives listener reach 93.7% at 20% share, 96-97% at 5-10%, and 82% at 80%.
+Measured: 80-84% at 5-20%, 73.9% at 40%, 59.7% at 80%. So the fixed point
+over-predicts by 13-16 points in the band where theta happens to land on the
+measurement, and the population totals it implies (40.2% at 20% share) are the
+same ~42% the discarded mass-action recursion gave (§17.8).
+
+Time is not the explanation: 500 nodes at 20% finished in 4.98 min of its 10 and
+still reached only 80.9% of listeners. Something holds listener reach near 0.80
+that neither model captures. Likeliest candidate, still unconfirmed:
+`SetupAddressRelay` admits an *inbound* peer to address relay only once that
+peer has sent an addr-related message, so a listener's effective peer count --
+and therefore everyone's chance of being picked by it -- is lower than its
+degree.
+
+**What to carry forward.** Treat 0.797 as a constant measured over the 5-20%
+band, and `reach/N = s*theta + (1-s)(1 - exp(-2s/(1+s) * theta))` as an
+empirical relation that fits well there, not as theory. Its 1.49-point RMS
+stands; its provenance does not. Do not quote the giant-component story.
+
+The truncation sweep (`scratchpad/addrtrunc.sh`, 8 configurations from 6000 to
+20000 nodes at 10/20/40% share) varies share and size independently and should
+settle whether listener reach is genuinely flat at ~0.80 below 20% or whether
+that too is a coincidence of the sizes tried.
