@@ -2040,3 +2040,52 @@ The truncation sweep (`scratchpad/addrtrunc.sh`, 8 configurations from 6000 to
 20000 nodes at 10/20/40% share) varies share and size independently and should
 settle whether listener reach is genuinely flat at ~0.80 below 20% or whether
 that too is a coincidence of the sizes tried.
+
+### 17.10 More listeners is not always better
+
+Seven more configurations from 6000 to 14000 nodes at 10/20/40% share (the
+20000-node run was killed for memory; 29 GB was too much alongside everything
+else on the box). 16 configurations total, and the clearest result is one the
+ceiling cannot express.
+
+Reach against listening share, at a fixed size:
+
+| Nodes | 5% | 10% | 20% | 40% | 80% |
+|---|---|---|---|---|---|
+| 1000 | 11.7 | 20.9 | 37.5 | 51.2 | 55.5 |
+| 6000 | | 21.9 | **32.9** | 24.0 | |
+| 10000 | | 21.7 | **27.0** | 10.3 | |
+
+At a thousand nodes more listeners is monotonically better. At ten thousand it
+turns over: 40% listening reaches 10.3% where 20% reaches 27.0%. Twice the
+listeners, a third of the reach. The share and the clock pull against each
+other -- a larger reachable set means a deeper tree means more hops at ~22 s
+each, and past roughly 25 hops the gate shuts first. At 10000:4000 the tree is
+37.2 hops and 16.3% of listeners are ever told.
+
+So there is an interior optimum, near 20% at ten thousand nodes, moving down as
+the network grows. Mainnet's listening share is in the comfortable region.
+
+Listener reach against size, at a fixed share:
+
+    10% : 1000=80.3  6000=82.5  10000=81.1          flat
+    20% : 1000=83.7  2000=79.4  4000=76.2  6000=72.5  8000=67.5  10000=61.4  14000=48.7
+    40% : 1000=73.9  6000=36.9  10000=16.3          collapses
+
+The 10% row matters for §17.9: listener reach is flat at ~81% from 1000 to
+10000 nodes while the window grows from 5.1 to 10.6 minutes. So the ~0.80 cap
+is **not** a time artefact -- it is structural, and still unexplained, since
+the honest in-degree fixed point says 96% there. What the correlated-hash idea
+would have explained, it cannot: `GetDeterministicRandomizer` is seeded from
+each CConnman's own nSeed0/nSeed1, and netsim gives every node its own via
+`DeriveUint64(SEED_CONNMAN, id, 0)`, so the peer ranking is per-node as in
+production. Not a simulation artefact.
+
+**The shortfall still does not fit, after four attempts.** Window alone:
+r = -0.67, RMS 8.4 points -- at a window of 12-13 minutes the ratio of measured
+to ceiling ranges from 0.19 to 0.95 depending entirely on share. Normalising by
+how much of the required depth fits in the gate does not collapse it either
+(2000:400 and 1000:800 have the same availability ratio and ratios of 1.04 and
+0.75). The two model attempts are in §17.8. Reach in the truncated regime is an
+open problem; the playground interpolates the measured surface and refuses to
+extrapolate.
