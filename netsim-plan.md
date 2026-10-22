@@ -1850,6 +1850,13 @@ samples into the chart data. 1000 nodes is ~47 s per seed, 5000 is ~370 s.
 
 ### 17.7 A closed form for reach, and the size where it stops working
 
+> **Superseded by §17.11.** `theta` is the average of two populations that have
+> nothing to do with each other -- real listeners and the withheld nodes nobody
+> can dial -- so its value is set by how many addresses the run tracked. The
+> closed form below does fit the totals it was fitted to; the constant in it
+> means nothing. §17.11 derives the same totals from measured degrees with
+> nothing fitted at all.
+
 `RelayAddress` picks its targets by hashing the address against each peer id,
 and `ROTATE_ADDR_RELAY_DEST_INTERVAL` is 24 h, so within a run every node always
 picks the *same* two peers for a given address. The forward path is therefore a
@@ -1998,6 +2005,13 @@ binds.
 
 ### 17.9 theta is measured, not derived -- the derivation in 17.7 is wrong
 
+> **Superseded by §17.11, which reverses the conclusion.** The two-class fixed
+> point below is right: its 93.7% at 20% share and 96-97% at 5-10% are what the
+> measurement says once the withheld nodes are taken out of the listener class,
+> where they never belonged. It was dismissed here for disagreeing with a
+> contaminated number. The `SetupAddressRelay` hypothesis at the end is
+> measured and dead.
+
 §17.7 presents `theta = 1 - exp(-2 theta) = 0.7968` as a derived prediction of
 listener reach with nothing fitted. The number is right for listening shares up
 to about 20%. The derivation is not.
@@ -2072,6 +2086,14 @@ Listener reach against size, at a fixed share:
     20% : 1000=83.7  2000=79.4  4000=76.2  6000=72.5  8000=67.5  10000=61.4  14000=48.7
     40% : 1000=73.9  6000=36.9  10000=16.3          collapses
 
+> **The two listener-reach rows above are pooled, and §17.11 shows the pooling
+> is the whole effect.** Each mixes the 19 other withheld nodes, which cannot
+> be dialled and are reached about 11% of the time, with the real listeners,
+> which are reached 96%. Uncontaminated, 10% share goes 96.3% at 1000 nodes and
+> 94.0% at 10000, and 20% share goes 93.7% to 79.3% -- so listener reach is not
+> flat in size, and the paragraph below is wrong. The totals, and therefore the
+> turnover, are unaffected.
+
 The 10% row matters for §17.9: listener reach is flat at ~81% from 1000 to
 10000 nodes while the window grows from 5.1 to 10.6 minutes. So the ~0.80 cap
 is **not** a time artefact -- it is structural, and still unexplained, since
@@ -2089,3 +2111,152 @@ how much of the required depth fits in the gate does not collapse it either
 0.75). The two model attempts are in §17.8. Reach in the truncated regime is an
 open problem; the playground interpolates the measured surface and refuses to
 extrapolate.
+
+### 17.11 theta was a mixture of two populations, and the fixed point was right
+
+`theta = 0.797` does not exist. It is the average of two populations that have
+nothing to do with each other, and the weight in that average is a parameter of
+the *experiment* rather than of Bitcoin Core.
+
+A tracked address is withheld from the bootstrap seeding -- that is what makes
+it observable, since otherwise everyone starts out holding it. But a node whose
+address nobody has **cannot be dialled**, so it never acquires an inbound peer.
+It has eight addr-relay connections, all outbound, which is exactly what a
+non-listening node has. It is a listener only in the sense that its socket is
+open, and address relay cannot tell the difference.
+
+The new `--relay-graph` export measures the addr-relay degree of every node
+directly, and the three classes are unmistakable (400 nodes, 80 listening, 5
+withheld):
+
+| class | mean candidates |
+|---|---|
+| listener | 50.7 |
+| withheld | 8.2 |
+| non-listener | 8.0 |
+
+Split the listener class on that line and the two halves are constants:
+
+| withheld | withheld reached | the other listeners | pooled |
+|---|---|---|---|
+| 5 | 10.0% | **96.0%** | 93% |
+| 20 | 12.4% | **96.3%** | 80% |
+| 40 | 11.6% | **98.0%** | 64% |
+
+1000 nodes, 100 listening, one seed each, population and share held fixed. The
+two component populations do not move. The pooled figure moves 29 points, and
+it moves only because the mixing weight does: `theta` was
+`(T/L) * 0.11 + (1 - T/L) * 0.97`, evaluated at `T/L = 20/100`.
+
+So §17.9's conclusion was exactly backwards. Its in-degree fixed point predicts
+93.7% at 20% share and 96-97% at 5-10%; measurement now says 93.7% and 96.3%.
+**The derivation was right and the measurement was contaminated.** The
+`SetupAddressRelay` hypothesis it offered is also dead: a listener's candidate
+count is its full degree (8 + 8N/L', within half a peer), so every peer is
+eligible and nothing is being excluded.
+
+#### The model, with nothing fitted
+
+Let `L' = L - T` be the listeners that can actually be dialled; everything else,
+withheld nodes included, is in the other class. Eight of ten outbound slots
+carry addresses -- the other two are block-relay-only, which `SetupAddressRelay`
+refuses -- so
+
+    cD = 8                      non-listener candidates (measured: 8.0)
+    cL = 8 + 8N/L'              listener candidates     (measured: 50.7 at 400/80/5)
+
+`RelayAddress` picks 2, so a peer forwards to any one of its candidates with
+probability `2/cand`, and the in-degrees are
+
+    listener, from non-listeners  = (8N/L')(1 - L'/N)(2/cD)
+    listener, from listeners      = (8N/L')(L'/N)(2/cL) + 8(2/cL)
+    non-listener                  = 8(2/cL)
+
+whose two-type fixed point `x = 1 - exp(-in.x)` is the out-component of the
+forwarding digraph. Against 40 runs it predicts total reach to within a point
+wherever the wave finishes inside the gate:
+
+| N | L | T | window | model | measured push | err |
+|---|---|---|---|---|---|---|
+| 500 | 100 | 20 | 4.9 | 34.5 | 35.5 | -1.0 |
+| 1000 | 100 | 5 | 4.9 | 23.1 | 24.0 | -0.9 |
+| 1000 | 100 | 20 | 5.1 | 20.0 | 20.8 | -0.9 |
+| 1000 | 100 | 40 | 4.9 | 15.6 | 16.4 | -0.9 |
+| 1000 | 200 | 20 | 6.5 | 37.5 | 37.6 | -0.2 |
+
+It is consistently one point low, which is the 5% of forwarding edges the
+end-of-run snapshot gets wrong (see below), not a flaw in the fixed point.
+Replace `theta` and the `s*theta + (1-s)(1-exp(...))` relation with this; the
+old form fitted the same totals but by way of a constant that meant nothing.
+
+#### What the gate costs, no longer fitted
+
+With a derived ceiling the shortfall is a residual rather than a regression
+target, and it separates the regimes cleanly:
+
+| window (min) | model - measured push |
+|---|---|
+| under 7 | -2.2 to +0.2 |
+| 8.8 to 9.8 | +2.8 to +7.3 |
+| 10.6 to 11.6 | +1.9 to +20.5 |
+| 12.0 to 13.0 | +6.8 to +49.2 |
+
+The window is still not the predictor, and now it is clear why the four
+attempts in §17.8 had to fail: **the window is itself truncated.** It is the
+spread of the arrivals that happened, so once the gate bites it saturates near
+13 minutes and stops carrying information. Regressing the shortfall on it is
+circular. 10000:4000 and 14000:2800 both have a 13.0 minute window and
+shortfalls of 49.2 and 19.5 points.
+
+The quantity that is not circular is the one Core actually applies: a node
+forwards only while the stamp is under ten minutes old, and each target hears
+at that target's own next addr send, Poisson with a 30 s mean. On the exported
+graph that is first-passage percolation with a hard authorisation cutoff and
+nothing to fit -- `scratchpad/firstpass.js`. At 1000/100/5, where the gate is
+slack, it reproduces the free walk exactly (23.0% both ways against 24.0%
+measured) and predicts a 5.5 min window against 4.9 measured.
+
+#### Reading the export
+
+`--relay-graph=FILE` writes one row per (tracked address, node, rank) with the
+node it would forward to, how many it would really push to, and how many peers
+were eligible. Two things to know before trusting it.
+
+It is a **snapshot taken when the run ends**, because a plan is a function of
+the peer set and of which 24 h rotation window it is in. A node that has since
+gained or lost a peer ranks a different list from the one it ranked when it
+forwarded. Measured drift: the snapshot contains 95.0% of the forwarding edges
+actually used at 1000 nodes, 91.5% at 1000 with 40 withheld, and 75% in the
+8-minute 60-node unit test where the topology is still forming. That is the
+source of the model's consistent one-point deficit.
+
+Each row carries one **runner-up** beyond the real targets, because the peer
+that sent an address is struck out of the choice for it (`id != originator`).
+A node that hears from two different peers can therefore forward to three
+different ones, and the third-ranked peer is exactly what is needed to work
+out the out-set for any sender. This is what the earlier "the cap is
+per-received-copy and `id != originator` shifts the pair" note was pointing at.
+
+**The owner is deliberately absent from the graph.** It does not forward its
+own address through `RelayAddress` at all: `MaybeSendAddr` announces it to
+every addr-relay peer, uncapped. The seed set has to come from the arrivals.
+
+#### What this invalidates
+
+- `theta = 0.7968` and the reach relation built on it (§17.7, §17.9). The
+  totals it fitted were fine; the parameter was a mixture weight.
+- "Listener reach is flat at ~81% from 1000 to 10000 nodes, so the cap is
+  structural rather than a time artefact" (§17.10). Both figures were pooled.
+  Uncontaminated, the diallable listeners go 96.3% at 1000 and 94.0% at 10000
+  for 10% share, and 93.7% -> 79.3% for 20% share, so size *does* cut it and
+  the clock is back in the frame.
+- The `SetupAddressRelay` eligibility hypothesis (§17.9), measured and dead.
+
+§17.10's turnover survives: it is stated in totals, where the misclassified
+nodes are 19 of 1000 and worth about 1.6 points. 40% listening really does
+reach a third of what 20% reaches at ten thousand nodes.
+
+**Do not pool a class with the nodes you withheld from it.** This is the third
+time in this file that pooling two populations has produced a clean, wrong
+constant -- after the depth/window correlation of §17.5 (r = 0.87 pooled, 0.09
+within) and the mass-action recursion of §17.8.
