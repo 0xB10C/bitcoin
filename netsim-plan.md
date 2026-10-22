@@ -1418,7 +1418,12 @@ is therefore drawn from the wrong network.
 - **Initial block download**, which needs §13.1's per-node chainstates.
 - **Duplicate address volume and rate-limiter binding**, which need counters
   inside `ProcessAddrs` rather than anything observable from outside.
-- **Churn**: nodes joining and leaving mid-run.
+- **Churn**: nodes joining and leaving mid-run. Also the fix for the one
+  measured fidelity limit that changes a conclusion (§17.12): every node boots
+  at once with `m_next_local_addr_send == 0`, so every listener self-announces
+  in the first seconds and the resulting address volume trips the ten-address
+  relay limit for the first ten minutes. Mainnet spreads self-announcements
+  over 24 h and sees them at the rate connections churn.
 - **The AddrMan occupancy bitmap** from §5.3, the one remaining large memory
   win.
 - `OpenOutboundConnectionsOnce`, so the simulator calls one extracted function
@@ -2260,3 +2265,119 @@ reach a third of what 20% reaches at ten thousand nodes.
 time in this file that pooling two populations has produced a clean, wrong
 constant -- after the depth/window correlation of §17.5 (r = 0.87 pooled, 0.09
 within) and the mass-action recursion of §17.8.
+
+### 17.12 It was never the ten minutes. It is the ten addresses.
+
+`ProcessAddrs` forwards an address only if **both** conditions hold
+(`net_processing.cpp:6044`):
+
+    addr.nTime > current_time - 10min        the stamp is fresh
+    vAddr.size() <= 10                       the message is small
+
+Eleven sections of this file treated the first as the constraint and never
+measured the second. `relayed` has been in the arrivals export the whole time,
+and `path` says which condition failed -- a push is a message of ten or fewer,
+so a push that was not relayed can only have been too old. Share of first
+arrivals, by fate:
+
+| config | relayed | too big | too old |
+|---|---|---|---|
+| 1000:100 | 100.0% | 0.0% | 0.0% |
+| 1000:200 | 98.1% | 1.9% | 0.0% |
+| 1000:400 | 90.5% | 9.3% | 0.1% |
+| 1000:800 | 81.2% | 17.4% | 1.5% |
+| 2000:400 | 93.4% | 6.5% | 0.0% |
+| 4000:800 | 90.6% | 9.2% | 0.2% |
+| 10000:2000 | 80.1% | 16.0% | 3.9% |
+| 10000:4000 | 65.0% | 27.6% | 7.4% |
+| 14000:2800 | 73.9% | 19.3% | 6.8% |
+
+**The ten-minute gate never costs more than 7.4%, and the ten-address limit
+costs two to four times as much everywhere.** Every "truncation regime" result
+in §17.7 through §17.10 was attributing to the clock something the clock was
+barely doing.
+
+#### Not GETADDR either
+
+The new `batch` column settles what those oversized messages are. At 1000:800,
+over 13,379 first arrivals, the largest message carrying a tracked address held
+**37** addresses and **none held more than 100**. A GETADDR reply is a sample
+of a whole table -- hundreds of addresses at this population -- so not one of
+these arrivals came from one. They are ordinary relay batches that happened to
+carry eleven or more.
+
+That also corrects §17.6, which explains spread past the gate by GETADDR
+keeping on making holders. Arrivals after the ten minutes are 217 of 13,379
+(1.6%), and 96.8% of them arrived in messages of ten or fewer: they are the
+`m_next_addr_send` tail, deliveries authorised in time and delivered late.
+Storing is indeed ungated, but that is not what was happening.
+
+#### Where the oversized messages come from
+
+Not from tracking twenty addresses. Four seeds at `--tracked=1`:
+
+| config | tracked=20 | tracked=1 |
+|---|---|---|
+| 1000:800 | 17.4% | 15.7, 16.6, 17.7, 19.8% |
+| 4000:800 | 9.2% | 12.3, 9.9, 9.2, 9.2% |
+
+Unchanged. The volume is the **population's own self-announcements**, and
+netsim starts every node at once with `m_next_local_addr_send == 0`, so every
+one of them announces in the first seconds. Batch size by minute, 1000:800:
+
+    minute    0     1     2     3     5     8    10    11
+    mean    3.8   7.5   8.6   7.5   6.5   5.1   3.7   2.8
+    >10    2.9% 22.2% 32.0% 22.3% 17.2%  9.4%  3.2%  0.0%
+
+A storm that peaks at minute two and is over by minute eleven. Mainnet has no
+equivalent: `AVG_LOCAL_ADDRESS_BROADCAST_INTERVAL` is 24 h, so the rate of
+self-announcements is set by how fast connections churn, not by a simultaneous
+boot. **This is the first measured fidelity limit of the simulator that changes
+a conclusion**, and it belongs in §15.
+
+It also explains why the loss tracks the listening share: `MaybeSendAddr` gates
+self-announcement on `m_connman.IsListening()`, so only listeners announce, and
+the storm is proportional to exactly the quantity §17.10 was varying.
+
+#### The prediction, end to end
+
+First-passage percolation on the exported graph with Core's own rules --
+Exp(30 s) per edge from `AVG_ADDRESS_BROADCAST_INTERVAL`, a hard 600 s
+authorisation cutoff, and the measured per-minute loss curve as the only input
+beyond the graph and the seed set (`scratchpad/firstpass.js`):
+
+| config | predicted | measured push | err | window pred/meas | cost of the gate |
+|---|---|---|---|---|---|
+| 1000:100:5 | 23.0 | 24.0 | -1.0 | 5.5 / 4.9 | 0.0 |
+| 4000:800 | 34.1 | 34.7 | **-0.6** | 9.9 / 10.7 | 0.1 |
+| 10000:2000 | 30.2 | 27.2 | **+3.0** | 11.5 / 12.5 | 0.4 |
+
+So §17.8's open problem is closed, and the answer is that it was the wrong
+question. Reach in the "truncated" regime is predictable to a few points from
+the graph plus the loss curve, and **the ten-minute gate contributes under half
+a point of it.** What four fits could not find was not a hidden variable; it
+was a mechanism that nobody had measured.
+
+#### What this does to §17.10
+
+The turnover is still there in the data, but its mechanism is the storm, not
+the clock. Running the derived model at a settled network's loss rate instead
+of the storm's:
+
+    10,000 nodes, reach at 5/10/20/40/80% listening
+    measured (storm)     12.4   21.7   27.2   10.3     --
+    model at 3% loss     12.4   23.0   39.0   58.0   74.3
+
+Monotone. The turnover disappears. A caveat on the caveat: the model at the
+*measured* loss gives 40.1% for 10000:4000 against 10.3% measured, so uniform
+loss does not reproduce the collapse either -- the losses cluster in the first
+two minutes, when the wave is a few nodes wide and losing a forwarder costs a
+whole subtree. The per-minute curve above is what captures that, and it needs
+the graph.
+
+**What to carry forward.** The mechanism -- the ten-address limit tripped by
+address volume, which rises with the listening share -- is real Core behaviour
+and worth knowing. The magnitude measured here is not transferable to mainnet,
+because the volume is inflated by the simultaneous start. Do not quote the
+turnover as a property of Bitcoin Core. Quoting it as a property of a network
+that all booted at once is fair, and is also a real scenario.
