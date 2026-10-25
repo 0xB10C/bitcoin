@@ -84,6 +84,16 @@ inline constexpr unsigned int DEFAULT_MAX_PEER_CONNECTIONS{200};
 inline constexpr int MAX_PEER_CONNECTIONS{2'000};
 /** Default percentage of inbound connection slots that tx-relaying peers can use */
 inline constexpr int DEFAULT_FULL_RELAY_INBOUND_PCT{50};
+/** Length of the window in which an inbound connection attempt counts as recent.
+ *  An address is remembered for between one and two windows after its last
+ *  attempt, see CConnman::RecordInboundAttempt(). */
+inline constexpr std::chrono::minutes INBOUND_RECONNECT_WINDOW{10};
+/** How many earlier inbound connection attempts an address must have made
+ *  within that time before a further attempt may no longer evict an existing
+ *  peer. Two, so that a single honest retry is never enough: the connecting
+ *  peer retries once with v1 when we closed its connection before it received
+ *  anything, and a restarting node reconnects once. */
+inline constexpr int INBOUND_RECONNECT_THRESHOLD{2};
 /** The default for -maxuploadtarget. 0 = Unlimited */
 inline const std::string DEFAULT_MAX_UPLOAD_TARGET{"0M"};
 /** Default for blocks only*/
@@ -677,6 +687,7 @@ struct CNodeOptions
     std::optional<Proxy> proxy_override = {};
     std::unique_ptr<i2p::sam::Session> i2p_sam_session = nullptr;
     bool prefer_evict = false;
+    bool recent_reconnect = false;
     size_t recv_flood_size{DEFAULT_MAXRECEIVEBUFFER * 1000};
     bool use_v2transport = false;
 };
@@ -738,6 +749,9 @@ public:
      */
     std::string cleanSubVer GUARDED_BY(m_subver_mutex){};
     const bool m_prefer_evict{false}; // This peer is preferred for eviction.
+    /** The address of this inbound peer made another connection attempt
+     *  shortly before this one, see CConnman::RecordInboundAttempt(). */
+    const bool m_recent_reconnect{false};
     bool HasPermission(NetPermissionFlags permission) const {
         return NetPermissions::HasFlag(m_permission_flags, permission);
     }
@@ -1093,6 +1107,8 @@ public:
         ServiceFlags m_local_services = NODE_NONE;
         int m_max_automatic_connections = DEFAULT_MAX_PEER_CONNECTIONS;
         int m_full_relay_inbound_percent = DEFAULT_FULL_RELAY_INBOUND_PCT;
+        /// Apply the inbound reconnect check to local addresses too (test only).
+        bool m_reconnect_check_local = false;
         CClientUIInterface* uiInterface = nullptr;
         NetEventsInterface* m_msgproc = nullptr;
         BanMan* m_banman = nullptr;
@@ -1129,6 +1145,7 @@ public:
         m_max_automatic_outbound = m_max_outbound_full_relay + m_max_outbound_block_relay + m_max_feeler;
         m_max_inbound = std::max(0, m_max_automatic_connections - m_max_automatic_outbound);
         m_max_inbound_full_relay = std::max(0, static_cast<int>(connOptions.m_full_relay_inbound_percent / 100.0 * m_max_inbound));
+        m_reconnect_check_local = connOptions.m_reconnect_check_local;
         m_use_addrman_outgoing = connOptions.m_use_addrman_outgoing;
         m_client_interface = connOptions.uiInterface;
         m_banman = connOptions.m_banman;
@@ -1360,6 +1377,8 @@ public:
      *                                so that the caller can deal with this.
      */
     bool EvictTxPeerIfFull(std::optional<NodeId> protect_peer = std::nullopt) EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+    /** Whether we have more inbound tx-relaying peers than allowed. */
+    bool InboundTxRelayFull() const EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
 
     bool AddNode(const AddedNodeParams& add) EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex);
     bool RemoveAddedNode(std::string_view node) EXCLUSIVE_LOCKS_REQUIRED(!m_added_nodes_mutex);
@@ -1478,9 +1497,9 @@ private:
     /// \anchor msghand
     void ThreadMessageHandler() EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !mutexMsgProc);
     /// \anchor i2paccept
-    void ThreadI2PAcceptIncoming() EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+    void ThreadI2PAcceptIncoming() EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_recent_inbound_mutex);
     void ThreadPrivateBroadcast() EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_unused_i2p_sessions_mutex);
-    void AcceptConnection(const ListenSocket& hListenSocket) EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+    void AcceptConnection(const ListenSocket& hListenSocket) EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_recent_inbound_mutex);
 
     /**
      * Create a `CNode` object from a socket that has just been accepted and add the node to
@@ -1494,7 +1513,7 @@ private:
                                       NetPermissionFlags permission_flags,
                                       const CService& addr_bind,
                                       const CService& addr)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_recent_inbound_mutex);
 
     void DisconnectNodes() EXCLUSIVE_LOCKS_REQUIRED(!m_reconnections_mutex, !m_nodes_mutex);
     void NotifyNumConnectionsChanged() EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
@@ -1511,7 +1530,7 @@ private:
     /**
      * Check connected and listening sockets for IO readiness and process them accordingly.
      */
-    void SocketHandler() EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_total_bytes_sent_mutex, !mutexMsgProc);
+    void SocketHandler() EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_total_bytes_sent_mutex, !mutexMsgProc, !m_recent_inbound_mutex);
 
     /**
      * Do the read/write for connected sockets that are ready for IO.
@@ -1527,10 +1546,10 @@ private:
      * @param[in] events_per_sock Sockets that are ready for IO.
      */
     void SocketHandlerListening(const Sock::EventsPerSock& events_per_sock)
-        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex);
+        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_recent_inbound_mutex);
 
     /// \anchor net
-    void ThreadSocketHandler() EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex, !mutexMsgProc, !m_nodes_mutex, !m_reconnections_mutex);
+    void ThreadSocketHandler() EXCLUSIVE_LOCKS_REQUIRED(!m_total_bytes_sent_mutex, !mutexMsgProc, !m_nodes_mutex, !m_reconnections_mutex, !m_recent_inbound_mutex);
     /// \anchor dnsseed
     void ThreadDNSAddressSeed() EXCLUSIVE_LOCKS_REQUIRED(!m_addr_fetches_mutex, !m_nodes_mutex);
 
@@ -1739,6 +1758,36 @@ private:
     int m_max_automatic_outbound;
     int m_max_inbound;
     int m_max_inbound_full_relay;
+
+    /** Whether the inbound reconnect check also applies to local addresses. */
+    bool m_reconnect_check_local{false};
+
+    /** Addresses (IPv6: /48s) that made inbound connection attempts in the
+     *  current and the previous INBOUND_RECONNECT_WINDOW. Used to avoid
+     *  evicting an existing peer for an address that was here a moment ago.
+     *
+     *  The time bounds come from rotating the two filters on the wall clock:
+     *  an entry is never kept for more than two windows. The filters' own
+     *  expiry is by insert count, so an entry is only guaranteed to last one
+     *  full window while fewer than 5000 new entries (at most two per address)
+     *  are inserted per window. Beyond that the oldest entries are forgotten
+     *  early, which only means that an address is treated as new again, i.e.
+     *  the behaviour degrades towards not having this check at all. */
+    Mutex m_recent_inbound_mutex;
+    CRollingBloomFilter m_recent_inbound_cur GUARDED_BY(m_recent_inbound_mutex){5000, 0.000001};
+    CRollingBloomFilter m_recent_inbound_prev GUARDED_BY(m_recent_inbound_mutex){5000, 0.000001};
+    NodeClock::time_point m_recent_inbound_rotated GUARDED_BY(m_recent_inbound_mutex){};
+
+    /**
+     * Record an inbound connection attempt from an address.
+     * @param[in]   addr    The peer's address. IPv6 addresses are keyed by their /48.
+     * @param[in]   now     The current time.
+     * @return      bool    True if the same key already made at least
+     *                      INBOUND_RECONNECT_THRESHOLD attempts within the
+     *                      last one to two INBOUND_RECONNECT_WINDOWs, not
+     *                      counting this call.
+     */
+    bool RecordInboundAttempt(const CNetAddr& addr, NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(!m_recent_inbound_mutex);
 
     bool m_use_addrman_outgoing;
     CClientUIInterface* m_client_interface;

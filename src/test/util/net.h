@@ -80,6 +80,7 @@ struct ConnmanTestMsg : public CConnman {
                                             NetPermissionFlags permissions,
                                             const CAddress& addr_bind,
                                             const CAddress& addr_peer)
+        EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_recent_inbound_mutex)
     {
         CreateNodeFromAcceptedSocket(std::move(sock), permissions, addr_bind, addr_peer);
     }
@@ -89,7 +90,12 @@ struct ConnmanTestMsg : public CConnman {
         return InitBinds(options);
     }
 
-    void SocketHandlerPublic()
+    bool RecordInboundAttemptPublic(const CNetAddr& addr, NodeClock::time_point now) EXCLUSIVE_LOCKS_REQUIRED(!m_recent_inbound_mutex)
+    {
+        return RecordInboundAttempt(addr, now);
+    }
+
+    void SocketHandlerPublic() EXCLUSIVE_LOCKS_REQUIRED(!m_nodes_mutex, !m_total_bytes_sent_mutex, !mutexMsgProc, !m_recent_inbound_mutex)
     {
         SocketHandler();
     }
