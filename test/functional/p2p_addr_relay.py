@@ -31,6 +31,7 @@ from test_framework.util import (
 )
 
 ONE_MINUTE  = 60
+FIVE_MINUTES = 5 * ONE_MINUTE
 TEN_MINUTES = 10 * ONE_MINUTE
 ONE_HOUR    = 60 * ONE_MINUTE
 TWO_HOURS   =  2 * ONE_HOUR
@@ -113,7 +114,11 @@ class AddrTest(BitcoinTestFramework):
         addrs = []
         for i in range(num):
             addr = CAddress()
-            addr.time = self.mocktime + random.randrange(-100, 100)
+            # Stamp the addresses in the middle of the relay window. They have
+            # to be no more than MAX_ADDR_GOSSIP_AGE in the future when the node
+            # receives them, and no more than MAX_ADDR_GOSSIP_AGE old when the
+            # send timer fires TEN_MINUTES later, or they are dropped unsent.
+            addr.time = self.mocktime + FIVE_MINUTES + random.randrange(-100, 100)
             addr.nServices = P2P_SERVICES
             if sequential_ips:
                 assert self.counter < 256 ** 2  # Don't allow the returned ip addresses to wrap.
@@ -222,7 +227,7 @@ class AddrTest(BitcoinTestFramework):
         # addr_source sends 2 addresses to node0
         msg = self.setup_addr_msg(2)
         addr_source.send_and_ping(msg)
-        self.mocktime += 30 * 60
+        self.mocktime += TEN_MINUTES
         self.nodes[0].setmocktime(self.mocktime)
         receiver_peer.sync_with_ping()
         blackhole_peer.sync_with_ping()
@@ -405,7 +410,9 @@ class AddrTest(BitcoinTestFramework):
 
         for _ in range(10):
             self.mocktime += time_interval_1
-            self.msg.addrs[0].time = self.mocktime + TEN_MINUTES
+            # Keep the address in the middle of the relay window, so that it is
+            # still fresh when the send timer is invoked time_interval_2 later.
+            self.msg.addrs[0].time = self.mocktime + FIVE_MINUTES
             self.nodes[0].setmocktime(self.mocktime)
             with self.nodes[0].assert_debug_log(['received: addr (31 bytes) peer=0']):
                 peer.send_and_ping(self.msg)
@@ -424,7 +431,10 @@ class AddrTest(BitcoinTestFramework):
         peer = self.nodes[0].add_p2p_connection(P2PInterface())
         receiver_peer = self.nodes[0].add_p2p_connection(AddrReceiver())
         addr_receivers = [self.nodes[0].add_p2p_connection(AddrReceiver()) for _ in range(20)]
-        nodes_received_addr = self.get_nodes_that_received_addr(peer, receiver_peer, addr_receivers, 0, TWO_HOURS)  # 10 intervals of 2 hours
+        # 10 intervals of 2 hours, each followed by the TEN_MINUTES needed to
+        # invoke the send timer, so ~21.7 hours in total: long enough to allow a
+        # rotation, short enough to stay within 24 hours.
+        nodes_received_addr = self.get_nodes_that_received_addr(peer, receiver_peer, addr_receivers, TWO_HOURS, TEN_MINUTES)
         # Per RelayAddress, we would announce these addrs to 2 destinations per day.
         # Since it's at most one rotation, at most 4 nodes can receive ADDR.
         assert_greater_than_or_equal(ADDR_DESTINATIONS_THRESHOLD, len(nodes_received_addr))
@@ -438,8 +448,10 @@ class AddrTest(BitcoinTestFramework):
         peer = self.nodes[0].add_p2p_connection(P2PInterface())
         receiver_peer = self.nodes[0].add_p2p_connection(AddrReceiver())
         addr_receivers = [self.nodes[0].add_p2p_connection(AddrReceiver()) for _ in range(20)]
-        # 10 intervals of 1 day (+ 1 hour, which should be enough to cover 30-min Poisson in most cases)
-        nodes_received_addr = self.get_nodes_that_received_addr(peer, receiver_peer, addr_receivers, ONE_DAY, ONE_HOUR)
+        # 10 intervals of 1 day, each followed by the TEN_MINUTES needed to
+        # invoke the send timer (mean 30s, so this fires with probability
+        # 1 - e^-20; see send_addr_msg()).
+        nodes_received_addr = self.get_nodes_that_received_addr(peer, receiver_peer, addr_receivers, ONE_DAY, TEN_MINUTES)
         # Now that there should have been more than one rotation, more than
         # ADDR_DESTINATIONS_THRESHOLD nodes should have received ADDR.
         assert_greater_than(len(nodes_received_addr), ADDR_DESTINATIONS_THRESHOLD)

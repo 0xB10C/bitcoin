@@ -204,6 +204,8 @@ static constexpr double MAX_ADDR_RATE_PER_SECOND{0.1};
  *  based increments won't go above this, but the MAX_ADDR_TO_SEND increment following GETADDR
  *  is exempt from this limit). */
 static constexpr size_t MAX_ADDR_PROCESSING_TOKEN_BUCKET{MAX_ADDR_TO_SEND};
+/** The maximum age of an address that we are going to relay. */
+static constexpr auto MAX_ADDR_GOSSIP_AGE{10min};
 /** Private broadcast connections must complete within this time. Disconnect the peer if it takes longer. */
 static constexpr auto PRIVATE_BROADCAST_MAX_CONNECTION_LIFETIME{3min};
 
@@ -340,8 +342,18 @@ struct Peer {
         return WITH_LOCK(m_tx_relay_mutex, return m_tx_relay.get());
     };
 
+    /** An address queued for sending to the peer. */
+    struct AddrToSend {
+        CAddress addr;
+        /** Whether this address is subject to the MAX_ADDR_GOSSIP_AGE check when
+         *  the send timer fires. True for addresses forwarded from a peer's addr
+         *  gossip, which are only worth relaying while still fresh. False for
+         *  GETADDR responses, which are drawn from AddrMan and are expected to be
+         *  old, and for our own self-announcements. */
+        bool gossip;
+    };
     /** A vector of addresses to send to the peer, limited to MAX_ADDR_TO_SEND. */
-    std::vector<CAddress> m_addrs_to_send GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
+    std::vector<AddrToSend> m_addrs_to_send GUARDED_BY(NetEventsInterface::g_msgproc_mutex);
     /** Probabilistic filter to track recent addr messages relayed with this
      *  peer. Used to avoid relaying redundant addresses to this peer.
      *
@@ -1177,7 +1189,7 @@ private:
         EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex, !m_peer_mutex);
 
     void AddAddressKnown(Peer& peer, const CAddress& addr) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
-    void PushAddress(Peer& peer, const CAddress& addr) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
+    void PushAddress(Peer& peer, const CAddress& addr, bool gossip) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
 
     void LogBlockHeader(const CBlockIndex& index, const CNode& peer, bool via_compact_block);
 
@@ -1222,7 +1234,7 @@ void PeerManagerImpl::AddAddressKnown(Peer& peer, const CAddress& addr)
     peer.m_addr_known->insert(addr.GetKey());
 }
 
-void PeerManagerImpl::PushAddress(Peer& peer, const CAddress& addr)
+void PeerManagerImpl::PushAddress(Peer& peer, const CAddress& addr, bool gossip)
 {
     // Known checking here is only to save space from duplicates.
     // Before sending, we'll filter it again for known addresses that were
@@ -1230,9 +1242,9 @@ void PeerManagerImpl::PushAddress(Peer& peer, const CAddress& addr)
     assert(peer.m_addr_known);
     if (addr.IsValid() && !peer.m_addr_known->contains(addr.GetKey()) && IsAddrCompatible(peer, addr)) {
         if (peer.m_addrs_to_send.size() >= MAX_ADDR_TO_SEND) {
-            peer.m_addrs_to_send[m_rng.randrange(peer.m_addrs_to_send.size())] = addr;
+            peer.m_addrs_to_send[m_rng.randrange(peer.m_addrs_to_send.size())] = {addr, gossip};
         } else {
-            peer.m_addrs_to_send.push_back(addr);
+            peer.m_addrs_to_send.push_back({addr, gossip});
         }
     }
 }
@@ -2553,7 +2565,7 @@ void PeerManagerImpl::RelayAddress(NodeId originator,
     };
 
     for (unsigned int i = 0; i < nRelayNodes && best[i].first != 0; i++) {
-        PushAddress(*best[i].second, addr);
+        PushAddress(*best[i].second, addr, /*gossip=*/true);
     }
 }
 
@@ -5178,7 +5190,7 @@ void PeerManagerImpl::ProcessMessage(Peer& peer, CNode& pfrom, const std::string
             vAddr = m_connman.GetAddresses(pfrom, MAX_ADDR_TO_SEND, MAX_PCT_ADDR_TO_SEND);
         }
         for (const CAddress &addr : vAddr) {
-            PushAddress(peer, addr);
+            PushAddress(peer, addr, /*gossip=*/false);
         }
         return;
     }
@@ -5764,7 +5776,7 @@ void PeerManagerImpl::MaybeSendAddr(CNode& node, Peer& peer, std::chrono::micros
                 }
             } else {
                 // All later self-announcements are sent together with the other addresses.
-                PushAddress(peer, local_addr);
+                PushAddress(peer, local_addr, /*gossip=*/false);
             }
         }
         peer.m_next_local_addr_send = current_time + m_rng.rand_exp_duration(AVG_LOCAL_ADDRESS_BROADCAST_INTERVAL);
@@ -5781,11 +5793,22 @@ void PeerManagerImpl::MaybeSendAddr(CNode& node, Peer& peer, std::chrono::micros
         peer.m_addrs_to_send.resize(MAX_ADDR_TO_SEND);
     }
 
+    // Drop gossiped addresses that went stale while they were queued here. The
+    // receiving peer applies the same age check, so it would not forward such an
+    // address any further; relaying it anyway identifies us as its last hop and
+    // leaks topology. This runs before the m_addr_known pass below so that a
+    // dropped address is not marked as known, leaving a later, fresher
+    // announcement of it free to go out.
+    const auto stale_before{Now<NodeSeconds>() - MAX_ADDR_GOSSIP_AGE};
+    std::erase_if(peer.m_addrs_to_send, [stale_before](const Peer::AddrToSend& entry) {
+        return entry.gossip && entry.addr.nTime <= stale_before;
+    });
+
     // Remove addr records that the peer already knows about, and add new
     // addrs to the m_addr_known filter on the same pass.
-    auto addr_already_known = [&peer](const CAddress& addr) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex) {
-        bool ret = peer.m_addr_known->contains(addr.GetKey());
-        if (!ret) peer.m_addr_known->insert(addr.GetKey());
+    auto addr_already_known = [&peer](const Peer::AddrToSend& entry) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex) {
+        bool ret = peer.m_addr_known->contains(entry.addr.GetKey());
+        if (!ret) peer.m_addr_known->insert(entry.addr.GetKey());
         return ret;
     };
     std::erase_if(peer.m_addrs_to_send, addr_already_known);
@@ -5793,10 +5816,14 @@ void PeerManagerImpl::MaybeSendAddr(CNode& node, Peer& peer, std::chrono::micros
     // No addr messages to send
     if (peer.m_addrs_to_send.empty()) return;
 
+    std::vector<CAddress> addrs_to_send;
+    addrs_to_send.reserve(peer.m_addrs_to_send.size());
+    for (const auto& entry : peer.m_addrs_to_send) addrs_to_send.push_back(entry.addr);
+
     if (peer.m_wants_addrv2) {
-        MakeAndPushMessage(node, NetMsgType::ADDRV2, CAddress::V2_NETWORK(peer.m_addrs_to_send));
+        MakeAndPushMessage(node, NetMsgType::ADDRV2, CAddress::V2_NETWORK(addrs_to_send));
     } else {
-        MakeAndPushMessage(node, NetMsgType::ADDR, CAddress::V1_NETWORK(peer.m_addrs_to_send));
+        MakeAndPushMessage(node, NetMsgType::ADDR, CAddress::V1_NETWORK(addrs_to_send));
     }
     peer.m_addrs_to_send.clear();
 
@@ -6024,7 +6051,7 @@ void PeerManagerImpl::ProcessAddrs(std::string_view msg_type, CNode& pfrom, Peer
         }
         ++num_proc;
         const bool reachable{g_reachable_nets.Contains(addr)};
-        if (addr.nTime > current_time - 10min && vAddr.size() <= 10 && addr.IsRoutable()) {
+        if (addr.nTime > current_time - MAX_ADDR_GOSSIP_AGE && vAddr.size() <= 10 && addr.IsRoutable()) {
             // Relay to a limited number of other nodes
             RelayAddress(pfrom.GetId(), addr, reachable);
         }

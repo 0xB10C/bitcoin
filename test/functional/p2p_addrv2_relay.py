@@ -26,7 +26,10 @@ ONION_ADDR = "pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion"
 ADDRS = []
 for i in range(10):
     addr = CAddress()
-    addr.time = int(time.time()) + i
+    # Stamp the addresses in the middle of the relay window, so that they are
+    # neither too far in the future when received nor too old once the send
+    # timer is invoked below by moving mocktime 10 minutes forward.
+    addr.time = int(time.time()) + 5 * 60 + i
     addr.port = 8333 + i
     addr.nServices = P2P_SERVICES
     # Add one I2P and one onion V3 address at an arbitrary position.
@@ -95,7 +98,7 @@ class AddrTest(BitcoinTestFramework):
                 f'sending addrv2 ({msg_size} bytes) peer=2',
         ]):
             addr_source.send_and_ping(msg)
-            self.nodes[0].setmocktime(int(time.time()) + 30 * 60)
+            self.nodes[0].setmocktime(int(time.time()) + 10 * 60)
             addr_receiver.wait_for_addrv2()
 
         assert addr_receiver.addrv2_received_and_checked
